@@ -92,7 +92,6 @@ import {
   resolveTabGroupLabel,
   resolveTabGroupLogo,
   resolveTabGroupMascot,
-  TAB_GROUP_COLORS,
 } from "../lib/tabGroups";
 import { useDragResize } from "../hooks/useDragResize";
 import { useGitFileStatuses } from "../hooks/useGitFileStatuses";
@@ -101,14 +100,13 @@ import { useLockOverscroll } from "../hooks/useLockOverscroll";
 import { useProjectDiffStats } from "../hooks/useProjectDiffStats";
 import { useSortable } from "../hooks/useSortable";
 import { useTabGroupLogos } from "../hooks/useTabGroupLogos";
-import { normalizeHex } from "../lib/colorUtils";
 import {
   looksLikeProject,
   sameProjectPath,
   type RecentProject,
 } from "../lib/recents";
 import { CwdPicker } from "./CwdPicker";
-import { ColorPickerPopover, ColorSwatchRow } from "./ColorPickerPopover";
+import { FolderColorSwatches } from "./FolderColorSwatches";
 import { ExplorerMenu, type ExplorerMenuItem } from "./ExplorerMenu";
 import { FileTree } from "./FileTree";
 import { HarnessIcon } from "./HarnessIcon";
@@ -1587,36 +1585,6 @@ function sessionListDropFromPoint(
   if (cardId) return { kind: "session", id: cardId };
   if (folderId) return { kind: "folder", id: folderId };
   return null;
-}
-
-function FolderColorSwatches({
-  colorIndex,
-  customColor,
-  onChange,
-  onCustomChange,
-}: {
-  colorIndex: number | undefined;
-  customColor: string | undefined;
-  onChange: (index: number | null) => void;
-  onCustomChange: (color: string) => void;
-}) {
-  const paletteColor =
-    colorIndex != null ? TAB_GROUP_COLORS[colorIndex] : TAB_GROUP_COLORS[0];
-  const pickerValue =
-    customColor ?? normalizeHex(paletteColor ?? TAB_GROUP_COLORS[0]);
-  return (
-    <div className="px-1 py-1">
-      <ColorSwatchRow
-        colors={TAB_GROUP_COLORS}
-        colorIndex={colorIndex}
-        customColor={customColor}
-        customPickerOpen
-        customHighlighted={customColor != null}
-        onPickIndex={(index) => onChange(index === 0 ? null : index)}
-      />
-      <ColorPickerPopover value={pickerValue} onChange={onCustomChange} />
-    </div>
-  );
 }
 
 function FolderRow({

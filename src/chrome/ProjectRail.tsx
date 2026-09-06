@@ -4,7 +4,9 @@ import {
   ChevronDown,
   ChevronUp,
   CircleAlert,
+  Folder,
   FolderOpen,
+  FolderPlus,
   Inbox,
   MoreHorizontal,
   Pin,
@@ -14,8 +16,17 @@ import {
   Search,
   Settings,
   Trash2,
+  X,
 } from "./icons";
-import { useEffect, useMemo, useRef, useState, type MouseEvent } from "react";
+import {
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type MouseEvent,
+  type PointerEvent as ReactPointerEvent,
+  type ReactNode,
+} from "react";
 import { useDragResize } from "../hooks/useDragResize";
 import { useLockOverscroll } from "../hooks/useLockOverscroll";
 import { useProjectDiffStats } from "../hooks/useProjectDiffStats";
@@ -43,6 +54,29 @@ import {
   type RecentProject,
 } from "../lib/recents";
 import {
+  addProjectToGroup,
+  buildProjectGroupEntries,
+  createGroupWithProjects,
+  dissolveGroup,
+  groupContaining,
+  loadProjectGroups,
+  pruneProjectGroups,
+  removeProjectFromGroup,
+  renameGroup,
+  reorderGroupContainers,
+  saveProjectGroups,
+  setGroupCollapsed,
+  setGroupColor,
+  setGroupCustomColor,
+  setGroupPinned,
+  setGroupProjects,
+  splitUnifiedOrder,
+  UNGROUPED_MARKER,
+  type ProjectGroup,
+  type ProjectGroupEntry,
+} from "../lib/projectGroups";
+import { folderAccent, folderShellFill } from "../lib/sessionFolders";
+import {
   loadTabGroupColors,
   loadTabGroupCustomColors,
   loadTabGroupLabels,
@@ -59,6 +93,8 @@ import {
   saveTabGroupMascot,
 } from "../lib/tabGroups";
 import { formatLiveElapsed, type LiveAgent } from "../lib/liveAgents";
+import { ExplorerMenu, type ExplorerMenuItem } from "./ExplorerMenu";
+import { FolderColorSwatches } from "./FolderColorSwatches";
 import { HarnessIcon } from "./HarnessIcon";
 import { ProjectLogoIcon } from "./ProjectLogoIcon";
 import { ProjectMascot } from "./ProjectMascot";
@@ -82,13 +118,31 @@ const REVEAL_LABEL = IS_MAC
 function projectMenuExtraItems(
   pinned: boolean,
   canRemove: boolean,
+  memberOfId: string | undefined,
+  groups: ProjectGroup[],
 ): TabGroupMenuExtraItem[] {
   const items: TabGroupMenuExtraItem[] = [
-    pinned
-      ? { id: "unpin", label: "Unpin project", icon: PinOff }
-      : { id: "pin", label: "Pin project", icon: Pin },
+    { id: "group-new", label: "New group", icon: FolderPlus },
+    ...(memberOfId
+      ? []
+      : [
+          pinned
+            ? { id: "unpin", label: "Unpin project", icon: PinOff }
+            : { id: "pin", label: "Pin project", icon: Pin },
+        ]),
     { id: "reveal", label: REVEAL_LABEL, icon: FolderOpen },
   ];
+  for (const group of groups) {
+    if (group.id === memberOfId) continue;
+    items.push({
+      id: `group-add:${group.id}`,
+      label: `Add to ${group.name}`,
+      icon: Folder,
+    });
+  }
+  if (memberOfId) {
+    items.push({ id: "group-remove", label: "Remove from group", icon: X });
+  }
   if (canRemove) {
     items.push(
       { id: "archive", label: "Archive", icon: Archive, sepBefore: true },
@@ -189,6 +243,13 @@ export function ProjectRail({
     path: string;
     name: string;
   } | null>(null);
+  const [projectGroups, setProjectGroups] = useState(loadProjectGroups);
+  const [groupMenu, setGroupMenu] = useState<{
+    x: number;
+    y: number;
+    groupId: string;
+  } | null>(null);
+  const [renamingGroupId, setRenamingGroupId] = useState<string | null>(null);
   const lockOverscroll = useLockOverscroll<HTMLDivElement>();
   const scrollRef = useRef<HTMLDivElement>(null);
   const groupLogos = useTabGroupLogos();
@@ -200,6 +261,21 @@ export function ProjectRail({
     () => projectRailSections(recents, cwd, railOrder, pinnedPaths),
     [cwd, pinnedPaths, railOrder, recents],
   );
+  const groupEntries = useMemo(
+    () =>
+      buildProjectGroupEntries(sections.projects, projectGroups, pinnedPaths),
+    [pinnedPaths, projectGroups, sections.projects],
+  );
+  const groupBlocks = groupEntries.filter(
+    (entry): entry is GroupEntry => entry.kind === "group",
+  );
+  const pinnedGroupBlocks = groupBlocks.filter((entry) => entry.group.pinned);
+  const projectsGroupBlocks = groupBlocks.filter(
+    (entry) => !entry.group.pinned,
+  );
+  const ungroupedProjects = groupEntries
+    .filter((entry) => entry.kind === "project")
+    .map((entry) => entry.project);
   const busy = useMemo(() => {
     const set = new Set<string>();
     for (const path of busyPaths ?? []) set.add(path);
@@ -223,14 +299,30 @@ export function ProjectRail({
       return next;
     });
   }, [allProjects]);
+  useEffect(() => {
+    setProjectGroups((current) => {
+      const next = pruneProjectGroups(current, new Set(allProjects.keys()));
+      if (next === current) return current;
+      saveProjectGroups(next);
+      return next;
+    });
+  }, [allProjects]);
 
   useEffect(() => {
-    if (!projectMenu) return;
-    const onScroll = () => setProjectMenu(null);
+    if (!projectMenu && !groupMenu) return;
+    const onScroll = () => {
+      setProjectMenu(null);
+      setGroupMenu(null);
+    };
     const scrollParent = scrollRef.current ?? window;
     scrollParent.addEventListener("scroll", onScroll, true);
     return () => scrollParent.removeEventListener("scroll", onScroll, true);
-  }, [projectMenu]);
+  }, [projectMenu, groupMenu]);
+
+  const commitProjectGroups = (next: ProjectGroup[]) => {
+    setProjectGroups(next);
+    saveProjectGroups(next);
+  };
 
   const openProjectMenu = (path: string, x: number, y: number) => {
     setProjectMenu({
@@ -301,11 +393,18 @@ export function ProjectRail({
     saveProjectRailOrder(next);
   };
 
-  const onReorderProjects = (ids: string[]) => {
-    const subset = new Set(sections.projects.map((item) => item.path));
-    const next = reorderSubset(railOrder, ids, subset);
-    setRailOrder(next);
-    saveProjectRailOrder(next);
+  const onFlatReorder = (ids: string[]) => {
+    const { groupOrders, ungrouped } = splitUnifiedOrder(ids);
+    let next = projectGroups;
+    for (const { groupId, paths } of groupOrders) {
+      next = setGroupProjects(next, groupId, paths);
+    }
+    if (next !== projectGroups) commitProjectGroups(next);
+    const reordered = reorderSubset(railOrder, ungrouped, new Set(ungrouped));
+    if (reordered.join("\0") !== railOrder.join("\0")) {
+      setRailOrder(reordered);
+      saveProjectRailOrder(reordered);
+    }
   };
 
   const onTogglePin = (path: string) => {
@@ -315,6 +414,17 @@ export function ProjectRail({
     const next = isPinned
       ? pinnedPaths.filter((pinned) => !sameProjectPath(pinned, path))
       : [...pinnedPaths, path];
+    setPinnedPaths(next);
+    savePinnedProjects(next);
+    if (!isPinned) {
+      commitProjectGroups(removeProjectFromGroup(projectGroups, path));
+    }
+  };
+
+  /** Group members pin only through their group, so joining unpins. */
+  const unpinProject = (path: string) => {
+    if (!pinnedPaths.some((pinned) => sameProjectPath(pinned, path))) return;
+    const next = pinnedPaths.filter((pinned) => !sameProjectPath(pinned, path));
     setPinnedPaths(next);
     savePinnedProjects(next);
   };
@@ -331,8 +441,84 @@ export function ProjectRail({
         path,
         name: resolveTabGroupLabel(projectKey, groupLabels, basename(path)),
       });
+    } else if (action === "group-new") {
+      const { groups, id } = createGroupWithProjects(projectGroups, [path]);
+      if (!id) return;
+      commitProjectGroups(groups);
+      setRenamingGroupId(id);
+      unpinProject(path);
+    } else if (action.startsWith("group-add:")) {
+      const groupId = action.slice("group-add:".length);
+      commitProjectGroups(
+        setGroupCollapsed(
+          addProjectToGroup(projectGroups, groupId, path),
+          groupId,
+          false,
+        ),
+      );
+      unpinProject(path);
+    } else if (action === "group-remove") {
+      commitProjectGroups(removeProjectFromGroup(projectGroups, path));
     }
   };
+
+  const onGroupContextMenu = (
+    groupId: string,
+    event: MouseEvent<HTMLElement>,
+  ) => {
+    event.preventDefault();
+    event.stopPropagation();
+    setProjectMenu(null);
+    setGroupMenu({ x: event.clientX, y: event.clientY, groupId });
+  };
+
+  const onGroupMenuPick = (id: string) => {
+    if (!groupMenu) return;
+    const groupId = groupMenu.groupId;
+    setGroupMenu(null);
+    if (id === "group-pin") {
+      const group = projectGroups.find((entry) => entry.id === groupId);
+      commitProjectGroups(
+        setGroupPinned(projectGroups, groupId, !group?.pinned),
+      );
+      return;
+    }
+    if (id === "rename") {
+      setRenamingGroupId(groupId);
+      return;
+    }
+    if (id === "ungroup") {
+      commitProjectGroups(dissolveGroup(projectGroups, groupId));
+    }
+  };
+
+  const onGroupColorChange = (colorIndex: number | null) => {
+    if (!groupMenu) return;
+    commitProjectGroups(
+      setGroupColor(projectGroups, groupMenu.groupId, colorIndex),
+    );
+  };
+
+  const onGroupCustomColorChange = (color: string) => {
+    if (!groupMenu) return;
+    commitProjectGroups(
+      setGroupCustomColor(projectGroups, groupMenu.groupId, color),
+    );
+  };
+
+  const menuGroup = groupMenu
+    ? projectGroups.find((group) => group.id === groupMenu.groupId)
+    : undefined;
+  const groupMenuItems: ExplorerMenuItem[] = [
+    {
+      kind: "item",
+      id: "group-pin",
+      label: menuGroup?.pinned ? "Unpin group" : "Pin group",
+    },
+    { kind: "item", id: "rename", label: "Rename", shortcut: "F2" },
+    { kind: "sep" },
+    { kind: "item", id: "ungroup", label: "Ungroup" },
+  ];
 
   const onConfirmDelete = () => {
     if (!removing) return;
@@ -341,15 +527,158 @@ export function ProjectRail({
   };
 
   const pinnedIds = sections.pinned.map((item) => item.path);
-  const projectIds = sections.projects.map((item) => item.path);
+  const groupIds = [...pinnedGroupBlocks, ...projectsGroupBlocks].map(
+    (entry) => entry.group.id,
+  );
+  const flatIds = [
+    ...pinnedGroupBlocks.flatMap((entry) => [
+      `group:${entry.group.id}`,
+      ...entry.projects.map((project) => project.path),
+    ]),
+    ...projectsGroupBlocks.flatMap((entry) => [
+      `group:${entry.group.id}`,
+      ...entry.projects.map((project) => project.path),
+    ]),
+    UNGROUPED_MARKER,
+    ...ungroupedProjects.map((project) => project.path),
+  ];
   const pinnedSortable = useSortable(pinnedIds, onReorderPinned, {
     axis: "y",
     onActivate: onSelectProject,
   });
-  const projectSortable = useSortable(projectIds, onReorderProjects, {
+  const cardSortable = useSortable(flatIds, onFlatReorder, {
     axis: "y",
     onActivate: onSelectProject,
+    onDropOnGroup: (draggedPath, groupId) => {
+      commitProjectGroups(
+        setGroupCollapsed(
+          addProjectToGroup(projectGroups, groupId, draggedPath),
+          groupId,
+          false,
+        ),
+      );
+      unpinProject(draggedPath);
+    },
   });
+  const groupSortable = useSortable(
+    groupIds,
+    (ids) => commitProjectGroups(reorderGroupContainers(projectGroups, ids)),
+    { axis: "y" },
+  );
+
+  const renderGroupBlock = (entry: GroupEntry) => {
+    const groupId = entry.group.id;
+    const expanded = !entry.group.collapsed;
+    const groupIndex = groupIds.indexOf(groupId);
+    const groupDropTarget =
+      cardSortable.dropTarget?.kind === "group" &&
+      cardSortable.dropTarget.id === groupId;
+    const draggingGroup = groupSortable.draggingId === groupId;
+    const showGroupDropStart =
+      groupSortable.draggingId &&
+      groupSortable.toIndex === groupIndex &&
+      groupSortable.fromIndex !== null &&
+      groupSortable.toIndex < groupSortable.fromIndex;
+    const showGroupDropEnd =
+      groupSortable.draggingId &&
+      groupSortable.toIndex === groupIndex &&
+      groupSortable.fromIndex !== null &&
+      groupSortable.toIndex > groupSortable.fromIndex;
+    const shellFill = folderShellFill(
+      entry.group.colorIndex,
+      entry.group.customColor,
+    );
+    return (
+      <div
+        key={groupId}
+        className={`relative mb-1.5 rounded-md ${draggingGroup ? "opacity-40" : ""}`}
+        style={shellFill ? { background: shellFill } : undefined}
+      >
+        {showGroupDropStart ? (
+          <div className="pointer-events-none absolute inset-x-2 top-0 z-20 h-0.5 rounded-full bg-accent" />
+        ) : null}
+        {showGroupDropEnd ? (
+          <div className="pointer-events-none absolute inset-x-2 bottom-0 z-20 h-0.5 rounded-full bg-accent" />
+        ) : null}
+        {renamingGroupId === groupId ? (
+          <ProjectGroupRenameRow
+            group={entry.group}
+            memberCount={entry.projects.length}
+            dropTarget={groupDropTarget}
+            dropRef={(el) => cardSortable.setGroupDropRef(groupId, el)}
+            onCommit={(name) => {
+              commitProjectGroups(renameGroup(projectGroups, groupId, name));
+              setRenamingGroupId(null);
+            }}
+            onCancel={() => setRenamingGroupId(null)}
+          />
+        ) : (
+          <ProjectGroupRow
+            group={entry.group}
+            count={entry.projects.length}
+            expanded={expanded}
+            pinned={entry.group.pinned ?? false}
+            dropTarget={groupDropTarget}
+            canReorder={groupIds.length > 1}
+            dropRef={(el) => cardSortable.setGroupDropRef(groupId, el)}
+            onPointerDown={(event) =>
+              groupSortable.onItemPointerDown(groupId, event)
+            }
+            onToggle={() => {
+              if (groupSortable.consumeClick()) return;
+              commitProjectGroups(
+                setGroupCollapsed(
+                  projectGroups,
+                  groupId,
+                  !entry.group.collapsed,
+                ),
+              );
+            }}
+            onTogglePin={() =>
+              commitProjectGroups(
+                setGroupPinned(projectGroups, groupId, !entry.group.pinned),
+              )
+            }
+            onContextMenu={(event) => onGroupContextMenu(groupId, event)}
+            onRename={() => setRenamingGroupId(groupId)}
+          />
+        )}
+        {expanded ? (
+          <div className="mt-px flex flex-col gap-px pl-6">
+            {entry.projects.map((project) => (
+              <ProjectCard
+                key={project.path}
+                item={project}
+                selected={!searchActive && sameProjectPath(project.path, cwd)}
+                busy={isBusyPath(project.path, busy)}
+                pinned={false}
+                pinnable={false}
+                sortable={cardSortable}
+                sortIndex={flatIds.indexOf(project.path)}
+                onSelect={onSelectProject}
+                onTogglePin={onTogglePin}
+                onContextMenu={onProjectContextMenu}
+                onOpenMenu={openProjectMenu}
+                groupLabels={groupLabels}
+                groupColors={groupColors}
+                groupCustomColors={groupCustomColors}
+                groupLogos={groupLogos}
+                groupMascots={groupMascots}
+              />
+            ))}
+          </div>
+        ) : null}
+      </div>
+    );
+  };
+
+  const renderGroupBlocks = (blocks: GroupEntry[]) =>
+    blocks.length > 0 ? (
+      <div className="flex flex-col gap-px px-2">
+        {blocks.map(renderGroupBlock)}
+      </div>
+    ) : undefined;
+
   return (
     <nav
       ref={resize.setPaneRef}
@@ -416,13 +745,15 @@ export function ProjectRail({
             }}
             className="flex min-h-0 flex-1 flex-col overflow-y-auto overscroll-none pb-2"
           >
-            {sections.pinned.length > 0 ? (
+            {sections.pinned.length > 0 || pinnedGroupBlocks.length > 0 ? (
               <ProjectSection
                 label="Pinned"
                 items={sections.pinned}
+                prepend={renderGroupBlocks(pinnedGroupBlocks)}
                 cwd={cwd}
                 busy={busy}
                 sortable={pinnedSortable}
+                sortIndexOf={(path) => pinnedIds.indexOf(path)}
                 pinned
                 searchActive={searchActive || inboxActive || notesActive}
                 onSelect={onSelectProject}
@@ -439,12 +770,14 @@ export function ProjectRail({
 
             <ProjectSection
               label="Projects"
-              items={sections.projects}
+              prepend={renderGroupBlocks(projectsGroupBlocks)}
+              items={ungroupedProjects}
               emptyLabel="No projects yet"
               onAdd={onOpenProject}
               cwd={cwd}
               busy={busy}
-              sortable={projectSortable}
+              sortable={cardSortable}
+              sortIndexOf={(path) => flatIds.indexOf(path)}
               pinned={false}
               searchActive={searchActive || inboxActive || notesActive}
               onSelect={onSelectProject}
@@ -528,8 +861,29 @@ export function ProjectRail({
               sameProjectPath(pinned, projectMenu.path),
             ),
             Boolean(onRemoveProject),
+            groupContaining(projectGroups, projectMenu.path)?.id,
+            projectGroups,
           )}
           onExtraPick={onProjectMenuPick}
+        />
+      ) : null}
+      {groupMenu ? (
+        <ExplorerMenu
+          x={groupMenu.x}
+          y={groupMenu.y}
+          items={groupMenuItems}
+          ariaLabel="Group actions"
+          width={260}
+          header={
+            <FolderColorSwatches
+              colorIndex={menuGroup?.colorIndex}
+              customColor={menuGroup?.customColor}
+              onChange={onGroupColorChange}
+              onCustomChange={onGroupCustomColorChange}
+            />
+          }
+          onPick={onGroupMenuPick}
+          onClose={() => setGroupMenu(null)}
         />
       ) : null}
       {removing ? (
@@ -558,6 +912,7 @@ export function ProjectRail({
 }
 
 type SortableHandle = ReturnType<typeof useSortable>;
+type GroupEntry = Extract<ProjectGroupEntry, { kind: "group" }>;
 
 const LIVE_AGENT_MIN = 2;
 const LIVE_AGENT_CAP = 4;
@@ -761,14 +1116,194 @@ function LiveAgentCard({
   );
 }
 
+function ProjectGroupRow({
+  group,
+  count,
+  expanded,
+  pinned,
+  dropTarget,
+  canReorder = false,
+  dropRef,
+  onPointerDown,
+  onToggle,
+  onTogglePin,
+  onContextMenu,
+  onRename,
+}: {
+  group: ProjectGroup;
+  count: number;
+  expanded: boolean;
+  pinned: boolean;
+  dropTarget: boolean;
+  canReorder?: boolean;
+  dropRef?: (el: HTMLElement | null) => void;
+  onPointerDown?: (event: ReactPointerEvent<HTMLDivElement>) => void;
+  onToggle: () => void;
+  onTogglePin: () => void;
+  onContextMenu: (event: MouseEvent<HTMLDivElement>) => void;
+  onRename: () => void;
+}) {
+  const accent = folderAccent(group.colorIndex, group.customColor);
+  return (
+    <div
+      ref={dropRef}
+      title={group.name}
+      data-tauri-drag-region="false"
+      onPointerDown={onPointerDown}
+      onClick={onToggle}
+      onContextMenu={onContextMenu}
+      className={`group relative flex touch-none items-stretch rounded-md px-2 h-8 ${
+        canReorder ? "cursor-grab active:cursor-grabbing" : ""
+      } ${
+        dropTarget
+          ? "bg-content/12 text-content"
+          : "text-content/80 hover:bg-content/5 hover:text-content"
+      }`}
+    >
+      {dropTarget ? (
+        <div className="pointer-events-none absolute inset-0 rounded-md bg-accent/20" />
+      ) : null}
+      <button
+        type="button"
+        aria-expanded={expanded}
+        onKeyDown={(event) => {
+          if (event.key === "F2") {
+            event.preventDefault();
+            onRename();
+          }
+        }}
+        className="flex min-w-0 flex-1 cursor-default items-center gap-1.5 text-left"
+      >
+        <span
+          className={`relative grid size-4 shrink-0 place-items-center transition-opacity group-hover:opacity-0 ${
+            accent ? "" : "text-content/50"
+          }`}
+          style={accent ? { color: accent } : undefined}
+        >
+          <Folder
+            className={accent ? "size-3.5" : "size-3.5 text-content"}
+            strokeWidth={1.75}
+          />
+        </span>
+        <span className="relative min-w-0 flex-1 truncate text-[13px] font-semibold leading-snug text-content">
+          {group.name}
+        </span>
+        <span className="relative shrink-0 text-[11px] tabular-nums text-content/45">
+          {count}
+        </span>
+      </button>
+      <button
+        type="button"
+        data-no-drag
+        title={pinned ? "Unpin group" : "Pin group"}
+        aria-label={pinned ? "Unpin group" : "Pin group"}
+        onPointerDown={(event) => event.stopPropagation()}
+        onClick={(event) => {
+          event.stopPropagation();
+          onTogglePin();
+        }}
+        className="absolute left-2 top-1/2 grid size-4 -translate-y-1/2 place-items-center rounded-sm text-content/55 opacity-0 pointer-events-none transition-opacity hover:text-content group-hover:pointer-events-auto group-hover:opacity-100"
+      >
+        {pinned ? (
+          <PinOff className="size-3.5" strokeWidth={1.75} />
+        ) : (
+          <Pin className="size-3.5" strokeWidth={1.75} />
+        )}
+      </button>
+    </div>
+  );
+}
+
+function ProjectGroupRenameRow({
+  group,
+  memberCount,
+  dropTarget,
+  dropRef,
+  onCommit,
+  onCancel,
+}: {
+  group: ProjectGroup;
+  memberCount: number;
+  dropTarget: boolean;
+  dropRef?: (el: HTMLElement | null) => void;
+  onCommit: (name: string) => void;
+  onCancel: () => void;
+}) {
+  const inputRef = useRef<HTMLInputElement>(null);
+  const finished = useRef(false);
+  const [value, setValue] = useState(group.name);
+
+  useEffect(() => {
+    const input = inputRef.current;
+    if (!input) return;
+    input.focus();
+    input.select();
+  }, []);
+
+  const finish = (success: boolean) => {
+    if (finished.current) return;
+    if (success) {
+      const trimmed = value.trim();
+      if (!trimmed) {
+        onCancel();
+        return;
+      }
+      finished.current = true;
+      onCommit(trimmed);
+      return;
+    }
+    finished.current = true;
+    onCancel();
+  };
+
+  return (
+    <div
+      ref={dropRef}
+      className={`relative flex w-full items-center gap-1.5 px-2 py-1.5 ${
+        dropTarget ? "" : "text-content"
+      }`}
+    >
+      {dropTarget ? (
+        <div className="pointer-events-none absolute inset-0 rounded-md bg-accent/20" />
+      ) : null}
+      <span className="relative grid size-4 shrink-0 place-items-center text-content/50">
+        <ChevronDown className="size-3.5" strokeWidth={1.75} />
+      </span>
+      <input
+        ref={inputRef}
+        value={value}
+        onChange={(event) => setValue(event.target.value)}
+        onBlur={() => finish(true)}
+        onKeyDown={(event) => {
+          if (event.key === "Enter") {
+            event.preventDefault();
+            finish(true);
+            return;
+          }
+          if (event.key === "Escape") {
+            event.preventDefault();
+            finish(false);
+          }
+        }}
+        className="relative min-w-0 flex-1 rounded bg-content/10 px-2 py-0.5 text-[13px] font-semibold leading-snug text-content outline-none ring-1 ring-accent/40"
+      />
+      <span className="relative shrink-0 text-[11px] tabular-nums text-content/45">
+        {memberCount}
+      </span>
+    </div>
+  );
+}
+
 function ProjectSection({
   label,
   items,
   emptyLabel,
+  prepend,
   onAdd,
   cwd,
   busy,
   sortable,
+  sortIndexOf,
   pinned,
   searchActive,
   onSelect,
@@ -784,10 +1319,13 @@ function ProjectSection({
   label: string;
   items: RecentProject[];
   emptyLabel?: string;
+  /** Blocks rendered inside the section, above the cards (group headers). */
+  prepend?: ReactNode;
   onAdd?: () => void;
   cwd: string;
   busy: Set<string>;
   sortable: SortableHandle;
+  sortIndexOf: (path: string) => number;
   pinned: boolean;
   searchActive: boolean;
   onSelect: (path: string) => void;
@@ -818,13 +1356,14 @@ function ProjectSection({
           </button>
         ) : null}
       </div>
-      {items.length === 0 && emptyLabel ? (
+      {prepend}
+      {items.length === 0 && !prepend && emptyLabel ? (
         <p className="px-4 pb-1 text-[11px] leading-tight text-content/40">
           {emptyLabel}
         </p>
       ) : null}
       <div className="flex flex-col gap-px px-2">
-        {items.map((item, index) => (
+        {items.map((item) => (
           <ProjectCard
             key={item.path}
             item={item}
@@ -832,7 +1371,7 @@ function ProjectSection({
             busy={isBusyPath(item.path, busy)}
             pinned={pinned}
             sortable={sortable}
-            index={index}
+            sortIndex={sortIndexOf(item.path)}
             onSelect={onSelect}
             onTogglePin={onTogglePin}
             onContextMenu={onContextMenu}
@@ -857,8 +1396,9 @@ function ProjectCard({
   selected,
   busy,
   pinned,
+  pinnable = true,
   sortable,
-  index,
+  sortIndex,
   onSelect,
   onTogglePin,
   onContextMenu,
@@ -873,8 +1413,10 @@ function ProjectCard({
   selected: boolean;
   busy: boolean;
   pinned: boolean;
+  /** Group members pin only through their group. */
+  pinnable?: boolean;
   sortable: SortableHandle;
-  index: number;
+  sortIndex: number;
   onSelect: (path: string) => void;
   onTogglePin: (path: string) => void;
   onContextMenu: (path: string, event: MouseEvent<HTMLElement>) => void;
@@ -898,12 +1440,12 @@ function ProjectCard({
   const dragging = sortable.draggingId === item.path;
   const showStart =
     sortable.draggingId &&
-    sortable.toIndex === index &&
+    sortable.toIndex === sortIndex &&
     sortable.fromIndex !== null &&
     sortable.toIndex < sortable.fromIndex;
   const showEnd =
     sortable.draggingId &&
-    sortable.toIndex === index &&
+    sortable.toIndex === sortIndex &&
     sortable.fromIndex !== null &&
     sortable.toIndex > sortable.fromIndex;
   const diffEnabled = Boolean(item.path) && item.path !== "~";
@@ -952,7 +1494,11 @@ function ProjectCard({
         aria-current={selected ? "true" : undefined}
         className="flex min-w-0 flex-1 cursor-default items-center gap-2 text-left group-hover:pr-6"
       >
-        <div className="grid size-4 shrink-0 place-items-center transition-opacity group-hover:opacity-0">
+        <div
+          className={`grid size-4 shrink-0 place-items-center ${
+            pinnable ? "transition-opacity group-hover:opacity-0" : ""
+          }`}
+        >
           {logoPath && !busy ? (
             <ProjectLogoIcon
               path={logoPath}
@@ -997,24 +1543,26 @@ function ProjectCard({
       >
         <MoreHorizontal className="size-4" strokeWidth={1.75} />
       </button>
-      <button
-        type="button"
-        data-no-drag
-        title={pinned ? "Unpin project" : "Pin project"}
-        aria-label={pinned ? "Unpin project" : "Pin project"}
-        onPointerDown={(event) => event.stopPropagation()}
-        onClick={(event) => {
-          event.stopPropagation();
-          onTogglePin(item.path);
-        }}
-        className="absolute left-2 top-1/2 grid size-4 -translate-y-1/2 place-items-center rounded-sm text-content/55 opacity-0 pointer-events-none transition-opacity hover:text-content group-hover:pointer-events-auto group-hover:opacity-100"
-      >
-        {pinned ? (
-          <PinOff className="size-3.5" strokeWidth={1.75} />
-        ) : (
-          <Pin className="size-3.5" strokeWidth={1.75} />
-        )}
-      </button>
+      {pinnable ? (
+        <button
+          type="button"
+          data-no-drag
+          title={pinned ? "Unpin project" : "Pin project"}
+          aria-label={pinned ? "Unpin project" : "Pin project"}
+          onPointerDown={(event) => event.stopPropagation()}
+          onClick={(event) => {
+            event.stopPropagation();
+            onTogglePin(item.path);
+          }}
+          className="absolute left-2 top-1/2 grid size-4 -translate-y-1/2 place-items-center rounded-sm text-content/55 opacity-0 pointer-events-none transition-opacity hover:text-content group-hover:pointer-events-auto group-hover:opacity-100"
+        >
+          {pinned ? (
+            <PinOff className="size-3.5" strokeWidth={1.75} />
+          ) : (
+            <Pin className="size-3.5" strokeWidth={1.75} />
+          )}
+        </button>
+      ) : null}
     </div>
   );
 }
