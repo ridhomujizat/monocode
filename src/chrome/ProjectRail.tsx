@@ -44,6 +44,7 @@ import { IS_MAC, IS_WIN, MOD } from "../lib/platform";
 import { projectName } from "../lib/paths";
 import {
   collectRailProjects,
+  loadArchivedProjects,
   loadPinnedProjects,
   loadProjectRailOrder,
   projectRailSections,
@@ -51,11 +52,13 @@ import {
   savePinnedProjects,
   saveProjectRailOrder,
   syncProjectRailOrder,
+  type ArchivedProject,
   type RecentProject,
 } from "../lib/recents";
 import {
   addProjectToGroup,
   buildProjectGroupEntries,
+  createGroup,
   createGroupWithProjects,
   dissolveGroup,
   groupContaining,
@@ -239,9 +242,18 @@ export function ProjectRail({
     path: string;
     projectKey: string;
   } | null>(null);
+  const [addAction, setAddAction] = useState<{ x: number; y: number } | null>(
+    null,
+  );
+  const [archivedMenu, setArchivedMenu] = useState<{
+    x: number;
+    y: number;
+  } | null>(null);
+  const [archivedItems, setArchivedItems] = useState<ArchivedProject[]>([]);
   const [removing, setRemoving] = useState<{
-    path: string;
     name: string;
+    paths: string[];
+    groupId?: string;
   } | null>(null);
   const [projectGroups, setProjectGroups] = useState(loadProjectGroups);
   const [groupMenu, setGroupMenu] = useState<{
@@ -309,15 +321,17 @@ export function ProjectRail({
   }, [allProjects]);
 
   useEffect(() => {
-    if (!projectMenu && !groupMenu) return;
+    if (!projectMenu && !groupMenu && !addAction) return;
     const onScroll = () => {
       setProjectMenu(null);
       setGroupMenu(null);
+      setAddAction(null);
+      setArchivedMenu(null);
     };
     const scrollParent = scrollRef.current ?? window;
     scrollParent.addEventListener("scroll", onScroll, true);
     return () => scrollParent.removeEventListener("scroll", onScroll, true);
-  }, [projectMenu, groupMenu]);
+  }, [projectMenu, groupMenu, addAction]);
 
   const commitProjectGroups = (next: ProjectGroup[]) => {
     setProjectGroups(next);
@@ -438,8 +452,8 @@ export function ProjectRail({
       onRemoveProject?.(path, { purgeData: false });
     } else if (action === "delete") {
       setRemoving({
-        path,
         name: resolveTabGroupLabel(projectKey, groupLabels, basename(path)),
+        paths: [path],
       });
     } else if (action === "group-new") {
       const { groups, id } = createGroupWithProjects(projectGroups, [path]);
@@ -469,6 +483,8 @@ export function ProjectRail({
     event.preventDefault();
     event.stopPropagation();
     setProjectMenu(null);
+    setAddAction(null);
+    setArchivedMenu(null);
     setGroupMenu({ x: event.clientX, y: event.clientY, groupId });
   };
 
@@ -489,6 +505,53 @@ export function ProjectRail({
     }
     if (id === "ungroup") {
       commitProjectGroups(dissolveGroup(projectGroups, groupId));
+      return;
+    }
+    if (id === "group-archive") {
+      const group = projectGroups.find((entry) => entry.id === groupId);
+      for (const path of group?.paths ?? []) {
+        onRemoveProject?.(path, { purgeData: false });
+      }
+      commitProjectGroups(dissolveGroup(projectGroups, groupId));
+      return;
+    }
+    if (id === "group-delete") {
+      const group = projectGroups.find((entry) => entry.id === groupId);
+      setRemoving({
+        name: group?.name ?? "group",
+        paths: group?.paths ?? [],
+        groupId,
+      });
+    }
+  };
+
+  const onArchivedPick = (id: string) => {
+    if (!archivedMenu) return;
+    setArchivedMenu(null);
+    setAddAction(null);
+    if (id !== "empty") onSelectProject(id);
+  };
+
+  const openArchivedSubmenu = () => {
+    if (!addAction) return;
+    setArchivedItems(loadArchivedProjects());
+    setArchivedMenu({ x: addAction.x + 224, y: addAction.y + 52 });
+  };
+
+  const onAddMenuPick = (id: string) => {
+    if (!addAction) return;
+    if (id === "group-new") {
+      setAddAction(null);
+      setArchivedMenu(null);
+      const { groups, id: createdId } = createGroup(projectGroups);
+      commitProjectGroups(groups);
+      setRenamingGroupId(createdId);
+    } else if (id === "add-project") {
+      setAddAction(null);
+      setArchivedMenu(null);
+      onOpenProject();
+    } else if (id === "archived") {
+      openArchivedSubmenu();
     }
   };
 
@@ -505,10 +568,14 @@ export function ProjectRail({
       setGroupCustomColor(projectGroups, groupMenu.groupId, color),
     );
   };
-
   const menuGroup = groupMenu
     ? projectGroups.find((group) => group.id === groupMenu.groupId)
     : undefined;
+  const addMenuItems: ExplorerMenuItem[] = [
+    { kind: "item", id: "group-new", label: "New group" },
+    { kind: "item", id: "add-project", label: "Add project" },
+    { kind: "item", id: "archived", label: "Archived", arrow: true },
+  ];
   const groupMenuItems: ExplorerMenuItem[] = [
     {
       kind: "item",
@@ -518,11 +585,18 @@ export function ProjectRail({
     { kind: "item", id: "rename", label: "Rename", shortcut: "F2" },
     { kind: "sep" },
     { kind: "item", id: "ungroup", label: "Ungroup" },
+    { kind: "sep" },
+    { kind: "item", id: "group-archive", label: "Archive group" },
+    { kind: "item", id: "group-delete", label: "Delete group", danger: true },
   ];
-
   const onConfirmDelete = () => {
     if (!removing) return;
-    onRemoveProject?.(removing.path, { purgeData: true });
+    for (const path of removing.paths) {
+      onRemoveProject?.(path, { purgeData: true });
+    }
+    if (removing.groupId) {
+      commitProjectGroups(dissolveGroup(projectGroups, removing.groupId));
+    }
     setRemoving(null);
   };
 
@@ -773,7 +847,12 @@ export function ProjectRail({
               prepend={renderGroupBlocks(projectsGroupBlocks)}
               items={ungroupedProjects}
               emptyLabel="No projects yet"
-              onAdd={onOpenProject}
+              onAdd={(x, y) => {
+                setProjectMenu(null);
+                setGroupMenu(null);
+                setArchivedMenu(null);
+                setAddAction({ x, y });
+              }}
               cwd={cwd}
               busy={busy}
               sortable={cardSortable}
@@ -886,10 +965,52 @@ export function ProjectRail({
           onClose={() => setGroupMenu(null)}
         />
       ) : null}
+      {addAction ? (
+        <ExplorerMenu
+          x={addAction.x}
+          y={addAction.y}
+          items={addMenuItems}
+          ariaLabel="Add to projects"
+          onPick={onAddMenuPick}
+          onItemHover={(id) => {
+            if (id === "archived") openArchivedSubmenu();
+            else setArchivedMenu(null);
+          }}
+          onClose={() => {
+            setAddAction(null);
+            setArchivedMenu(null);
+          }}
+        />
+      ) : null}
+      {archivedMenu ? (
+        <ExplorerMenu
+          x={archivedMenu.x}
+          y={archivedMenu.y}
+          items={
+            archivedItems.length > 0
+              ? archivedItems.map((item) => ({
+                  kind: "item" as const,
+                  id: item.path,
+                  label: projectName(item.path),
+                }))
+              : [
+                  {
+                    kind: "item" as const,
+                    id: "empty",
+                    label: "No archived projects",
+                    disabled: true,
+                  },
+                ]
+          }
+          ariaLabel="Archived projects"
+          onPick={onArchivedPick}
+          onClose={() => setArchivedMenu(null)}
+        />
+      ) : null}
       {removing ? (
         <RemoveProjectDialog
           name={removing.name}
-          path={removing.path}
+          paths={removing.paths}
           onConfirm={onConfirmDelete}
           onCancel={() => setRemoving(null)}
         />
@@ -1321,7 +1442,7 @@ function ProjectSection({
   emptyLabel?: string;
   /** Blocks rendered inside the section, above the cards (group headers). */
   prepend?: ReactNode;
-  onAdd?: () => void;
+  onAdd?: (x: number, y: number) => void;
   cwd: string;
   busy: Set<string>;
   sortable: SortableHandle;
@@ -1349,7 +1470,7 @@ function ProjectSection({
             type="button"
             title="Open project"
             aria-label="Open project"
-            onClick={onAdd}
+            onClick={(event) => onAdd(event.clientX, event.clientY)}
             className="grid size-5 shrink-0 place-items-center rounded-md text-content/50 hover:bg-content/8 hover:text-content"
           >
             <Plus className="size-3.5" strokeWidth={1.75} />

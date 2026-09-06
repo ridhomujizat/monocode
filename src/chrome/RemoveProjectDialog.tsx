@@ -6,16 +6,22 @@ import { projectSessionCount } from "../lib/projectData";
 
 type Props = {
   name: string;
-  path: string;
+  paths: string[];
   onCancel: () => void;
   onConfirm: () => void;
 };
 
 /**
- * Delete drops the project from the rail and its saved chats. The folder on
- * disk is left alone; opening it again brings the project back empty.
+ * Delete drops the projects from the rail and their saved chats. The
+ * folders on disk are left alone; opening one again brings the project
+ * back empty.
  */
-export function RemoveProjectDialog({ name, path, onCancel, onConfirm }: Props) {
+export function RemoveProjectDialog({
+  name,
+  paths,
+  onCancel,
+  onConfirm,
+}: Props) {
   const [sessions, setSessions] = useState<number | null>(null);
   const cancelRef = useRef<HTMLButtonElement>(null);
 
@@ -25,19 +31,22 @@ export function RemoveProjectDialog({ name, path, onCancel, onConfirm }: Props) 
 
   useEffect(() => {
     let cancelled = false;
-    void projectSessionCount(path).then((count) => {
-      if (!cancelled) setSessions(count);
-    });
+    void Promise.all(paths.map((path) => projectSessionCount(path))).then(
+      (counts) => {
+        if (!cancelled) {
+          setSessions(counts.reduce((total, count) => total + count, 0));
+        }
+      },
+    );
     return () => {
       cancelled = true;
     };
-  }, [path]);
+  }, [paths]);
 
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
       if (event.key !== "Escape") return;
       event.preventDefault();
-      event.stopPropagation();
       onCancel();
     };
     window.addEventListener("keydown", onKey, true);
@@ -59,9 +68,9 @@ export function RemoveProjectDialog({ name, path, onCancel, onConfirm }: Props) 
             Delete “{name}”?
           </h2>
           <p className="text-[12px] leading-snug text-content/55">
-            All conversations for this project will be deleted. It also
-            leaves the sidebar. The folder on disk stays put, and opening it
-            again brings the project back empty.
+            {paths.length > 1
+              ? "All conversations for these projects will be deleted. They also leave the sidebar. The folders on disk stay put, and opening one again brings the project back empty."
+              : "All conversations for this project will be deleted. It also leaves the sidebar. The folder on disk stays put, and opening it again brings the project back empty."}
           </p>
           {sessions != null && sessions > 0 ? (
             <p className="text-[12px] leading-snug text-content/45">
@@ -70,9 +79,11 @@ export function RemoveProjectDialog({ name, path, onCancel, onConfirm }: Props) 
                 : `${sessions} saved conversations will be removed.`}
             </p>
           ) : null}
-          <p className="truncate text-[11px] leading-tight text-content/40">
-            {prettyCwd(path)}
-          </p>
+          {paths.length === 1 ? (
+            <p className="truncate text-[11px] leading-tight text-content/40">
+              {prettyCwd(paths[0])}
+            </p>
+          ) : null}
         </div>
 
         <div className="flex justify-end gap-2">

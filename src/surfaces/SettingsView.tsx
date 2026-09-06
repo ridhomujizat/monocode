@@ -678,12 +678,12 @@ function UpdateRow({
         </SecondaryButton>
         <SecondaryButton onClick={() => void onClick()} disabled={busy}>
           {busy ? (
-          <Loader className="size-3.5 animate-spin" aria-hidden />
-        ) : hasUpdate ? (
-          <ArrowDownCircle className="size-3.5 text-accent" aria-hidden />
-        ) : (
-          <RefreshCw className="size-3.5" strokeWidth={1.75} aria-hidden />
-        )}
+            <Loader className="size-3.5 animate-spin" aria-hidden />
+          ) : hasUpdate ? (
+            <ArrowDownCircle className="size-3.5 text-accent" aria-hidden />
+          ) : (
+            <RefreshCw className="size-3.5" strokeWidth={1.75} aria-hidden />
+          )}
           {hasUpdate ? "Download" : "Check for updates"}
         </SecondaryButton>
       </div>
@@ -1197,7 +1197,7 @@ function ArchivePage({
       {deleting ? (
         <RemoveProjectDialog
           name={archivedProjectLabel(deleting.path)}
-          path={deleting.path}
+          paths={[deleting.path]}
           onCancel={() => setDeleting(null)}
           onConfirm={() => {
             onDeleteProject?.(deleting.path);
@@ -1296,7 +1296,9 @@ function Segmented<T extends string>({
       role="radiogroup"
       aria-label={label}
       className="grid w-40 gap-0.5 rounded-md border border-content/10 p-0.5 text-[12px]"
-      style={{ gridTemplateColumns: `repeat(${options.length}, minmax(0, 1fr))` }}
+      style={{
+        gridTemplateColumns: `repeat(${options.length}, minmax(0, 1fr))`,
+      }}
     >
       {options.map((option) => (
         <button

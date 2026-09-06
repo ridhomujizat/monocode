@@ -62,6 +62,21 @@ export function uniqueGroupName(
   }
 }
 
+/** Create an empty group; members are dragged in or added afterwards. */
+export function createGroup(
+  groups: ProjectGroup[],
+  name?: string,
+): { groups: ProjectGroup[]; id: string } {
+  const id = crypto.randomUUID();
+  const group: ProjectGroup = {
+    id,
+    name: name ?? uniqueGroupName(groups),
+    paths: [],
+    collapsed: false,
+  };
+  return { groups: [group, ...groups], id };
+}
+
 export function createGroupWithProjects(
   groups: ProjectGroup[],
   paths: string[],
@@ -88,23 +103,21 @@ export function addProjectToGroup(
   if (!path || !groups.some((group) => group.id === groupId)) return groups;
   const current = groupContaining(groups, path);
   if (current?.id === groupId) return groups;
-  return removeEmpty(
-    groups.map((group) => {
-      if (group.id === groupId) {
-        return {
-          ...group,
-          paths: [...group.paths, normalizeProjectPath(path)],
-        };
-      }
-      if (!group.paths.some((member) => sameProjectPath(member, path))) {
-        return group;
-      }
+  return groups.map((group) => {
+    if (group.id === groupId) {
       return {
         ...group,
-        paths: group.paths.filter((member) => !sameProjectPath(member, path)),
+        paths: [...group.paths, normalizeProjectPath(path)],
       };
-    }),
-  );
+    }
+    if (!group.paths.some((member) => sameProjectPath(member, path))) {
+      return group;
+    }
+    return {
+      ...group,
+      paths: group.paths.filter((member) => !sameProjectPath(member, path)),
+    };
+  });
 }
 
 export function removeProjectFromGroup(
@@ -112,17 +125,15 @@ export function removeProjectFromGroup(
   path: string,
 ): ProjectGroup[] {
   if (!groupContaining(groups, path)) return groups;
-  return removeEmpty(
-    groups.map((group) =>
-      group.paths.some((member) => sameProjectPath(member, path))
-        ? {
-            ...group,
-            paths: group.paths.filter(
-              (member) => !sameProjectPath(member, path),
-            ),
-          }
-        : group,
-    ),
+  return groups.map((group) =>
+    group.paths.some((member) => sameProjectPath(member, path))
+      ? {
+          ...group,
+          paths: group.paths.filter(
+            (member) => !sameProjectPath(member, path),
+          ),
+        }
+      : group,
   );
 }
 
@@ -211,7 +222,7 @@ export function setGroupCustomColor(
   );
 }
 
-/** Replace a group's member order; the group dissolves when nothing remains. */
+/** Replace a group's member order; groups may be empty. */
 export function setGroupProjects(
   groups: ProjectGroup[],
   groupId: string,
@@ -225,9 +236,6 @@ export function setGroupProjects(
     members.every((path, index) => sameProjectPath(path, group.paths[index]))
   ) {
     return groups;
-  }
-  if (members.length === 0) {
-    return groups.filter((entry) => entry.id !== groupId);
   }
   return groups.map((entry) =>
     entry.id === groupId ? { ...entry, paths: members } : entry,
@@ -281,7 +289,6 @@ export function buildProjectGroupEntries(
       const project = byKey.get(key);
       if (project) members.push(project);
     }
-    if (members.length === 0) continue;
     entries.push({ kind: "group", group, projects: members });
   }
   for (const project of projects) {
@@ -355,10 +362,6 @@ export function pruneProjectGroups(
   const next: ProjectGroup[] = [];
   for (const group of groups) {
     const paths = group.paths.filter((path) => known.has(pathKey(path)));
-    if (paths.length === 0) {
-      changed = true;
-      continue;
-    }
     if (paths.length !== group.paths.length) {
       changed = true;
       next.push({ ...group, paths });
@@ -417,7 +420,6 @@ function parseGroup(value: unknown): ProjectGroup | null {
       (path): path is string => typeof path === "string" && !!path,
     ),
   );
-  if (paths.length === 0) return null;
   const customColor = parseCustomHex(
     typeof rec.customColor === "string" ? rec.customColor : null,
   );
@@ -477,18 +479,12 @@ function removeProjects(
   paths: string[],
 ): ProjectGroup[] {
   const drop = new Set(paths.map(pathKey));
-  return removeEmpty(
-    groups.map((group) => {
-      if (!group.paths.some((member) => drop.has(pathKey(member))))
-        return group;
-      return {
-        ...group,
-        paths: group.paths.filter((member) => !drop.has(pathKey(member))),
-      };
-    }),
-  );
+  return groups.map((group) => {
+    if (!group.paths.some((member) => drop.has(pathKey(member)))) return group;
+    return {
+      ...group,
+      paths: group.paths.filter((member) => !drop.has(pathKey(member))),
+    };
+  });
 }
 
-function removeEmpty(groups: ProjectGroup[]): ProjectGroup[] {
-  return groups.filter((group) => group.paths.length > 0);
-}

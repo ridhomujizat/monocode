@@ -4,7 +4,7 @@ import {
   type KeyboardEvent as ReactKeyboardEvent,
   type ReactNode,
 } from "react";
-import { Check } from "./icons";
+import { Check, ChevronRight } from "./icons";
 import { Popover } from "./Popover";
 
 export type ExplorerMenuItem =
@@ -17,6 +17,8 @@ export type ExplorerMenuItem =
       disabled?: boolean;
       danger?: boolean;
       checked?: boolean;
+      /** Submenu affordance: chevron pushed to the trailing edge. */
+      arrow?: boolean;
     };
 
 type Props = {
@@ -27,12 +29,18 @@ type Props = {
   header?: ReactNode;
   width?: number;
   onPick: (id: string) => void;
+  /** Hover on an item; used by callers that cascade submenus. */
+  onItemHover?: (id: string) => void;
   onClose: () => void;
 };
 
 const MENU_WIDTH = 228;
 
-function itemIndexAt(items: ExplorerMenuItem[], start: number, dir: 1 | -1): number {
+function itemIndexAt(
+  items: ExplorerMenuItem[],
+  start: number,
+  dir: 1 | -1,
+): number {
   let i = start;
   while (i >= 0 && i < items.length) {
     const item = items[i];
@@ -50,6 +58,7 @@ export function ExplorerMenu({
   header,
   width = MENU_WIDTH,
   onPick,
+  onItemHover,
   onClose,
 }: Props) {
   const [active, setActive] = useState(() => itemIndexAt(items, 0, 1));
@@ -57,7 +66,9 @@ export function ExplorerMenu({
   const ids = useMemo(
     () =>
       items.flatMap((item, index) =>
-        item.kind === "item" ? [{ index, id: item.id, disabled: !!item.disabled }] : [],
+        item.kind === "item"
+          ? [{ index, id: item.id, disabled: !!item.disabled }]
+          : [],
       ),
     [items],
   );
@@ -125,7 +136,10 @@ export function ExplorerMenu({
             aria-checked={item.checked}
             disabled={item.disabled}
             onMouseDown={(e) => e.preventDefault()}
-            onMouseEnter={() => setActive(index)}
+            onMouseEnter={() => {
+              setActive(index);
+              onItemHover?.(item.id);
+            }}
             onClick={() => {
               if (!item.disabled) onPick(item.id);
             }}
@@ -142,7 +156,12 @@ export function ExplorerMenu({
             }`}
           >
             <span className="min-w-0 flex-1 truncate">{item.label}</span>
-            {item.checked ? (
+            {item.arrow ? (
+              <ChevronRight
+                className="size-3.5 shrink-0 text-content/40"
+                strokeWidth={1.75}
+              />
+            ) : item.checked ? (
               <Check className="size-3.5 shrink-0" strokeWidth={2.25} />
             ) : item.shortcut ? (
               <span className="shrink-0 text-[11px] text-content/40">
