@@ -39,7 +39,7 @@ import {
   PROJECT_RAIL_WIDTH_MIN,
   saveProjectRailWidth,
 } from "../lib/appearance";
-import { basename, revealPath, type GitDiffStats } from "../lib/fs";
+import { basename, pickFolder, revealPath, type GitDiffStats } from "../lib/fs";
 import { IS_MAC, IS_WIN, MOD } from "../lib/platform";
 import { pathKey, projectName } from "../lib/paths";
 import {
@@ -473,6 +473,20 @@ export function ProjectRail({
     }
   };
 
+  const addProjectToGroupFromPicker = async (groupId: string) => {
+    const path = await pickFolder("Add project to group");
+    if (!path) return;
+    setGroupMenu(null);
+    onSelectProject(path);
+    commitProjectGroups(
+      setGroupCollapsed(
+        addProjectToGroup(projectGroups, groupId, path),
+        groupId,
+        false,
+      ),
+    );
+  };
+
   /** Group members pin only through their group, so joining unpins. */
   const unpinProject = (path: string) => {
     if (!pinnedPaths.some((pinned) => sameProjectPath(pinned, path))) return;
@@ -539,6 +553,10 @@ export function ProjectRail({
     }
     if (id === "rename") {
       setRenamingGroupId(groupId);
+      return;
+    }
+    if (id === "group-add-project") {
+      void addProjectToGroupFromPicker(groupId);
       return;
     }
     if (id === "ungroup") {
@@ -649,6 +667,7 @@ export function ProjectRail({
       label: menuGroup?.pinned ? "Unpin group" : "Pin group",
     },
     { kind: "item", id: "rename", label: "Rename", shortcut: "F2" },
+    { kind: "item", id: "group-add-project", label: "Add project" },
     { kind: "sep" },
     { kind: "item", id: "ungroup", label: "Ungroup" },
     { kind: "sep" },
@@ -783,6 +802,7 @@ export function ProjectRail({
             }
             onContextMenu={(event) => onGroupContextMenu(groupId, event)}
             onRename={() => setRenamingGroupId(groupId)}
+            onAddProject={() => void addProjectToGroupFromPicker(groupId)}
           />
         )}
         {expanded ? (
@@ -1333,6 +1353,7 @@ function ProjectGroupRow({
   onTogglePin,
   onContextMenu,
   onRename,
+  onAddProject,
 }: {
   group: ProjectGroup;
   count: number;
@@ -1346,6 +1367,7 @@ function ProjectGroupRow({
   onTogglePin: () => void;
   onContextMenu: (event: MouseEvent<HTMLDivElement>) => void;
   onRename: () => void;
+  onAddProject?: () => void;
 }) {
   const accent = folderAccent(group.colorIndex, group.customColor);
   return (
@@ -1376,7 +1398,7 @@ function ProjectGroupRow({
             onRename();
           }
         }}
-        className="flex min-w-0 flex-1 cursor-default items-center gap-1.5 text-left"
+        className="flex min-w-0 flex-1 cursor-default items-center gap-1.5 text-left group-hover:pr-6"
       >
         <span
           className={`relative grid size-4 shrink-0 place-items-center transition-opacity group-hover:opacity-0 ${
@@ -1414,6 +1436,22 @@ function ProjectGroupRow({
           <Pin className="size-3.5" strokeWidth={1.75} />
         )}
       </button>
+      {onAddProject ? (
+        <button
+          type="button"
+          data-no-drag
+          title="Add project"
+          aria-label="Add project"
+          onPointerDown={(event) => event.stopPropagation()}
+          onClick={(event) => {
+            event.stopPropagation();
+            onAddProject();
+          }}
+          className="absolute right-1 top-1/2 hidden size-6 -translate-y-1/2 place-items-center rounded-md text-content/55 hover:bg-content/8 hover:text-content group-hover:grid"
+        >
+          <Plus className="size-4" strokeWidth={1.75} />
+        </button>
+      ) : null}
     </div>
   );
 }
