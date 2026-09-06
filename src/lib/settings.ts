@@ -3,7 +3,12 @@ import { ALT, IS_MAC, MOD, SHIFT } from "./platform";
 const SECTION_KEY = "monocode.settingsSection";
 
 export type SettingsSectionId =
-  "general" | "appearance" | "keybindings" | "providers" | "archive";
+  | "general"
+  | "appearance"
+  | "keybindings"
+  | "providers"
+  | "plugins"
+  | "archive";
 
 export const SETTINGS_SECTIONS: {
   id: SettingsSectionId;
@@ -31,6 +36,12 @@ export const SETTINGS_SECTIONS: {
     label: "Providers",
     description:
       "Agent CLIs MonoCode can drive, and the model new sessions start with.",
+  },
+  {
+    id: "plugins",
+    label: "Plugins",
+    description:
+      "Workspaces on the project rail, built in or installed from a plugin.json manifest.",
   },
   {
     id: "archive",

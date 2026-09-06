@@ -7,6 +7,7 @@ import {
   Search,
 } from "../chrome/icons";
 import {
+  Fragment,
   useCallback,
   useEffect,
   useMemo,
@@ -20,6 +21,18 @@ import { InboxProviderMark } from "../chrome/InboxProviderMark";
 import { RemoveProjectDialog } from "../chrome/RemoveProjectDialog";
 import { WindowControls } from "../chrome/WindowControls";
 import { useLockOverscroll } from "../hooks/useLockOverscroll";
+import {
+  installPlugin,
+  loadPluginConfig,
+  pluginsDir,
+  savePluginConfig,
+  refreshPlugins,
+  setPluginEnabled,
+  uninstallPlugin,
+  useInstalledPlugins,
+  type InstalledPlugin,
+} from "../plugins/registry";
+import { usePluginLog } from "../plugins/process";
 import {
   applyBodyGlass,
   applyThemePreference,
@@ -256,6 +269,7 @@ export function SettingsView({
           ) : null}
           {section === "keybindings" ? <KeybindingsPage /> : null}
           {section === "providers" ? <ProvidersPage /> : null}
+          {section === "plugins" ? <PluginsPage /> : null}
           {section === "archive" ? (
             <ArchivePage
               cwd={cwd}
@@ -1141,6 +1155,212 @@ function archivedProjectLabel(path: string): string {
     projectName(path),
     loadTabGroupLabels(),
     projectName(path),
+  );
+}
+
+function PluginsPage() {
+  const installed = useInstalledPlugins();
+  const [dir, setDir] = useState("");
+  const [draft, setDraft] = useState("");
+  const [error, setError] = useState<string | null>(null);
+  const [confirmId, setConfirmId] = useState<string | null>(null);
+  const [openId, setOpenId] = useState<string | null>(null);
+
+  useEffect(() => {
+    void pluginsDir()
+      .then(setDir)
+      .catch(() => {});
+  }, []);
+
+  const install = async () => {
+    setError(null);
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(draft);
+    } catch {
+      setError("That is not valid JSON.");
+      return;
+    }
+    try {
+      await installPlugin(parsed);
+      setDraft("");
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : String(cause));
+    }
+  };
+
+  return (
+    <>
+      <Heading title="Installed" first />
+      {installed.map((entry) => (
+        <Fragment key={entry.id}>
+          <Row
+            key={entry.id}
+            label={
+              <span className="flex items-center gap-2">
+                {entry.label}
+                <span className="text-[11px] font-normal text-content/35">
+                  {entry.builtIn ? "built-in" : entry.id}
+                </span>
+              </span>
+            }
+            description={
+              entry.error
+                ? `Manifest problem: ${entry.error}`
+                : (entry.description ?? undefined)
+            }
+          >
+            {entry.error ? null : (
+              <Toggle
+                label={entry.label}
+                on={entry.enabled}
+                onChange={(on) => setPluginEnabled(entry.id, on)}
+              />
+            )}
+            {entry.manifest?.fields?.length || !entry.builtIn ? (
+              <SecondaryButton
+                onClick={() =>
+                  setOpenId((current) =>
+                    current === entry.id ? null : entry.id,
+                  )
+                }
+              >
+                {openId === entry.id ? "Hide" : "Details"}
+              </SecondaryButton>
+            ) : null}
+            {entry.builtIn ? null : confirmId === entry.id ? (
+              <SecondaryButton
+                danger
+                onClick={() => {
+                  setConfirmId(null);
+                  void uninstallPlugin(entry.id);
+                }}
+              >
+                Delete manifest and token?
+              </SecondaryButton>
+            ) : (
+              <SecondaryButton onClick={() => setConfirmId(entry.id)}>
+                Uninstall
+              </SecondaryButton>
+            )}
+          </Row>
+          {openId === entry.id ? <PluginDetails entry={entry} /> : null}
+        </Fragment>
+      ))}
+
+      <Heading title="Install" />
+      <p className="pb-3 text-[12px] leading-relaxed text-content/45">
+        Paste a <code>plugin.json</code> below, or write the file yourself at{" "}
+        <code className="text-content/60">{dir}/&lt;id&gt;/plugin.json</code>{" "}
+        and hit Refresh. Format: <code>docs/plugins-for-ai.md</code>.
+      </p>
+      <textarea
+        value={draft}
+        onChange={(event) => setDraft(event.target.value)}
+        spellCheck={false}
+        placeholder={
+          '{ "id": "jira", "label": "Jira", "request": { "url": "…" } }'
+        }
+        className="h-40 w-full resize-y rounded-md border border-content/10 bg-content/5 p-2 font-mono text-[12px] outline-none"
+      />
+      {error ? <p className="pt-2 text-[12px] text-red-400">{error}</p> : null}
+      <div className="flex items-center gap-2 pt-3">
+        <SecondaryButton
+          onClick={() => void install()}
+          disabled={!draft.trim()}
+        >
+          Install
+        </SecondaryButton>
+        <SecondaryButton onClick={() => void refreshPlugins()}>
+          <RefreshCw className="size-3.5" strokeWidth={1.75} />
+          Refresh
+        </SecondaryButton>
+      </div>
+    </>
+  );
+}
+
+/** Per-plugin settings and the last lines it wrote. */
+function PluginDetails({ entry }: { entry: InstalledPlugin }) {
+  const fields = entry.manifest?.fields ?? [];
+  const [values, setValues] = useState<Record<string, string>>({});
+  const [saved, setSaved] = useState(false);
+  const log = usePluginLog(entry.id);
+
+  useEffect(() => {
+    void loadPluginConfig(entry.id)
+      .then((config) => {
+        if (!config || typeof config !== "object") return;
+        setValues(
+          Object.fromEntries(
+            Object.entries(config as Record<string, unknown>).map(
+              ([key, value]) => [key, value == null ? "" : String(value)],
+            ),
+          ),
+        );
+      })
+      .catch(() => {});
+  }, [entry.id]);
+
+  return (
+    <div className="mb-4 flex flex-col gap-3 rounded-md border border-content/10 bg-content/3 p-3">
+      {fields.length > 0 ? (
+        <div className="flex flex-col gap-2">
+          {fields.map((field) => (
+            <label key={field.key} className="flex items-center gap-3">
+              <span className="w-40 shrink-0 text-[12px] text-content/50">
+                {field.label ?? field.key}
+              </span>
+              <input
+                value={values[field.key] ?? ""}
+                onChange={(event) => {
+                  setSaved(false);
+                  setValues((prev) => ({
+                    ...prev,
+                    [field.key]: event.target.value,
+                  }));
+                }}
+                type={field.secret ? "password" : "text"}
+                placeholder={field.placeholder}
+                spellCheck={false}
+                className="h-7 min-w-0 flex-1 rounded-md border border-content/10 bg-content/5 px-2 text-[12px] outline-none"
+              />
+            </label>
+          ))}
+          <div className="flex items-center gap-2">
+            <SecondaryButton
+              onClick={() => {
+                void savePluginConfig(entry.id, values).then(() =>
+                  setSaved(true),
+                );
+              }}
+            >
+              Save settings
+            </SecondaryButton>
+            {saved ? (
+              <span className="text-[12px] text-content/45">
+                Saved. Commands pick it up on the next run.
+              </span>
+            ) : null}
+          </div>
+        </div>
+      ) : null}
+      <div>
+        <div className="pb-1 text-[11px] uppercase tracking-wide text-content/35">
+          Log
+        </div>
+        {log.length === 0 ? (
+          <p className="text-[12px] text-content/40">
+            Nothing written yet. Plugin stdout that is not a push lands here,
+            along with stderr and non-zero exits.
+          </p>
+        ) : (
+          <pre className="max-h-40 overflow-auto whitespace-pre-wrap break-all font-mono text-[11px] leading-snug text-content/60">
+            {log.slice(-12).join("\n")}
+          </pre>
+        )}
+      </div>
+    </div>
   );
 }
 

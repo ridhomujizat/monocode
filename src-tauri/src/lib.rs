@@ -11,6 +11,7 @@ mod macos;
 mod menu;
 mod notes;
 mod notifications;
+mod plugins;
 mod project_logo;
 mod pty;
 mod rate_limits;
@@ -167,6 +168,7 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_window_state::Builder::default().build())
         .manage(harness::HarnessHost::new())
+        .manage(plugins::PluginProcs::new())
         .manage(pty::PtyHost::new())
         .manage(window_transfer::WindowTransferState::new())
         .setup(|app| {
@@ -300,6 +302,16 @@ pub fn run() {
             notes::notes_get,
             notes::notes_upsert,
             notes::notes_delete,
+            plugins::plugin_fetch,
+            plugins::plugin_config_get,
+            plugins::plugin_config_set,
+            plugins::plugins_list,
+            plugins::plugins_dir,
+            plugins::plugin_install,
+            plugins::plugin_uninstall,
+            plugins::plugin_run,
+            plugins::plugin_stop,
+            plugins::plugin_stop_all,
             checkpoint::session_checkpoint_ensure,
             checkpoint::session_checkpoint_prepare,
             checkpoint::session_checkpoint_capture,

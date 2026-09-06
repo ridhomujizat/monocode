@@ -317,6 +317,9 @@ import { SearchView } from "./surfaces/SearchView";
 import { SettingsView } from "./surfaces/SettingsView";
 import { InboxView } from "./surfaces/InboxView";
 import { NotesView } from "./surfaces/NotesView";
+import { PluginSurface } from "./surfaces/PluginSurface";
+import { usePlugins } from "./plugins/registry";
+import { setPluginProjectCwd } from "./plugins/process";
 import { inboxComposerCard, type InboxItem } from "./lib/githubTasks";
 import { linearIssueDetails, peekLinearIssueDetails } from "./lib/linear";
 import {
@@ -607,6 +610,7 @@ export default function App({
   const [searchViewFocusToken, setSearchViewFocusToken] = useState(0);
   const [inboxViewOpen, setInboxViewOpen] = useState(false);
   const [notesViewOpen, setNotesViewOpen] = useState(false);
+  const [pluginId, setPluginId] = useState<string | null>(null);
   const notesEnabled = useSyncExternalStore(
     subscribeNotesEnabled,
     loadNotesEnabled,
@@ -618,6 +622,13 @@ export default function App({
     () => true,
   );
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const activePlugin = usePlugins().find((plugin) => plugin.id === pluginId);
+  const overlayOpen =
+    searchViewOpen ||
+    settingsOpen ||
+    inboxViewOpen ||
+    notesViewOpen ||
+    !!activePlugin;
   const [updateNotice, setUpdateNotice] = useState(installedUpdate);
   const [whatsNewVersion, setWhatsNewVersion] = useState<string | null>(null);
   const [settingsSection, setSettingsSection] =
@@ -742,13 +753,12 @@ export default function App({
 
   const stopSessionForRemoval = useCallback(
     async (sessionId: string): Promise<Session | undefined> => {
-      const open = sessionsRef.current.find((session) => session.id === sessionId);
+      const open = sessionsRef.current.find(
+        (session) => session.id === sessionId,
+      );
       if (!open?.busy) return open;
 
-      turnGen.current.set(
-        sessionId,
-        (turnGen.current.get(sessionId) ?? 0) + 1,
-      );
+      turnGen.current.set(sessionId, (turnGen.current.get(sessionId) ?? 0) + 1);
       flushHarnessEvents();
       await Promise.all(
         sessionChildHarnesses(open).map((harness) =>
@@ -868,7 +878,9 @@ export default function App({
       (session) => activeTab && leafIds(activeTab.layout).includes(session.id),
     );
   const sessionDefaults = active ?? sessions[0];
-  const activeSkillContext = active ? nativeSkillContextForSession(active) : null;
+  const activeSkillContext = active
+    ? nativeSkillContextForSession(active)
+    : null;
   const activeSkillCwd = activeSkillContext?.cwd;
 
   useEffect(() => {
@@ -1128,7 +1140,8 @@ export default function App({
       !session ||
       !shouldPersistSession(session) ||
       removingSessionIds.current.has(session.id)
-    ) return;
+    )
+      return;
     const fingerprint = persistFingerprint(session);
     void upsertSession(session)
       .then((summary) => {
@@ -1378,6 +1391,7 @@ export default function App({
     setSearchViewOpen(false);
     setInboxViewOpen(false);
     setNotesViewOpen(false);
+    setPluginId(null);
     const cwd = active?.cwd ?? sessionDefaults?.cwd ?? projectCwd;
     const session = newDefaultSession(cwd, sessionDefaults?.runtimeMode);
     const tab = newTab(session.id);
@@ -1399,6 +1413,7 @@ export default function App({
       const start = (description?: string) => {
         setInboxViewOpen(false);
         setNotesViewOpen(false);
+        setPluginId(null);
         setSidebarTab("sessions");
         const cwd =
           item.projectPath || active?.cwd || sessionDefaults?.cwd || projectCwd;
@@ -1452,6 +1467,7 @@ export default function App({
       setSearchViewOpen(false);
       setInboxViewOpen(false);
       setNotesViewOpen(false);
+      setPluginId(null);
       setSidebarTab("sessions");
       const cwd =
         (card.sourceCwd && looksLikeProject(card.sourceCwd)
@@ -1480,6 +1496,11 @@ export default function App({
       projectCwd,
     ],
   );
+
+  // Process plugins get the active project in their environment.
+  useEffect(() => {
+    setPluginProjectCwd(projectCwd);
+  }, [projectCwd]);
 
   useEffect(() => {
     const onAdd = (event: Event) => {
@@ -2923,6 +2944,7 @@ export default function App({
       setSearchViewOpen(false);
       setInboxViewOpen(false);
       setNotesViewOpen(false);
+      setPluginId(null);
       const normalized = normalizeProjectPath(path);
       if (!looksLikeProject(normalized)) return;
 
@@ -3686,14 +3708,15 @@ export default function App({
             modelSettings: current.modelSettings,
             runtimeMode: current.runtimeMode,
             intent,
-            text: wrap && !rawCommand
-              ? wrapHandoffPrompt(
-                  wrap.text,
-                  wrap.from,
-                  turnPrompt.trim() || CONTINUE_PROMPT,
-                  earlier,
-                )
-              : turnPrompt,
+            text:
+              wrap && !rawCommand
+                ? wrapHandoffPrompt(
+                    wrap.text,
+                    wrap.from,
+                    turnPrompt.trim() || CONTINUE_PROMPT,
+                    earlier,
+                  )
+                : turnPrompt,
             attachments: prepared,
             onEvent: (event) => {
               if (turnGen.current.get(sessionId) !== gen) return;
@@ -3762,7 +3785,9 @@ export default function App({
           // Next tick: the flush above has rendered by then, so the banner
           // quotes the reply's final text rather than the previous batch.
           window.setTimeout(() => {
-            const finished = sessionsRef.current.find((s) => s.id === sessionId);
+            const finished = sessionsRef.current.find(
+              (s) => s.id === sessionId,
+            );
             const visible = sessionId === activeSessionIdRef.current;
             const sent = finished
               ? notifySession(finished, "finished", visible)
@@ -4319,6 +4344,7 @@ export default function App({
       setSearchViewOpen(false);
       setInboxViewOpen(false);
       setNotesViewOpen(false);
+      setPluginId(null);
       onOpenApprovalSession(sessionId);
     },
     [onOpenApprovalSession],
@@ -4392,6 +4418,7 @@ export default function App({
     setSearchViewOpen(false);
     setInboxViewOpen(false);
     setNotesViewOpen(false);
+    setPluginId(null);
     setFilePickerOpen(true);
   }, []);
 
@@ -4399,6 +4426,7 @@ export default function App({
     setSearchViewOpen(false);
     setInboxViewOpen(false);
     setNotesViewOpen(false);
+    setPluginId(null);
     setSidebarTab("files");
     setFilesSearchOpen(true);
     setSearchFocusToken((token) => token + 1);
@@ -4409,6 +4437,7 @@ export default function App({
     setSettingsOpen(false);
     setInboxViewOpen(false);
     setNotesViewOpen(false);
+    setPluginId(null);
     setSearchViewOpen(true);
     setSearchViewFocusToken((token) => token + 1);
   }, []);
@@ -4422,6 +4451,7 @@ export default function App({
     setSettingsOpen(false);
     setSearchViewOpen(false);
     setNotesViewOpen(false);
+    setPluginId(null);
     setInboxViewOpen(true);
   }, []);
 
@@ -4440,6 +4470,16 @@ export default function App({
 
   const onLeaveNotes = useCallback(() => {
     setNotesViewOpen(false);
+    setPluginId(null);
+  }, []);
+
+  const onOpenPlugin = useCallback((id: string) => {
+    setFilePickerOpen(false);
+    setSettingsOpen(false);
+    setSearchViewOpen(false);
+    setInboxViewOpen(false);
+    setNotesViewOpen(false);
+    setPluginId(id);
   }, []);
 
   const openSettings = useCallback((section?: SettingsSectionId) => {
@@ -4447,6 +4487,7 @@ export default function App({
     setSearchViewOpen(false);
     setInboxViewOpen(false);
     setNotesViewOpen(false);
+    setPluginId(null);
     if (section) {
       setSettingsSection(section);
       saveSettingsSection(section);
@@ -4488,6 +4529,7 @@ export default function App({
     }
     if (notesViewOpen) {
       setNotesViewOpen(false);
+      setPluginId(null);
       return;
     }
     onVisitBack();
@@ -4498,6 +4540,7 @@ export default function App({
     setSettingsOpen(false);
     setInboxViewOpen(false);
     setNotesViewOpen(false);
+    setPluginId(null);
     onVisitForward();
   }, [onVisitForward]);
 
@@ -4983,6 +5026,8 @@ export default function App({
         inboxActive={inboxViewOpen}
         notesActive={notesViewOpen}
         notesEnabled={notesEnabled}
+        activePluginId={pluginId}
+        onOpenPlugin={onOpenPlugin}
         projectRailOpen={projectRailOpen}
         onToggleProjectRail={onToggleProjectRail}
         unseenFinishedIds={unseenFinishedIds}
@@ -4999,20 +5044,10 @@ export default function App({
       <div className="body-glass flex min-h-0 min-w-0 flex-1 flex-col">
         <div
           className={
-            searchViewOpen || settingsOpen || inboxViewOpen || notesViewOpen
-              ? "hidden"
-              : "flex min-h-0 min-w-0 flex-1 flex-col"
+            overlayOpen ? "hidden" : "flex min-h-0 min-w-0 flex-1 flex-col"
           }
-          aria-hidden={
-            searchViewOpen || settingsOpen || inboxViewOpen || notesViewOpen
-          }
-          inert={
-            searchViewOpen ||
-            settingsOpen ||
-            inboxViewOpen ||
-            notesViewOpen ||
-            undefined
-          }
+          aria-hidden={overlayOpen}
+          inert={overlayOpen || undefined}
         >
           {!IS_MAC ? (
             <MenuBar
@@ -5231,6 +5266,15 @@ export default function App({
             onToggleSidebar={onToggleSidebar}
           />
         ) : null}
+        {activePlugin ? (
+          <PluginSurface
+            plugin={activePlugin}
+            cwd={projectCwd}
+            besideRail={projectRailOpen}
+            onClose={() => setPluginId(null)}
+            onToggleSidebar={onToggleSidebar}
+          />
+        ) : null}
         {settingsOpen ? (
           <SettingsView
             section={settingsSection}
@@ -5248,10 +5292,7 @@ export default function App({
             onOpenWhatsNew={onOpenWhatsNew}
           />
         ) : null}
-        {searchViewOpen ||
-        inboxViewOpen ||
-        notesViewOpen ||
-        settingsOpen ? null : (
+        {overlayOpen ? null : (
           <UsageFooter
             providers={usageProviders}
             session={usageSession}

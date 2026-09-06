@@ -1,5 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 import { ask } from "@tauri-apps/plugin-dialog";
+import { stopAllPluginProcesses } from "../plugins/process";
 import {
   bindHarnessSession,
   forgetHarnessSession,
@@ -42,7 +43,11 @@ import {
 } from "./workspaceSnapshot";
 import { loadWindowTransfer } from "./windowTransferBootstrap";
 import type { WindowTransferPayload } from "./windowTransfer";
-import { lastProjectPath, normalizeProjectPath, sameProjectPath } from "./recents";
+import {
+  lastProjectPath,
+  normalizeProjectPath,
+  sameProjectPath,
+} from "./recents";
 
 export type { ResumedWorkspace };
 export { hasInFlightSessions };
@@ -127,8 +132,12 @@ export async function closeBusyWindow(): Promise<void> {
   if (!liveWorkspace) return;
   liveWorkspace.flush();
   await confirmQuitAndExit(
-    liveWorkspace.sessions(), liveWorkspace.tabs(), liveWorkspace.activeTabId(),
-    liveWorkspace.projectCwd(), liveWorkspace.projectTerminals(), true,
+    liveWorkspace.sessions(),
+    liveWorkspace.tabs(),
+    liveWorkspace.activeTabId(),
+    liveWorkspace.projectCwd(),
+    liveWorkspace.projectTerminals(),
+    true,
   );
 }
 
@@ -322,7 +331,9 @@ export async function persistQuitState(
   }
 }
 
-async function persistBootingResume(workspace: ResumedWorkspace): Promise<void> {
+async function persistBootingResume(
+  workspace: ResumedWorkspace,
+): Promise<void> {
   await Promise.all(
     workspace.sessions
       .filter(shouldPersistSession)
@@ -338,12 +349,10 @@ async function persistBootingResume(workspace: ResumedWorkspace): Promise<void> 
     ),
   ).catch(() => undefined);
   await replaceInFlightSessions(
-    workspace.sessions
-      .filter(wasTurnInterrupted)
-      .map((session) => ({
-        sessionId: session.id,
-        cwd: session.cwd,
-      })),
+    workspace.sessions.filter(wasTurnInterrupted).map((session) => ({
+      sessionId: session.id,
+      cwd: session.cwd,
+    })),
   ).catch(() => undefined);
 }
 
@@ -360,13 +369,16 @@ async function confirmQuitAndExit(
   try {
     const refs = inFlightRefs(sessions, tabs);
     if (refs.length > 0) {
-      const ok = await ask(closeWindow
-        ? "Close this window and stop its running chats? Other windows will stay open."
-        : quitWhileBusyMessage(refs.length), {
-        title: "MonoCode",
-        kind: "warning",
-        okLabel: closeWindow ? "Close window" : "Quit",
-      });
+      const ok = await ask(
+        closeWindow
+          ? "Close this window and stop its running chats? Other windows will stay open."
+          : quitWhileBusyMessage(refs.length),
+        {
+          title: "MonoCode",
+          kind: "warning",
+          okLabel: closeWindow ? "Close window" : "Quit",
+        },
+      );
       if (!ok) return;
     }
     quitting = true;
@@ -416,6 +428,8 @@ export async function reapWindowRuntime(
   // Catalog probes, title generators, and usage scrapers are not session
   // children. Drop them so an unused Pi/Codex probe cannot outlive the window.
   if (includeAllChildren) await killAllChildren().catch(() => undefined);
+  // Plugin watchers are detached from any session, so they need the same sweep.
+  if (includeAllChildren) await stopAllPluginProcesses();
 }
 
 function terminalFileIds(tabs: WorkspaceTab[]): string[] {

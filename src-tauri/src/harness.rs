@@ -773,7 +773,7 @@ fn spawn_managed(cmd: &mut Command) -> std::io::Result<std::process::Child> {
     }
 }
 
-fn terminate(pid: u32) {
+pub(crate) fn terminate(pid: u32) {
     terminate_after(pid, KILL_ESCALATE);
 }
 

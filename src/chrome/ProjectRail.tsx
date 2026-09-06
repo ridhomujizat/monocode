@@ -116,6 +116,8 @@ import { Shimmer } from "../surfaces/Shimmer";
 import { TabGroupMenu, type TabGroupMenuExtraItem } from "./TabGroupMenu";
 import { TerminalSpinner } from "./TerminalSpinner";
 import type { SettingsSectionId } from "../lib/settings";
+import { usePlugins } from "../plugins/registry";
+import { PluginCards } from "./PluginCards";
 
 const REVEAL_LABEL = IS_MAC
   ? "Reveal in Finder"
@@ -176,6 +178,8 @@ type Props = {
   notesEnabled?: boolean;
   onOpenNotes?: () => void;
   notesActive?: boolean;
+  activePluginId?: string | null;
+  onOpenPlugin?: (id: string) => void;
   onTogglePanel?: () => void;
   onSelectProject: (path: string) => void;
   onOpenProject: () => void;
@@ -209,6 +213,8 @@ export function ProjectRail({
   notesEnabled = true,
   onOpenNotes,
   notesActive = false,
+  activePluginId = null,
+  onOpenPlugin,
   onTogglePanel,
   onSelectProject,
   onOpenProject,
@@ -233,6 +239,7 @@ export function ProjectRail({
     initial: loadProjectRailWidth(),
     onCommit: saveProjectRailWidth,
   });
+  const railPlugins = usePlugins();
   const [railOrder, setRailOrder] = useState(loadProjectRailOrder);
   const [pinnedPaths, setPinnedPaths] = useState(loadPinnedProjects);
   const [groupLabels, setGroupLabels] = useState(loadTabGroupLabels);
@@ -899,6 +906,18 @@ export function ProjectRail({
                 ariaLabel="Notes"
               />
             ) : null}
+            {railPlugins.map((plugin) => (
+              <RailAction
+                key={plugin.id}
+                label={plugin.label}
+                icon={plugin.icon}
+                onClick={
+                  onOpenPlugin ? () => onOpenPlugin(plugin.id) : undefined
+                }
+                active={activePluginId === plugin.id}
+                ariaLabel={plugin.label}
+              />
+            ))}
           </div>
 
           <div
@@ -918,7 +937,9 @@ export function ProjectRail({
                 sortable={pinnedSortable}
                 sortIndexOf={(path) => pinnedIds.indexOf(path)}
                 pinned
-                searchActive={searchActive || inboxActive || notesActive}
+                searchActive={
+                  searchActive || inboxActive || notesActive || !!activePluginId
+                }
                 onSelect={onSelectProject}
                 onTogglePin={onTogglePin}
                 onContextMenu={onProjectContextMenu}
@@ -947,7 +968,9 @@ export function ProjectRail({
               sortable={cardSortable}
               sortIndexOf={(path) => flatIds.indexOf(path)}
               pinned={false}
-              searchActive={searchActive || inboxActive || notesActive}
+              searchActive={
+                searchActive || inboxActive || notesActive || !!activePluginId
+              }
               onSelect={onSelectProject}
               onTogglePin={onTogglePin}
               onContextMenu={onProjectContextMenu}
@@ -959,6 +982,7 @@ export function ProjectRail({
               groupMascots={groupMascots}
             />
           </div>
+          <PluginCards />
           <LiveAgentsPreview
             agents={liveAgents}
             activeSessionId={activeSessionId}
