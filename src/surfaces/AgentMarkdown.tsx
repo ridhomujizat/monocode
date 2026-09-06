@@ -5,10 +5,12 @@ import {
   memo,
   useContext,
   useEffect,
+  useLayoutEffect,
   useMemo,
   useRef,
   useState,
   type ComponentProps,
+  type CSSProperties,
   type ReactNode,
 } from "react";
 import { harden } from "rehype-harden";
@@ -21,6 +23,7 @@ import {
 } from "streamdown";
 import type { PluggableList } from "unified";
 import { FileTypeIcon } from "../chrome/FileTypeIcon";
+import { Minus, Plus } from "../chrome/icons";
 import { createLazyMermaidPlugin } from "./mermaidPlugin";
 import { resolveWorkspacePath } from "../lib/paths";
 import { isAtxHeadingLine } from "../lib/markdownSource";
@@ -35,6 +38,10 @@ const MERMAID_BASE_CONFIG = {
   securityLevel: "strict",
   suppressErrorRendering: true,
 } as const;
+
+const MERMAID_MIN_ZOOM = 0.5;
+const MERMAID_MAX_ZOOM = 3;
+const MERMAID_ZOOM_STEP = 1.1;
 
 const mermaid = createLazyMermaidPlugin({
   config: {
@@ -439,8 +446,13 @@ function MermaidBlock({
   const [svg, setSvg] = useState<string | null>(null);
   const [failed, setFailed] = useState(false);
   const colorScheme = useColorScheme();
+  const [zoom, setZoom] = useState(1);
+  const [fitSize, setFitSize] = useState<{ w: number; h: number } | null>(null);
+  const blockRef = useRef<HTMLDivElement | null>(null);
 
   useEffect(() => {
+    setZoom(1);
+    setFitSize(null);
     if (incomplete) {
       setSvg(null);
       setFailed(false);
@@ -468,6 +480,18 @@ function MermaidBlock({
     };
   }, [code, incomplete, colorScheme]);
 
+  // Snapshot the diagram's fitted (zoom = 100%) box so zoom levels scale from
+  // what is actually on screen, not from the diagram's natural size.
+  useLayoutEffect(() => {
+    if (!svg) return;
+    const el = blockRef.current?.querySelector("svg");
+    if (!el) return;
+    const rect = el.getBoundingClientRect();
+    if (rect.width > 0 && rect.height > 0) {
+      setFitSize({ w: rect.width, h: rect.height });
+    }
+  }, [svg]);
+
   if (incomplete || failed) {
     return (
       <div className="markdown-code-shell" dir="ltr">
@@ -491,13 +515,72 @@ function MermaidBlock({
     );
   }
 
+  const zoomed = zoom !== 1;
+
   return (
     <div
-      className="mermaid-block overflow-x-auto rounded-[10px] border border-content/10 bg-content/6 p-3"
+      ref={blockRef}
+      className="mermaid-block relative rounded-[10px] border border-content/10 bg-content/6"
       data-streamdown="mermaid-block"
       dir="ltr"
-      dangerouslySetInnerHTML={{ __html: svg }}
-    />
+    >
+      <div
+        className="overflow-x-auto p-3"
+        data-zoomed={zoomed && fitSize ? "true" : undefined}
+        style={
+          zoomed && fitSize
+            ? ({
+                "--mermaid-zoom-w": `${(fitSize.w * zoom).toFixed(2)}px`,
+              } as CSSProperties)
+            : undefined
+        }
+        dangerouslySetInnerHTML={{ __html: svg }}
+      />
+      <div className="absolute right-2 top-2 z-10 flex items-center gap-0.5 rounded-lg border border-content/10 bg-background-base/85 p-0.5 text-content/60 shadow-sm backdrop-blur">
+        <button
+          type="button"
+          title="Zoom out"
+          aria-label="Zoom out"
+          className="grid size-5 place-items-center rounded hover:bg-content/10 hover:text-content disabled:pointer-events-none disabled:opacity-40"
+          disabled={zoom <= MERMAID_MIN_ZOOM}
+          onClick={() =>
+            setZoom((v) =>
+              Math.min(
+                MERMAID_MAX_ZOOM,
+                Math.max(MERMAID_MIN_ZOOM, v / MERMAID_ZOOM_STEP),
+              ),
+            )
+          }
+        >
+          <Minus className="size-3" strokeWidth={1.75} />
+        </button>
+        <button
+          type="button"
+          title="Reset zoom"
+          className="min-w-10 rounded px-1 text-center text-[11px] tabular-nums hover:bg-content/10 hover:text-content"
+          onClick={() => setZoom(1)}
+        >
+          {Math.round(zoom * 100)}%
+        </button>
+        <button
+          type="button"
+          title="Zoom in"
+          aria-label="Zoom in"
+          className="grid size-5 place-items-center rounded hover:bg-content/10 hover:text-content disabled:pointer-events-none disabled:opacity-40"
+          disabled={zoom >= MERMAID_MAX_ZOOM}
+          onClick={() =>
+            setZoom((v) =>
+              Math.min(
+                MERMAID_MAX_ZOOM,
+                Math.max(MERMAID_MIN_ZOOM, v * MERMAID_ZOOM_STEP),
+              ),
+            )
+          }
+        >
+          <Plus className="size-3" strokeWidth={1.75} />
+        </button>
+      </div>
+    </div>
   );
 }
 

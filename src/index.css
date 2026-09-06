@@ -648,6 +648,13 @@ header[data-tauri-drag-region] button {
   margin-inline: auto;
 }
 
+/* When zoomed, the diagram scales past the block: an explicit width wins over
+   mermaid's inline max-width, and the scroll container handles the overflow. */
+.agent-markdown .mermaid-block [data-zoomed] svg {
+  width: var(--mermaid-zoom-w, 100%) !important;
+  max-width: none !important;
+}
+
 .agent-markdown .inbox-media {
   vertical-align: middle;
 }
