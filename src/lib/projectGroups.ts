@@ -6,18 +6,23 @@ import {
   type RecentProject,
 } from "./recents";
 import { orderByIds } from "./reorder";
-
 import { TAB_GROUP_COLORS } from "./tabGroups";
 
 const KEY = "monocode.projectGroups";
 /** Flat-order marker that starts the ungrouped run (see splitUnifiedOrder). */
 export const UNGROUPED_MARKER = "ungrouped";
 
+export type ProjectGroupMember = {
+  /** Unique per membership: the same path may live in several groups. */
+  id: string;
+  path: string;
+};
+
 export type ProjectGroup = {
   id: string;
   name: string;
-  /** Normalized project paths, deduped by path key. */
-  paths: string[];
+  /** Normalized project paths, deduped by path key within the group. */
+  members: ProjectGroupMember[];
   collapsed: boolean;
   /** Pinned groups render inside the Pinned section, above pinned projects. */
   pinned?: boolean;
@@ -28,12 +33,20 @@ export type ProjectGroup = {
 };
 
 export type ProjectGroupEntry =
-  | { kind: "group"; group: ProjectGroup; projects: RecentProject[] }
+  | {
+      kind: "group";
+      group: ProjectGroup;
+      /** Resolved members, aligned by index with `projects`. */
+      members: ProjectGroupMember[];
+      projects: RecentProject[];
+    }
   | { kind: "project"; project: RecentProject };
 
 type StoredGroup = {
   id?: unknown;
   name?: unknown;
+  members?: unknown;
+  /** Legacy shape (pre-uuid memberships). */
   paths?: unknown;
   collapsed?: unknown;
   pinned?: unknown;
@@ -46,7 +59,17 @@ export function groupContaining(
   path: string,
 ): ProjectGroup | undefined {
   return groups.find((group) =>
-    group.paths.some((member) => sameProjectPath(member, path)),
+    group.members.some((member) => sameProjectPath(member.path, path)),
+  );
+}
+
+/** Every group holding the path — a path may join several groups. */
+export function groupsContaining(
+  groups: ProjectGroup[],
+  path: string,
+): ProjectGroup[] {
+  return groups.filter((group) =>
+    group.members.some((member) => sameProjectPath(member.path, path)),
   );
 }
 
@@ -71,7 +94,7 @@ export function createGroup(
   const group: ProjectGroup = {
     id,
     name: name ?? uniqueGroupName(groups),
-    paths: [],
+    members: [],
     collapsed: false,
   };
   return { groups: [group, ...groups], id };
@@ -82,59 +105,75 @@ export function createGroupWithProjects(
   paths: string[],
   name?: string,
 ): { groups: ProjectGroup[]; id: string } {
-  const members = uniquePaths(paths);
+  const members = pathsToMembers(paths);
   if (members.length === 0) return { groups, id: "" };
-  const next = removeProjects(groups, members);
   const id = crypto.randomUUID();
   const group: ProjectGroup = {
     id,
-    name: name ?? uniqueGroupName(next),
-    paths: members,
+    name: name ?? uniqueGroupName(groups),
+    members,
     collapsed: false,
   };
-  return { groups: [group, ...next], id };
+  return { groups: [group, ...groups], id };
 }
 
+/**
+ * Joining a group never pulls the path out of other groups — one folder may
+ * live in several groups at once. Joining twice within one group is a no-op.
+ */
 export function addProjectToGroup(
   groups: ProjectGroup[],
   groupId: string,
   path: string,
 ): ProjectGroup[] {
   if (!path || !groups.some((group) => group.id === groupId)) return groups;
-  const current = groupContaining(groups, path);
-  if (current?.id === groupId) return groups;
-  return groups.map((group) => {
-    if (group.id === groupId) {
-      return {
-        ...group,
-        paths: [...group.paths, normalizeProjectPath(path)],
-      };
-    }
-    if (!group.paths.some((member) => sameProjectPath(member, path))) {
-      return group;
-    }
-    return {
-      ...group,
-      paths: group.paths.filter((member) => !sameProjectPath(member, path)),
-    };
-  });
+  const target = groups.find((group) => group.id === groupId);
+  if (target?.members.some((member) => sameProjectPath(member.path, path))) {
+    return groups;
+  }
+  return groups.map((group) =>
+    group.id === groupId
+      ? { ...group, members: [...group.members, makeMember(path)] }
+      : group,
+  );
 }
 
+/** Removes every membership of the path across all groups. */
 export function removeProjectFromGroup(
   groups: ProjectGroup[],
   path: string,
 ): ProjectGroup[] {
-  if (!groupContaining(groups, path)) return groups;
-  return groups.map((group) =>
-    group.paths.some((member) => sameProjectPath(member, path))
-      ? {
-          ...group,
-          paths: group.paths.filter(
-            (member) => !sameProjectPath(member, path),
-          ),
-        }
-      : group,
-  );
+  let changed = false;
+  const next = groups.map((group) => {
+    if (!group.members.some((member) => sameProjectPath(member.path, path))) {
+      return group;
+    }
+    changed = true;
+    return {
+      ...group,
+      members: group.members.filter(
+        (member) => !sameProjectPath(member.path, path),
+      ),
+    };
+  });
+  return changed ? next : groups;
+}
+
+/** Removes a single membership by id (dragging a card out of its group). */
+export function removeMembership(
+  groups: ProjectGroup[],
+  memberId: string,
+): ProjectGroup[] {
+  let changed = false;
+  const next = groups.map((group) => {
+    if (!group.members.some((member) => member.id === memberId)) return group;
+    changed = true;
+    return {
+      ...group,
+      members: group.members.filter((member) => member.id !== memberId),
+    };
+  });
+  return changed ? next : groups;
 }
 
 export function dissolveGroup(
@@ -182,6 +221,7 @@ export function setGroupPinned(
     entry.id === groupId ? { ...entry, pinned } : entry,
   );
 }
+
 export function setGroupColor(
   groups: ProjectGroup[],
   groupId: string,
@@ -216,9 +256,7 @@ export function setGroupCustomColor(
   if (hex == null) return groups;
   if (group.customColor === hex && group.colorIndex == null) return groups;
   return groups.map((entry) =>
-    entry.id === groupId
-      ? { ...withoutColors(entry), customColor: hex }
-      : entry,
+    entry.id === groupId ? { ...withoutColors(entry), customColor: hex } : entry,
   );
 }
 
@@ -230,15 +268,24 @@ export function setGroupProjects(
 ): ProjectGroup[] {
   const group = groups.find((entry) => entry.id === groupId);
   if (!group) return groups;
-  const members = uniquePaths(paths);
+  const members = pathsToMembers(paths).map((member) => {
+    // Keep the membership id when the path already belongs to the group so
+    // drag identities survive plain reorders.
+    const existing = group.members.find((entry) =>
+      sameProjectPath(entry.path, member.path),
+    );
+    return existing ? { ...existing, path: member.path } : member;
+  });
   if (
-    members.length === group.paths.length &&
-    members.every((path, index) => sameProjectPath(path, group.paths[index]))
+    members.length === group.members.length &&
+    members.every((member, index) =>
+      sameProjectPath(member.path, group.members[index].path),
+    )
   ) {
     return groups;
   }
   return groups.map((entry) =>
-    entry.id === groupId ? { ...entry, paths: members } : entry,
+    entry.id === groupId ? { ...entry, members } : entry,
   );
 }
 
@@ -257,15 +304,14 @@ export function reorderGroupContainers(
     return groups;
   }
   let next = 0;
-  return groups.map((group) =>
-    idSet.has(group.id) ? ordered[next++]! : group,
-  );
+  return groups.map((group) => (idSet.has(group.id) ? ordered[next++]! : group));
 }
 
 /**
  * Groups in stored order, each resolving its members to known projects in
- * `paths` order; then the remaining projects in rail order. Pinned projects
- * belong to the Pinned section only, and empty groups are skipped.
+ * member order; then the remaining projects in rail order. A project held by
+ * several groups appears in each of them. Pinned projects belong to the
+ * Pinned section only, and groups render even when empty.
  */
 export function buildProjectGroupEntries(
   projects: RecentProject[],
@@ -278,18 +324,21 @@ export function buildProjectGroupEntries(
   const pinned = new Set(pinnedPaths.map(pathKey));
   const grouped = new Set<string>();
   for (const group of groups) {
-    for (const path of group.paths) grouped.add(pathKey(path));
+    for (const member of group.members) grouped.add(pathKey(member.path));
   }
   const entries: ProjectGroupEntry[] = [];
   for (const group of groups) {
-    const members: RecentProject[] = [];
-    for (const path of group.paths) {
-      const key = pathKey(path);
+    const members: ProjectGroupMember[] = [];
+    const resolved: RecentProject[] = [];
+    for (const member of group.members) {
+      const key = pathKey(member.path);
       if (pinned.has(key)) continue;
       const project = byKey.get(key);
-      if (project) members.push(project);
+      if (!project) continue;
+      members.push(member);
+      resolved.push(project);
     }
-    entries.push({ kind: "group", group, projects: members });
+    entries.push({ kind: "group", group, members, projects: resolved });
   }
   for (const project of projects) {
     const key = pathKey(project.path);
@@ -361,15 +410,64 @@ export function pruneProjectGroups(
   let changed = false;
   const next: ProjectGroup[] = [];
   for (const group of groups) {
-    const paths = group.paths.filter((path) => known.has(pathKey(path)));
-    if (paths.length !== group.paths.length) {
+    const members = group.members.filter((member) =>
+      known.has(pathKey(member.path)),
+    );
+    if (members.length !== group.members.length) {
       changed = true;
-      next.push({ ...group, paths });
+      next.push({ ...group, members });
     } else {
       next.push(group);
     }
   }
   return changed ? next : groups;
+}
+
+const ARCHIVED_KEY = "monocode.archivedGroups";
+
+/** Removes the group from the active list so it can be parked in the archive. */
+export function archiveGroup(
+  groups: ProjectGroup[],
+  groupId: string,
+): { groups: ProjectGroup[]; archived: ProjectGroup | null } {
+  const archived = groups.find((group) => group.id === groupId);
+  if (!archived) return { groups, archived: null };
+  return { groups: groups.filter((group) => group.id !== groupId), archived };
+}
+
+/** Moves an archived group back into the active list (prepended). */
+export function restoreGroup(
+  archived: ProjectGroup[],
+  groupId: string,
+): { archived: ProjectGroup[]; group: ProjectGroup | null } {
+  const group = archived.find((entry) => entry.id === groupId);
+  if (!group) return { archived, group: null };
+  return {
+    archived: archived.filter((entry) => entry.id !== groupId),
+    group,
+  };
+}
+
+export function loadArchivedGroups(): ProjectGroup[] {
+  try {
+    const raw = localStorage.getItem(ARCHIVED_KEY);
+    if (!raw) return [];
+    return parseGroups(JSON.parse(raw));
+  } catch {
+    return [];
+  }
+}
+
+export function saveArchivedGroups(groups: ProjectGroup[]): void {
+  try {
+    if (groups.length === 0) {
+      localStorage.removeItem(ARCHIVED_KEY);
+      return;
+    }
+    localStorage.setItem(ARCHIVED_KEY, JSON.stringify(groups));
+  } catch {
+    // private mode / quota
+  }
 }
 
 export function loadProjectGroups(): ProjectGroup[] {
@@ -414,12 +512,8 @@ function parseGroup(value: unknown): ProjectGroup | null {
   if (typeof rec.name !== "string") return null;
   const name = rec.name.trim();
   if (!name) return null;
-  if (!Array.isArray(rec.paths)) return null;
-  const paths = uniquePaths(
-    rec.paths.filter(
-      (path): path is string => typeof path === "string" && !!path,
-    ),
-  );
+  const members = parseMembers(rec);
+  if (members == null) return null;
   const customColor = parseCustomHex(
     typeof rec.customColor === "string" ? rec.customColor : null,
   );
@@ -429,7 +523,7 @@ function parseGroup(value: unknown): ProjectGroup | null {
   return {
     id: rec.id,
     name,
-    paths,
+    members,
     collapsed: rec.collapsed === true,
     ...(rec.pinned === true ? { pinned: true } : {}),
     ...(customColor != null
@@ -438,6 +532,38 @@ function parseGroup(value: unknown): ProjectGroup | null {
         ? { colorIndex }
         : {}),
   };
+}
+
+/** Accepts uuid memberships and migrates the legacy `paths` string array. */
+function parseMembers(rec: StoredGroup): ProjectGroupMember[] | null {
+  if (Array.isArray(rec.members)) {
+    const seen = new Set<string>();
+    const out: ProjectGroupMember[] = [];
+    for (const item of rec.members) {
+      if (!item || typeof item !== "object") continue;
+      const member = item as { id?: unknown; path?: unknown };
+      if (typeof member.path !== "string" || !member.path) continue;
+      const key = pathKey(member.path);
+      if (seen.has(key)) continue;
+      seen.add(key);
+      out.push({
+        id:
+          typeof member.id === "string" && member.id
+            ? member.id
+            : crypto.randomUUID(),
+        path: normalizeProjectPath(member.path),
+      });
+    }
+    return out;
+  }
+  if (Array.isArray(rec.paths)) {
+    return pathsToMembers(
+      rec.paths.filter(
+        (path): path is string => typeof path === "string" && !!path,
+      ),
+    );
+  }
+  return null;
 }
 
 function sanitizeColorIndex(colorIndex: number | null): number | undefined {
@@ -462,29 +588,18 @@ function withoutColors(group: ProjectGroup): ProjectGroup {
   return rest;
 }
 
-function uniquePaths(paths: string[]): string[] {
+function makeMember(path: string): ProjectGroupMember {
+  return { id: crypto.randomUUID(), path: normalizeProjectPath(path) };
+}
+
+function pathsToMembers(paths: string[]): ProjectGroupMember[] {
   const seen = new Set<string>();
-  const out: string[] = [];
+  const out: ProjectGroupMember[] = [];
   for (const path of paths) {
     const key = pathKey(path);
     if (!key || seen.has(key)) continue;
     seen.add(key);
-    out.push(normalizeProjectPath(path));
+    out.push(makeMember(path));
   }
   return out;
 }
-
-function removeProjects(
-  groups: ProjectGroup[],
-  paths: string[],
-): ProjectGroup[] {
-  const drop = new Set(paths.map(pathKey));
-  return groups.map((group) => {
-    if (!group.paths.some((member) => drop.has(pathKey(member)))) return group;
-    return {
-      ...group,
-      paths: group.paths.filter((member) => !drop.has(pathKey(member))),
-    };
-  });
-}
-

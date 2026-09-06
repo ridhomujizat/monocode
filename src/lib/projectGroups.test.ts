@@ -6,8 +6,10 @@ import {
   createGroupWithProjects,
   dissolveGroup,
   groupContaining,
+  groupsContaining,
   loadProjectGroups,
   pruneProjectGroups,
+  removeMembership,
   removeProjectFromGroup,
   renameGroup,
   reorderGroupContainers,
@@ -21,6 +23,7 @@ import {
   UNGROUPED_MARKER,
   uniqueGroupName,
   type ProjectGroup,
+  type ProjectGroupMember,
 } from "./projectGroups";
 import type { RecentProject } from "./recents";
 
@@ -28,6 +31,10 @@ const KEY = "monocode.projectGroups";
 
 function project(path: string, openedAt = 1): RecentProject {
   return { path, openedAt };
+}
+
+function member(path: string, id = `m:${path}`): ProjectGroupMember {
+  return { id, path };
 }
 
 function group(
@@ -38,7 +45,7 @@ function group(
   return {
     id,
     name: id,
-    paths,
+    members: paths.map((path, index) => member(path, `${id}#${index}`)),
     collapsed: false,
     ...overrides,
   };
@@ -83,14 +90,6 @@ describe("uniqueGroupName", () => {
   });
 });
 
-describe("groupContaining", () => {
-  it("matches modulo trailing slashes", () => {
-    const groups = [group("g", ["/tmp/one"])];
-    expect(groupContaining(groups, "/tmp/one/")?.id).toBe("g");
-    expect(groupContaining(groups, "/tmp/two")).toBeUndefined();
-  });
-});
-
 describe("createGroup", () => {
   it("prepends an empty group with a unique name", () => {
     const start = [group("g", ["/p/a"], { name: "New group" })];
@@ -102,12 +101,25 @@ describe("createGroup", () => {
   });
 });
 
+describe("groupContaining / groupsContaining", () => {
+  it("matches modulo trailing slashes and reports every holder", () => {
+    const groups = [group("g1", ["/tmp/one"]), group("g2", ["/tmp/one/"])];
+    expect(groupContaining(groups, "/tmp/one/")?.id).toBe("g1");
+    expect(groupsContaining(groups, "/tmp/one/").map((g) => g.id)).toEqual([
+      "g1",
+      "g2",
+    ]);
+    expect(groupsContaining(groups, "/tmp/two")).toEqual([]);
+  });
+});
+
 describe("createGroupWithProjects", () => {
   it("prepends the new group", () => {
     const start = [group("a", ["/p/a"])];
     const { groups, id } = createGroupWithProjects(start, ["/p/b"], "Work");
     expect(groups.map((entry) => entry.id)).toEqual([id, "a"]);
-    expect(groups[0]).toMatchObject({ name: "Work", paths: ["/p/b"] });
+    expect(groups[0]?.name).toBe("Work");
+    expect(groups[0]?.members.map((m) => m.path)).toEqual(["/p/b"]);
   });
 
   it("dedupes paths", () => {
@@ -115,19 +127,20 @@ describe("createGroupWithProjects", () => {
       [],
       ["/p/a/", "/p/a", "/p/b"],
     );
-    expect(groups.find((entry) => entry.id === id)?.paths).toEqual([
-      "/p/a",
-      "/p/b",
-    ]);
+    expect(
+      groups.find((entry) => entry.id === id)?.members.map((m) => m.path),
+    ).toEqual(["/p/a", "/p/b"]);
   });
 
-  it("pulls projects out of their previous groups, keeping them when empty", () => {
+  it("does not pull projects out of their other groups", () => {
     const start = [group("g1", ["/p/a"]), group("g2", ["/p/b", "/p/c"])];
     const { groups, id } = createGroupWithProjects(start, ["/p/a", "/p/b"]);
     expect(groups.map((entry) => entry.id)).toEqual([id, "g1", "g2"]);
-    expect(groups[0]?.paths).toEqual(["/p/a", "/p/b"]);
-    expect(groups[1]?.paths).toEqual([]);
-    expect(groups[2]?.paths).toEqual(["/p/c"]);
+    expect(groups.map((entry) => entry.members.map((m) => m.path))).toEqual([
+      ["/p/a", "/p/b"],
+      ["/p/a"],
+      ["/p/b", "/p/c"],
+    ]);
   });
 
   it("returns no id for empty paths", () => {
@@ -139,15 +152,16 @@ describe("createGroupWithProjects", () => {
 });
 
 describe("addProjectToGroup", () => {
-  it("moves a project between groups, leaving the source empty", () => {
+  it("joins without leaving other groups", () => {
     const start = [group("g1", ["/p/a"]), group("g2", ["/p/b"])];
     const next = addProjectToGroup(start, "g2", "/p/a");
-    expect(next.map((entry) => entry.id)).toEqual(["g1", "g2"]);
-    expect(next[0]?.paths).toEqual([]);
-    expect(next[1]?.paths).toEqual(["/p/b", "/p/a"]);
+    expect(next.map((entry) => entry.members.map((m) => m.path))).toEqual([
+      ["/p/a"],
+      ["/p/b", "/p/a"],
+    ]);
   });
 
-  it("returns the same reference for an unknown group or an existing member", () => {
+  it("returns the same reference for an unknown group, an existing member, or an empty path", () => {
     const start = [group("g1", ["/p/a"])];
     expect(addProjectToGroup(start, "nope", "/p/a")).toBe(start);
     expect(addProjectToGroup(start, "g1", "/p/a")).toBe(start);
@@ -156,13 +170,13 @@ describe("addProjectToGroup", () => {
 });
 
 describe("removeProjectFromGroup", () => {
-  it("leaves the group in place when it empties", () => {
-    expect(removeProjectFromGroup([group("g", ["/p/a"])], "/p/a")).toEqual([
-      group("g", []),
+  it("removes every membership of the path and keeps empty groups", () => {
+    const start = [group("g1", ["/p/a"]), group("g2", ["/p/a", "/p/b"])];
+    const next = removeProjectFromGroup(start, "/p/a/");
+    expect(next.map((entry) => entry.members.map((m) => m.path))).toEqual([
+      [],
+      ["/p/b"],
     ]);
-    const start = [group("g", ["/p/a", "/p/b"])];
-    const next = removeProjectFromGroup(start, "/p/a");
-    expect(next).toEqual([group("g", ["/p/b"])]);
   });
 
   it("returns the same reference when the project is ungrouped", () => {
@@ -171,11 +185,30 @@ describe("removeProjectFromGroup", () => {
   });
 });
 
+describe("removeMembership", () => {
+  it("removes a single membership by id", () => {
+    const start = [group("g1", ["/p/a"]), group("g2", ["/p/a", "/p/b"])];
+    const next = removeMembership(start, "g2#0");
+    expect(next.map((entry) => entry.members.map((m) => m.path))).toEqual([
+      ["/p/a"],
+      ["/p/b"],
+    ]);
+  });
+
+  it("returns the same reference for an unknown membership", () => {
+    const start = [group("g", ["/p/a"])];
+    expect(removeMembership(start, "nope")).toBe(start);
+  });
+});
+
 describe("setGroupProjects", () => {
-  it("replaces member order with normalized deduped paths", () => {
+  it("replaces member order with normalized deduped paths, keeping ids", () => {
     const start = [group("g", ["/p/a", "/p/b"])];
     const next = setGroupProjects(start, "g", ["/p/b/", "/p/a", "/p/b"]);
-    expect(next[0]?.paths).toEqual(["/p/b", "/p/a"]);
+    expect(next[0]?.members).toEqual([
+      member("/p/b", "g#1"),
+      member("/p/a", "g#0"),
+    ]);
   });
 
   it("returns the same reference when nothing changes", () => {
@@ -192,7 +225,7 @@ describe("setGroupProjects", () => {
 });
 
 describe("pruneProjectGroups", () => {
-  it("drops unknown paths but keeps the groups", () => {
+  it("drops unknown member paths but keeps the groups", () => {
     const start = [
       group("g1", ["/p/a", "/gone"]),
       group("g2", ["/gone2"]),
@@ -230,21 +263,14 @@ describe("renameGroup", () => {
   });
 });
 
-describe("setGroupCollapsed", () => {
+describe("setGroupCollapsed / setGroupPinned", () => {
   it("toggles and ignores unchanged state", () => {
     const start = [group("g", ["/p/a"])];
     expect(setGroupCollapsed(start, "g", true)[0]?.collapsed).toBe(true);
     expect(setGroupCollapsed(start, "g", false)).toBe(start);
-    expect(setGroupCollapsed(start, "nope", true)).toBe(start);
-  });
-});
-
-describe("setGroupPinned", () => {
-  it("toggles and ignores unchanged state", () => {
-    const start = [group("g", ["/p/a"])];
-    expect(setGroupPinned(start, "g", true)).toEqual([
-      group("g", ["/p/a"], { pinned: true }),
-    ]);
+    expect(setGroupPinned(start, "g", true)).toEqual(
+      [group("g", ["/p/a"], { pinned: true })],
+    );
     const pinned = setGroupPinned(start, "g", true);
     expect(setGroupPinned(pinned, "g", true)).toBe(pinned);
     expect(setGroupPinned(start, "nope", true)).toBe(start);
@@ -286,7 +312,7 @@ describe("reorderGroupContainers", () => {
 });
 
 describe("buildProjectGroupEntries", () => {
-  it("lists groups in stored order, members in path order, then the rest in rail order", () => {
+  it("lists groups in stored order, members in member order, then the rest in rail order", () => {
     const projects = [
       project("/p/a"),
       project("/p/b"),
@@ -297,10 +323,41 @@ describe("buildProjectGroupEntries", () => {
     const groups = [group("gy", ["/p/b", "/p/a"]), group("gx", ["/p/c"])];
     const entries = buildProjectGroupEntries(projects, groups, []);
     expect(entries).toEqual([
-      { kind: "group", group: groups[0], projects: [projects[1], projects[0]] },
-      { kind: "group", group: groups[1], projects: [projects[2]] },
+      {
+        kind: "group",
+        group: groups[0],
+        members: groups[0].members,
+        projects: [projects[1], projects[0]],
+      },
+      {
+        kind: "group",
+        group: groups[1],
+        members: groups[1].members,
+        projects: [projects[2]],
+      },
       { kind: "project", project: projects[3] },
       { kind: "project", project: projects[4] },
+    ]);
+  });
+
+  it("renders the same project in every group that holds it", () => {
+    const projects = [project("/p/a"), project("/p/b")];
+    const groups = [group("g1", ["/p/a"]), group("g2", ["/p/a"])];
+    const entries = buildProjectGroupEntries(projects, groups, []);
+    expect(entries).toEqual([
+      {
+        kind: "group",
+        group: groups[0],
+        members: groups[0].members,
+        projects: [projects[0]],
+      },
+      {
+        kind: "group",
+        group: groups[1],
+        members: groups[1].members,
+        projects: [projects[0]],
+      },
+      { kind: "project", project: projects[1] },
     ]);
   });
 
@@ -309,8 +366,8 @@ describe("buildProjectGroupEntries", () => {
     const groups = [group("g1", ["/p/a", "/gone"]), group("g2", ["/gone2"])];
     const entries = buildProjectGroupEntries(projects, groups, ["/p/a"]);
     expect(entries).toEqual([
-      { kind: "group", group: groups[0], projects: [] },
-      { kind: "group", group: groups[1], projects: [] },
+      { kind: "group", group: groups[0], members: [], projects: [] },
+      { kind: "group", group: groups[1], members: [], projects: [] },
       { kind: "project", project: projects[1] },
     ]);
   });
@@ -380,7 +437,7 @@ describe("project group persistence", () => {
     mockLocalStorage();
   });
 
-  it("round-trips groups and normalizes paths", () => {
+  it("round-trips groups and normalizes member paths", () => {
     const groups = [
       group("g", ["/tmp/one/"], { name: "Work", collapsed: true }),
     ];
@@ -390,20 +447,17 @@ describe("project group persistence", () => {
     ]);
   });
 
-  it("round-trips a pinned group and omits the flag when false", () => {
-    saveProjectGroups([
-      group("g1", ["/p/a"], { pinned: true }),
-      group("g2", ["/p/b"]),
-    ]);
-    expect(loadProjectGroups()).toEqual([
-      group("g1", ["/p/a"], { pinned: true }),
-      group("g2", ["/p/b"]),
-    ]);
+  it("migrates the legacy paths array to uuid memberships", () => {
     localStorage.setItem(
       KEY,
-      JSON.stringify([{ id: "g3", name: "X", paths: ["/p/c"], pinned: "yes" }]),
+      JSON.stringify([{ id: "g1", name: "Work", paths: ["/p/a", "/p/b"] }]),
     );
-    expect(loadProjectGroups()).toEqual([group("g3", ["/p/c"], { name: "X" })]);
+    const loaded = loadProjectGroups();
+    expect(loaded[0]?.name).toBe("Work");
+    expect(loaded[0]?.members.map((m) => m.path)).toEqual(["/p/a", "/p/b"]);
+    expect(loaded[0]?.members.every((m) => typeof m.id === "string")).toBe(
+      true,
+    );
   });
 
   it("rejects invalid entries and duplicate ids", () => {
@@ -411,18 +465,16 @@ describe("project group persistence", () => {
       KEY,
       JSON.stringify([
         { id: "g1", name: "  ", paths: ["/p/a"] },
-        { id: "g2", name: "No paths", paths: [] },
+        { id: "g2", name: "No paths" },
         { id: "g3", name: "Bad paths", paths: ["/p/a", 42, ""] },
         { id: "g3", name: "Duplicate", paths: ["/p/b"] },
         { id: "g4", name: "Kept", paths: ["/p/a"], collapsed: "yes" },
         "junk",
       ]),
     );
-    expect(loadProjectGroups()).toEqual([
-      group("g2", [], { name: "No paths" }),
-      group("g3", ["/p/a"], { name: "Bad paths" }),
-      group("g4", ["/p/a"], { name: "Kept" }),
-    ]);
+    const loaded = loadProjectGroups();
+    expect(loaded.map((entry) => entry.id)).toEqual(["g3", "g4"]);
+    expect(loaded[0]?.members.map((m) => m.path)).toEqual(["/p/a"]);
   });
 
   it("sanitizes colors on load", () => {
@@ -441,12 +493,16 @@ describe("project group persistence", () => {
         },
       ]),
     );
-    expect(loadProjectGroups()).toEqual([
-      group("g1", ["/p/a"], { name: "A" }),
-      group("g2", ["/p/b"], { name: "B" }),
-      group("g3", ["/p/c"], { name: "C", colorIndex: 4 }),
-      group("g4", ["/p/d"], { name: "D", customColor: "#aabbcc" }),
+    const loaded = loadProjectGroups();
+    expect(loaded.map((entry) => entry.id)).toEqual(["g1", "g2", "g3", "g4"]);
+    expect(loaded.map((entry) => entry.members.map((m) => m.path))).toEqual([
+      ["/p/a"],
+      ["/p/b"],
+      ["/p/c"],
+      ["/p/d"],
     ]);
+    expect(loaded[2]?.colorIndex).toBe(4);
+    expect(loaded[3]?.customColor).toBe("#aabbcc");
   });
 
   it("removes the storage key when the last group is gone and survives corrupt JSON", () => {

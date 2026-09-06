@@ -41,7 +41,7 @@ import {
 } from "../lib/appearance";
 import { basename, revealPath, type GitDiffStats } from "../lib/fs";
 import { IS_MAC, IS_WIN, MOD } from "../lib/platform";
-import { projectName } from "../lib/paths";
+import { pathKey, projectName } from "../lib/paths";
 import {
   collectRailProjects,
   loadArchivedProjects,
@@ -57,16 +57,21 @@ import {
 } from "../lib/recents";
 import {
   addProjectToGroup,
+  archiveGroup,
   buildProjectGroupEntries,
   createGroup,
   createGroupWithProjects,
   dissolveGroup,
-  groupContaining,
+  groupsContaining,
+  loadArchivedGroups,
   loadProjectGroups,
   pruneProjectGroups,
+  removeMembership,
   removeProjectFromGroup,
   renameGroup,
   reorderGroupContainers,
+  restoreGroup,
+  saveArchivedGroups,
   saveProjectGroups,
   setGroupCollapsed,
   setGroupColor,
@@ -121,12 +126,12 @@ const REVEAL_LABEL = IS_MAC
 function projectMenuExtraItems(
   pinned: boolean,
   canRemove: boolean,
-  memberOfId: string | undefined,
+  memberGroupIds: string[],
   groups: ProjectGroup[],
 ): TabGroupMenuExtraItem[] {
   const items: TabGroupMenuExtraItem[] = [
     { id: "group-new", label: "New group", icon: FolderPlus },
-    ...(memberOfId
+    ...(memberGroupIds.length > 0
       ? []
       : [
           pinned
@@ -136,14 +141,14 @@ function projectMenuExtraItems(
     { id: "reveal", label: REVEAL_LABEL, icon: FolderOpen },
   ];
   for (const group of groups) {
-    if (group.id === memberOfId) continue;
+    if (memberGroupIds.includes(group.id)) continue;
     items.push({
       id: `group-add:${group.id}`,
       label: `Add to ${group.name}`,
       icon: Folder,
     });
   }
-  if (memberOfId) {
+  if (memberGroupIds.length > 0) {
     items.push({ id: "group-remove", label: "Remove from group", icon: X });
   }
   if (canRemove) {
@@ -249,6 +254,7 @@ export function ProjectRail({
     x: number;
     y: number;
   } | null>(null);
+  const [archivedGroups, setArchivedGroups] = useState(loadArchivedGroups);
   const [archivedItems, setArchivedItems] = useState<ArchivedProject[]>([]);
   const [removing, setRemoving] = useState<{
     name: string;
@@ -285,9 +291,15 @@ export function ProjectRail({
   const projectsGroupBlocks = groupBlocks.filter(
     (entry) => !entry.group.pinned,
   );
+  const archivedMemberPaths = new Set(
+    archivedGroups.flatMap((group) =>
+      group.members.map((member) => pathKey(member.path)),
+    ),
+  );
   const ungroupedProjects = groupEntries
     .filter((entry) => entry.kind === "project")
-    .map((entry) => entry.project);
+    .map((entry) => entry.project)
+    .filter((project) => !archivedMemberPaths.has(pathKey(project.path)));
   const busy = useMemo(() => {
     const set = new Set<string>();
     for (const path of busyPaths ?? []) set.add(path);
@@ -409,12 +421,38 @@ export function ProjectRail({
 
   const onFlatReorder = (ids: string[]) => {
     const { groupOrders, ungrouped } = splitUnifiedOrder(ids);
+    const membershipById = new Map(
+      projectGroups.flatMap((group) =>
+        group.members.map((member) => [member.id, member] as const),
+      ),
+    );
     let next = projectGroups;
+    const droppedMembers: string[] = [];
+    const ungroupedPaths: string[] = [];
+    for (const id of ungrouped) {
+      if (membershipById.has(id)) droppedMembers.push(id);
+      else ungroupedPaths.push(id);
+    }
     for (const { groupId, paths } of groupOrders) {
-      next = setGroupProjects(next, groupId, paths);
+      if (!next.some((entry) => entry.id === groupId)) continue;
+      // A run holds this group's membership ids plus any member dropped in
+      // from another group; resolve every id to its path in run order.
+      const ordered: string[] = [];
+      for (const id of paths) {
+        const path = membershipById.get(id)?.path;
+        if (path) ordered.push(path);
+      }
+      next = setGroupProjects(next, groupId, ordered);
+    }
+    for (const memberId of droppedMembers) {
+      next = removeMembership(next, memberId);
     }
     if (next !== projectGroups) commitProjectGroups(next);
-    const reordered = reorderSubset(railOrder, ungrouped, new Set(ungrouped));
+    const reordered = reorderSubset(
+      railOrder,
+      ungroupedPaths,
+      new Set(ungroupedPaths),
+    );
     if (reordered.join("\0") !== railOrder.join("\0")) {
       setRailOrder(reordered);
       saveProjectRailOrder(reordered);
@@ -508,28 +546,69 @@ export function ProjectRail({
       return;
     }
     if (id === "group-archive") {
-      const group = projectGroups.find((entry) => entry.id === groupId);
-      for (const path of group?.paths ?? []) {
-        onRemoveProject?.(path, { purgeData: false });
+      const { groups: nextGroups, archived } = archiveGroup(
+        projectGroups,
+        groupId,
+      );
+      if (archived) {
+        const list = [archived, ...archivedGroups];
+        setArchivedGroups(list);
+        saveArchivedGroups(list);
       }
-      commitProjectGroups(dissolveGroup(projectGroups, groupId));
+      commitProjectGroups(nextGroups);
       return;
     }
     if (id === "group-delete") {
       const group = projectGroups.find((entry) => entry.id === groupId);
       setRemoving({
         name: group?.name ?? "group",
-        paths: group?.paths ?? [],
+        paths: [
+          ...new Map(
+            (group?.members ?? []).map((member) => [
+              pathKey(member.path),
+              member.path,
+            ]),
+          ).values(),
+        ],
         groupId,
       });
     }
   };
 
+  const resolveDraggedPath = (id: string) =>
+    projectGroups
+      .flatMap((group) => group.members)
+      .find((member) => member.id === id)?.path ?? id;
+
   const onArchivedPick = (id: string) => {
-    if (!archivedMenu) return;
     setArchivedMenu(null);
     setAddAction(null);
-    if (id !== "empty") onSelectProject(id);
+    if (id === "empty") return;
+    if (id.startsWith("group:")) {
+      const { archived: rest, group } = restoreGroup(
+        archivedGroups,
+        id.slice("group:".length),
+      );
+      setArchivedGroups(rest);
+      saveArchivedGroups(rest);
+      if (group) commitProjectGroups([group, ...projectGroups]);
+      return;
+    }
+    onSelectProject(id);
+  };
+
+  const onGroupColorChange = (colorIndex: number | null) => {
+    if (!groupMenu) return;
+    commitProjectGroups(
+      setGroupColor(projectGroups, groupMenu.groupId, colorIndex),
+    );
+  };
+
+  const onGroupCustomColorChange = (color: string) => {
+    if (!groupMenu) return;
+    commitProjectGroups(
+      setGroupCustomColor(projectGroups, groupMenu.groupId, color),
+    );
   };
 
   const openArchivedSubmenu = () => {
@@ -555,19 +634,6 @@ export function ProjectRail({
     }
   };
 
-  const onGroupColorChange = (colorIndex: number | null) => {
-    if (!groupMenu) return;
-    commitProjectGroups(
-      setGroupColor(projectGroups, groupMenu.groupId, colorIndex),
-    );
-  };
-
-  const onGroupCustomColorChange = (color: string) => {
-    if (!groupMenu) return;
-    commitProjectGroups(
-      setGroupCustomColor(projectGroups, groupMenu.groupId, color),
-    );
-  };
   const menuGroup = groupMenu
     ? projectGroups.find((group) => group.id === groupMenu.groupId)
     : undefined;
@@ -589,6 +655,7 @@ export function ProjectRail({
     { kind: "item", id: "group-archive", label: "Archive group" },
     { kind: "item", id: "group-delete", label: "Delete group", danger: true },
   ];
+
   const onConfirmDelete = () => {
     if (!removing) return;
     for (const path of removing.paths) {
@@ -607,11 +674,11 @@ export function ProjectRail({
   const flatIds = [
     ...pinnedGroupBlocks.flatMap((entry) => [
       `group:${entry.group.id}`,
-      ...entry.projects.map((project) => project.path),
+      ...entry.members.map((member) => member.id),
     ]),
     ...projectsGroupBlocks.flatMap((entry) => [
       `group:${entry.group.id}`,
-      ...entry.projects.map((project) => project.path),
+      ...entry.members.map((member) => member.id),
     ]),
     UNGROUPED_MARKER,
     ...ungroupedProjects.map((project) => project.path),
@@ -622,8 +689,9 @@ export function ProjectRail({
   });
   const cardSortable = useSortable(flatIds, onFlatReorder, {
     axis: "y",
-    onActivate: onSelectProject,
-    onDropOnGroup: (draggedPath, groupId) => {
+    onActivate: (id) => onSelectProject(resolveDraggedPath(id)),
+    onDropOnGroup: (draggedId, groupId) => {
+      const draggedPath = resolveDraggedPath(draggedId);
       commitProjectGroups(
         setGroupCollapsed(
           addProjectToGroup(projectGroups, groupId, draggedPath),
@@ -719,16 +787,17 @@ export function ProjectRail({
         )}
         {expanded ? (
           <div className="mt-px flex flex-col gap-px pl-6">
-            {entry.projects.map((project) => (
+            {entry.members.map((member, index) => (
               <ProjectCard
-                key={project.path}
-                item={project}
-                selected={!searchActive && sameProjectPath(project.path, cwd)}
-                busy={isBusyPath(project.path, busy)}
+                key={member.id}
+                dragId={member.id}
+                item={entry.projects[index]}
+                selected={!searchActive && sameProjectPath(member.path, cwd)}
+                busy={isBusyPath(member.path, busy)}
                 pinned={false}
                 pinnable={false}
                 sortable={cardSortable}
-                sortIndex={flatIds.indexOf(project.path)}
+                sortIndex={flatIds.indexOf(member.id)}
                 onSelect={onSelectProject}
                 onTogglePin={onTogglePin}
                 onContextMenu={onProjectContextMenu}
@@ -940,7 +1009,9 @@ export function ProjectRail({
               sameProjectPath(pinned, projectMenu.path),
             ),
             Boolean(onRemoveProject),
-            groupContaining(projectGroups, projectMenu.path)?.id,
+            groupsContaining(projectGroups, projectMenu.path).map(
+              (group) => group.id,
+            ),
             projectGroups,
           )}
           onExtraPick={onProjectMenuPick}
@@ -986,23 +1057,35 @@ export function ProjectRail({
         <ExplorerMenu
           x={archivedMenu.x}
           y={archivedMenu.y}
+          pickOnMouseDown
           items={
-            archivedItems.length > 0
-              ? archivedItems.map((item) => ({
-                  kind: "item" as const,
-                  id: item.path,
-                  label: projectName(item.path),
-                }))
+            archivedGroups.length > 0 || archivedItems.length > 0
+              ? [
+                  ...archivedGroups.map((group) => ({
+                    kind: "item" as const,
+                    id: `group:${group.id}`,
+                    label: group.name,
+                    arrow: true,
+                  })),
+                  ...(archivedGroups.length > 0 && archivedItems.length > 0
+                    ? [{ kind: "sep" as const }]
+                    : []),
+                  ...archivedItems.map((item) => ({
+                    kind: "item" as const,
+                    id: item.path,
+                    label: projectName(item.path),
+                  })),
+                ]
               : [
                   {
                     kind: "item" as const,
                     id: "empty",
-                    label: "No archived projects",
+                    label: "Nothing archived",
                     disabled: true,
                   },
                 ]
           }
-          ariaLabel="Archived projects"
+          ariaLabel="Archived"
           onPick={onArchivedPick}
           onClose={() => setArchivedMenu(null)}
         />
@@ -1487,6 +1570,7 @@ function ProjectSection({
         {items.map((item) => (
           <ProjectCard
             key={item.path}
+            dragId={item.path}
             item={item}
             selected={!searchActive && sameProjectPath(item.path, cwd)}
             busy={isBusyPath(item.path, busy)}
@@ -1513,6 +1597,7 @@ const nameClassName =
   "min-w-0 flex-1 truncate text-sm font-medium leading-tight";
 
 function ProjectCard({
+  dragId,
   item,
   selected,
   busy,
@@ -1532,6 +1617,8 @@ function ProjectCard({
 }: {
   item: RecentProject;
   selected: boolean;
+  /** Sortable identity: membership id inside groups, path otherwise. */
+  dragId: string;
   busy: boolean;
   pinned: boolean;
   /** Group members pin only through their group. */
@@ -1558,7 +1645,7 @@ function ProjectCard({
     groupCustomColors,
     projectKey,
   );
-  const dragging = sortable.draggingId === item.path;
+  const dragging = sortable.draggingId === dragId;
   const showStart =
     sortable.draggingId &&
     sortable.toIndex === sortIndex &&
@@ -1580,7 +1667,7 @@ function ProjectCard({
 
   return (
     <div
-      ref={(el) => sortable.setItemRef(item.path, el)}
+      ref={(el) => sortable.setItemRef(dragId, el)}
       className={`group relative flex touch-none items-stretch rounded-md px-2 h-8 ${
         selected
           ? "bg-content/12 text-content"
@@ -1591,7 +1678,7 @@ function ProjectCard({
         if ((event.target as HTMLElement | null)?.closest("[data-no-drag]")) {
           return;
         }
-        sortable.onItemPointerDown(item.path, event);
+        sortable.onItemPointerDown(dragId, event);
       }}
       onClick={(event) => {
         if ((event.target as HTMLElement | null)?.closest("[data-no-drag]")) {

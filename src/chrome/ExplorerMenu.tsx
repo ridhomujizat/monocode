@@ -29,6 +29,12 @@ type Props = {
   header?: ReactNode;
   width?: number;
   onPick: (id: string) => void;
+  /**
+   * Pick on press instead of release. Submenus nested beside another menu
+   * need this: the parent's outside-press dismissal would otherwise unmount
+   * the item before its click fires.
+   */
+  pickOnMouseDown?: boolean;
   /** Hover on an item; used by callers that cascade submenus. */
   onItemHover?: (id: string) => void;
   onClose: () => void;
@@ -58,6 +64,7 @@ export function ExplorerMenu({
   header,
   width = MENU_WIDTH,
   onPick,
+  pickOnMouseDown,
   onItemHover,
   onClose,
 }: Props) {
@@ -135,13 +142,22 @@ export function ExplorerMenu({
             role={item.checked == null ? "menuitem" : "menuitemcheckbox"}
             aria-checked={item.checked}
             disabled={item.disabled}
+            onPointerDown={(e) => {
+              // Pick before any outer menu's pointerdown dismissal can
+              // unmount a nested submenu out from under the press.
+              if (pickOnMouseDown && !item.disabled) {
+                e.preventDefault();
+                onPick(item.id);
+                onClose();
+              }
+            }}
             onMouseDown={(e) => e.preventDefault()}
             onMouseEnter={() => {
               setActive(index);
               onItemHover?.(item.id);
             }}
             onClick={() => {
-              if (!item.disabled) onPick(item.id);
+              if (!pickOnMouseDown && !item.disabled) onPick(item.id);
             }}
             className={`flex h-7 w-full items-center gap-3 rounded-lg px-2 text-left text-[13px] leading-none ${
               item.disabled
