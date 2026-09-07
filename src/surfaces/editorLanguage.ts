@@ -179,5 +179,11 @@ export async function languageForPath(path: string): Promise<Extension | null> {
     const { python } = await import("@codemirror/lang-python");
     return python();
   }
+  if (extension === ".go") {
+    // Language packs are deliberately code-split: each await import loads
+    // only when a file of that type is first opened.
+    const { go } = await import("@codemirror/lang-go");
+    return go();
+  }
   return null;
 }
