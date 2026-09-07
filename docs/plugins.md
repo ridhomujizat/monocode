@@ -82,6 +82,13 @@ Postman-lite: method + URL + headers + body → Send → response viewer, lalu
 **Add to chat** untuk melempar `METHOD URL → status` + body ke agent. Request
 terakhir tersimpan lewat `saveConfig`.
 
+## Contoh terpasang: Hacker News (`src/plugins/hn/`)
+
+Contoh **kenapa built-in diperlukan**: front page → klik story → **halaman
+detail** dengan komentar (HTML di-strip, kedalaman dibatasi) → "Add to chat"
+atau buka artikel/diskusi. Navigasi list→detail seperti ini tidak
+ekspresibel di manifest JSON.
+
 ## Yang sengaja belum ada
 
 - **Plugin runtime dengan kode sendiri.** Manifest cukup untuk "fetch → list →
