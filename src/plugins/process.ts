@@ -17,6 +17,20 @@ export type CardDot = "working" | "blocked" | "done" | "idle";
 
 export type CardRow = {
   text: string;
+  /** Secondary line under `text` (e.g. artist · album). */
+  subtext?: string;
+  /** Absolute path to a local image the host can load via the asset protocol. */
+  image?: string;
+  /** Cache-bust key when the file path is reused across tracks. */
+  imageKey?: string;
+  /** 0..1 fill for a host-drawn progress bar. */
+  progress?: number;
+  /** Clock label next to the progress bar (e.g. `1:34/3:55`). */
+  clock?: string;
+  /** Hugeicons export name rendered by the host instead of a glyph in `text`. */
+  icon?: string;
+  /** Consecutive rows with the same group id render as one horizontal strip. */
+  group?: string;
   dot?: CardDot;
   /** Declared action id to run on click. */
   action?: string;
@@ -84,11 +98,27 @@ export function decodePush(
     if (row.dot !== undefined && !DOTS.includes(row.dot as CardDot)) {
       return { error: `"dot" must be one of ${DOTS.join(", ")}` };
     }
+    if (row.progress !== undefined) {
+      if (typeof row.progress !== "number" || !Number.isFinite(row.progress)) {
+        return { error: '"progress" must be a finite number' };
+      }
+    }
+    const optionalString = (key: string) =>
+      typeof row[key] === "string" && (row[key] as string).length > 0
+        ? { [key]: row[key] as string }
+        : {};
     rows.push({
       text: row.text,
       ...(row.dot ? { dot: row.dot as CardDot } : {}),
-      ...(row.action ? { action: row.action } : {}),
+      ...(row.action ? { action: row.action as string } : {}),
       ...(typeof row.value === "string" ? { value: row.value } : {}),
+      ...(typeof row.progress === "number" ? { progress: row.progress } : {}),
+      ...optionalString("subtext"),
+      ...optionalString("image"),
+      ...optionalString("imageKey"),
+      ...optionalString("clock"),
+      ...optionalString("icon"),
+      ...optionalString("group"),
     });
   }
   return { method: "card", rows };

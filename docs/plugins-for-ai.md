@@ -170,10 +170,17 @@ One JSON object per line on **stdout**:
 
 | Row key  | Meaning                                                             |
 | -------- | ------------------------------------------------------------------- |
-| `text`   | required, the label                                                 |
-| `dot`    | `working` \| `blocked` \| `done` \| `idle` — a coloured dot          |
-| `action` | a **declared** action id; makes the row a button                    |
-| `value`  | opaque payload handed to that action as `MONOCODE_ROW_VALUE`        |
+| `text`     | required, the label                                                              |
+| `subtext`  | optional secondary line under the label                                          |
+| `image`    | absolute path to a local image (loaded via the asset protocol)                   |
+| `imageKey` | cache-bust key when the same path is reused across tracks                        |
+| `progress` | 0..1 fill for a host-drawn progress bar                                          |
+| `clock`    | label next to the progress bar (e.g. `1:34/3:55`)                                |
+| `icon`     | Hugeicons export name rendered by the host                                       |
+| `group`    | consecutive rows with the same id render as one horizontal control strip         |
+| `dot`      | `working` \| `blocked` \| `done` \| `idle` — a coloured dot                       |
+| `action`   | a **declared** action id; makes the row a button                                 |
+| `value`    | opaque payload handed to that action as `MONOCODE_ROW_VALUE`                     |
 
 Each push replaces the whole card, so a repaint is one line. Unknown row keys
 are dropped. `value` is what turns a list into *buttons* without one action id

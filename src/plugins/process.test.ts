@@ -48,4 +48,45 @@ describe("plugin stdout lines", () => {
       error('{"method":"card","params":{"rows":[{"text":"x","dot":"neon"}]}}'),
     ).toMatch(/"dot"/);
   });
+
+  it("keeps media fields on a card row", () => {
+    expect(
+      decodePush(
+        JSON.stringify({
+          method: "card",
+          params: {
+            rows: [
+              {
+                text: "Song",
+                subtext: "Artist · Album",
+                image: "/tmp/art.jpg",
+                imageKey: "id-1",
+                progress: 0.4,
+                clock: "1:00/2:30",
+                icon: "Play",
+                group: "transport",
+                action: "playpause",
+              },
+            ],
+          },
+        }),
+        ACTIONS,
+      ),
+    ).toEqual({
+      method: "card",
+      rows: [
+        {
+          text: "Song",
+          subtext: "Artist · Album",
+          image: "/tmp/art.jpg",
+          imageKey: "id-1",
+          progress: 0.4,
+          clock: "1:00/2:30",
+          icon: "Play",
+          group: "transport",
+          action: "playpause",
+        },
+      ],
+    });
+  });
 });
