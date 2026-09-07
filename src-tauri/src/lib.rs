@@ -11,6 +11,7 @@ mod macos;
 mod menu;
 mod notes;
 mod notifications;
+mod plugin_ui;
 mod plugins;
 mod project_logo;
 mod pty;
@@ -162,6 +163,18 @@ pub fn run() {
     #[cfg(windows)]
     windows::initialize().expect("Failed to initialize Windows process safety");
     let app = tauri::Builder::default()
+        .register_asynchronous_uri_scheme_protocol(plugin_ui::SCHEME, |ctx, request, responder| {
+            // Blocking file IO off the main thread; responses are tiny.
+            let app = ctx.app_handle().clone();
+            std::thread::spawn(move || {
+                let (method, path) = (
+                    request.method().to_string(),
+                    request.uri().path().to_string(),
+                );
+                let root = plugins::plugins_root(&app).unwrap_or_default();
+                responder.respond(plugin_ui::serve(&root, &method, &path));
+            });
+        })
         .plugin(tauri_plugin_process::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_opener::init())

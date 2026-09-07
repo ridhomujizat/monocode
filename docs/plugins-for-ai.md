@@ -13,16 +13,15 @@ JSON file, no rebuild, no code:
 | **manifest** | `plugin.json` in the app data dir | no               |
 | built-in     | `src/plugins/<id>/index.tsx`      | yes              |
 
-A manifest plugin comes in two flavours, and one manifest may use both:
+A manifest plugin comes in three flavours, and one manifest may combine them:
 
 | Flavour     | Declares                      | Can do                                                        |
 | ----------- | ----------------------------- | ------------------------------------------------------------- |
 | **fetch**   | `request`                     | one HTTP call → a list (or one response) → rows into chat      |
 | **process** | `startup` / `actions` / `card` | run argv commands in any language, push rows into a rail card |
+| **ui**      | `ui`                          | a free-form HTML/CSS/JS interface in a sandboxed frame, with a bridge for HTTP, chat and settings |
 
-Sections 1-2 cover fetch, section 3 covers process. If you need something
-neither can express — a Postman-style request builder, a diff viewer, a
-multi-step form — write a built-in instead (see `docs/plugins.md`).
+Sections 1-2 cover fetch, section 3 covers process, section 6 covers ui.
 
 ## 1. Where the file goes
 
@@ -308,8 +307,39 @@ toolbar.
   detached process the plugin started outside the host's knowledge is the
   plugin's own problem to reap.
 
-## 6. Checklist before handing a manifest to a user
+## 6. Free-UI plugins (`ui`)
 
+For anything fetch and process cannot express — forms, a status board, a
+custom detail page. The manifest is only metadata plus `"ui": "index.html"`;
+the whole interface lives in `ui/` as plain HTML/CSS/JS, which the host
+renders in a sandboxed iframe (like a browser-extension popup). It may be a
+single file or reference sibling files relatively.
+
+The frame cannot touch the app. Everything goes through a postMessage
+bridge — the host pushes `{ monocode: { event: "init", pluginId, cwd } }`
+when the frame loads, and answers calls:
+
+```js
+// frame → host; the reply arrives as { monocode: { seq, ok, result | error } }
+parent.postMessage(
+  { monocode: { seq: 1, action: "request", method: "GET",
+                url: baseUrl + "/api/tasks", headers: { Accept: "application/json" } } },
+  "*",
+);
+// actions: "request" → {status, headers, body, ms}
+//          "addToChat" {title, body}   "configGet" {}
+//          "configSet" {config}        "open" {url}
+```
+
+Rules the host enforces: files are served only from `<plugin folder>/ui/`
+(`config.json`, which holds tokens, is unreachable); `open` accepts
+http(s) only; config and requests are bound to that plugin's id. The trust
+model is the browser-extension one — the user chose to install this code.
+
+A complete working example (task board with status changes, add-to-chat,
+plus a mock Jira server) lives in `monocode-modules/board/`.
+
+## 7. Checklist before handing a manifest to a user
 1. `id` is lowercase, matches the folder name.
 2. `request.url` starts with `http://`, `https://`, or a `{{field}}` that will.
 3. Every `{{name}}` in `request`/`auth` exists as a `fields[].key`.
@@ -326,3 +356,8 @@ For a process plugin, also:
 10. The script is on disk next to `plugin.json`, and its first argv element is
     an interpreter or binary that exists on the target machine.
 11. Rows say what they do: a row with no `action` is a label, not a dead button.
+12. `ui` points at an `.html` file inside the plugin folder, and every
+    relative file it references is on disk too.
+13. The UI talks only through the bridge — no direct app access exists.
+14. Status-changing actions are explicit buttons/selects, never automatic.
+

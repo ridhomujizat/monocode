@@ -239,7 +239,7 @@ fn check_url(url: &str) -> Result<(), String> {
     }
 }
 
-fn plugins_root(app: &AppHandle) -> Result<PathBuf, String> {
+pub(crate) fn plugins_root(app: &AppHandle) -> Result<PathBuf, String> {
     Ok(app
         .path()
         .app_data_dir()
@@ -252,7 +252,7 @@ fn config_path(app: &AppHandle, id: &str) -> Result<PathBuf, String> {
     Ok(plugins_root(app)?.join(id).join(CONFIG))
 }
 
-fn validate_plugin_id(id: &str) -> Result<(), String> {
+pub(crate) fn validate_plugin_id(id: &str) -> Result<(), String> {
     if id.is_empty() || id.len() > ID_MAX {
         return Err("Invalid plugin id".into());
     }

@@ -6,6 +6,7 @@ import { ADD_NOTE_TO_CHAT_EVENT, type NoteComposerCard } from "../lib/notes";
 import { manifestWorkspace } from "./ManifestWorkspace";
 import { validateManifest, type PluginManifest } from "./manifest";
 import { syncPluginProcesses } from "./process";
+import { uiWorkspace } from "./ui/UiWorkspace";
 
 /**
  * Two ways to add a workspace under Notes:
@@ -228,9 +229,13 @@ function manifestPlugin(manifest: PluginManifest): Plugin {
     id: manifest.id,
     label: manifest.label,
     icon: iconByName(manifest.icon),
-    // No `request` means nothing to fetch and so nothing to show full-screen;
-    // the plugin lives in its rail card instead.
-    ...(manifest.request ? { Workspace: manifestWorkspace(manifest) } : {}),
+    // A free-form ui replaces the generated list workspace; no `request` and
+    // no `ui` means nothing to show full-screen — a rail card plugin only.
+    ...(manifest.ui
+      ? { Workspace: uiWorkspace(manifest) }
+      : manifest.request
+        ? { Workspace: manifestWorkspace(manifest) }
+        : {}),
   };
 }
 

@@ -89,12 +89,36 @@ detail** dengan komentar (HTML di-strip, kedalaman dibatasi) → "Add to chat"
 atau buka artikel/diskusi. Navigasi list→detail seperti ini tidak
 ekspresibel di manifest JSON.
 
+## Free-UI plugins (`"ui"`)
+
+Flavour ketiga, model extension browser: plugin membawa tampilannya sendiri,
+app menyediakan sandbox + bridge. Manifest cukup metadata + `"ui":
+"index.html"`; file UI apa pun di bawah folder plugin terserve lewat scheme
+`pluginui://<id>/<path>` (`src-tauri/src/plugin_ui.rs`) dan dirender dalam
+`<iframe sandbox="allow-scripts">` oleh `src/plugins/ui/UiWorkspace.tsx`.
+Folder `ui/` adalah batasnya — `config.json` berisi token tidak mungkin
+ter-serve.
+
+Frame tidak punya akses ke app. Semua aksi host lewat bridge postMessage
+(frame → host: `{ monocode: { seq, action, ...fields } }`; balasan host:
+`{ monocode: { seq, ok, result | error } }`; host juga mendorong
+`{ monocode: { event: "init", pluginId, cwd } }` saat load):
+
+| Action       | Fields                          | Hasil                          |
+| ------------ | ------------------------------- | ------------------------------ |
+| `request`    | `method`, `url`, `headers`, `body` | `PluginResponse` (lewat `plugin_fetch`) |
+| `addToChat`  | `title`, `body`                 | chip note di composer, sesi baru |
+| `configGet`  | —                               | isi `config.json` plugin ini   |
+| `configSet`  | `config`                        | tulis `config.json`, mode 0600 |
+| `open`       | `url` (http/https)              | buka di browser sistem         |
+
+Model trust-nya model install extension: kode di frame adalah kode yang
+diinstall user dengan sengaja. Sandbox menjaga frame keluar dari DOM app;
+bridge mengikat config dan context ke id plugin itu sendiri. Contoh lengkap:
+`board/` di repo `monocode-modules` (papan task gaya Jira + mock server).
+
 ## Yang sengaja belum ada
 
-- **Plugin runtime dengan kode sendiri.** Manifest cukup untuk "fetch → list →
-  add to chat". Kalau ada yang butuh interaksi nyata (form multi-step, jalankan
-  command lokal), itu built-in plugin dan perlu rebuild. Sandbox iframe +
-  bridge `postMessage` baru relevan kalau ada pihak ketiga yang mau ship kode.
 - **Host allowlist per plugin.** `plugin_fetch` boleh ke host mana saja — memang
   dibutuhkan plugin HTTP client, dan manifest ditulis sendiri oleh user.
 - **Multi-request / pagination / write-back** di manifest. Satu request per

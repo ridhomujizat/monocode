@@ -186,8 +186,20 @@ describe("process plugins", () => {
     expect(validateManifest(media)).toEqual({ manifest: media });
   });
 
-  it("needs either a request or commands", () => {
+  it("needs a request, commands, or a ui", () => {
     expect(error({ id: "x", label: "X" })).toMatch(/"request".*"startup"/);
+    expect(error({ id: "x", label: "X", ui: "index.html" })).toBeNull();
+  });
+
+  it("validates the ui entry path", () => {
+    expect(error({ id: "x", label: "X", ui: "app.js" })).toMatch(/\.html/);
+    expect(error({ id: "x", label: "X", ui: "../other/index.html" })).toMatch(
+      /inside the plugin folder/,
+    );
+    expect(error({ id: "x", label: "X", ui: "/etc/index.html" })).toMatch(
+      /inside the plugin folder/,
+    );
+    expect(error({ id: "x", label: "X", ui: true })).toMatch(/relative path/);
   });
 
   it("needs a startup command to fill a card", () => {

@@ -35,6 +35,13 @@ export type PluginManifest = {
   /** Name of an export from src/chrome/icons.tsx, e.g. "Zap". */
   icon?: string;
   description?: string;
+  /**
+   * Free-form UI: the entry HTML file, relative to the plugin folder. The
+   * host renders it in a sandboxed iframe and injects a postMessage bridge
+   * (request / addToChat / config / open). When set, it replaces the
+   * generated list workspace.
+   */
+  ui?: string;
   /** Values the user fills in once; available to every template. */
   fields?: PluginField[];
   auth?: PluginAuth;
@@ -84,6 +91,18 @@ export function validateManifest(
   for (const key of ["icon", "description"] as const) {
     if (raw[key] !== undefined && typeof raw[key] !== "string") {
       return { error: `"${key}" must be a string` };
+    }
+  }
+  if (raw.ui !== undefined) {
+    if (typeof raw.ui !== "string" || !raw.ui.endsWith(".html")) {
+      return { error: '"ui" must be a relative path to an .html file' };
+    }
+    if (
+      raw.ui.includes("..") ||
+      raw.ui.startsWith("/") ||
+      raw.ui.includes("\\")
+    ) {
+      return { error: '"ui" must be a relative path inside the plugin folder' };
     }
   }
 
@@ -195,10 +214,10 @@ export function validateManifest(
     ids.add(action.id);
   }
 
-  if (!hasRequest && !raw.actions && !raw.startup) {
+  if (!hasRequest && !raw.actions && !raw.startup && !raw.ui) {
     return {
       error:
-        'a plugin needs either "request" (fetch) or "startup"/"actions" (commands)',
+        'a plugin needs "request" (fetch), "startup"/"actions" (commands) or "ui" (own interface)',
     };
   }
   if (raw.card !== undefined && !raw.startup) {
