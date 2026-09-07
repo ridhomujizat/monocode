@@ -82,13 +82,6 @@ Postman-lite: method + URL + headers + body → Send → response viewer, lalu
 **Add to chat** untuk melempar `METHOD URL → status` + body ke agent. Request
 terakhir tersimpan lewat `saveConfig`.
 
-## Contoh terpasang: Hacker News (`src/plugins/hn/`)
-
-Contoh **kenapa built-in diperlukan**: front page → klik story → **halaman
-detail** dengan komentar (HTML di-strip, kedalaman dibatasi) → "Add to chat"
-atau buka artikel/diskusi. Navigasi list→detail seperti ini tidak
-ekspresibel di manifest JSON.
-
 ## Free-UI plugins (`"ui"`)
 
 Flavour ketiga, model extension browser: plugin membawa tampilannya sendiri,
@@ -114,8 +107,11 @@ Frame tidak punya akses ke app. Semua aksi host lewat bridge postMessage
 
 Model trust-nya model install extension: kode di frame adalah kode yang
 diinstall user dengan sengaja. Sandbox menjaga frame keluar dari DOM app;
-bridge mengikat config dan context ke id plugin itu sendiri. Contoh lengkap:
-`board/` di repo `monocode-modules` (papan task gaya Jira + mock server).
+bridge mengikat config dan context ke id plugin itu sendiri.
+
+Contoh lengkap: `board/` dan `hn/` di repo `monocode-modules` (papan task
+gaya Jira + mock server; Hacker News dengan halaman detail komentar dan
+add-to-chat per story).
 
 ## Yang sengaja belum ada
 
