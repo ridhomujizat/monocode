@@ -249,6 +249,9 @@ function recompute() {
       enabled: !entry.error && !disabled.has(entry.id),
     }))
     .sort((a, b) => a.label.localeCompare(b.label));
+  enabledSnapshot = installedSnapshot.flatMap((entry) =>
+    entry.enabled && entry.plugin?.Workspace ? [entry.plugin] : [],
+  );
   syncPluginProcesses(
     installedSnapshot.flatMap((entry) =>
       entry.enabled && entry.manifest ? [entry.manifest] : [],
