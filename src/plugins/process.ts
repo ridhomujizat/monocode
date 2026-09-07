@@ -200,7 +200,6 @@ async function run(
 
 function bridge() {
   if (bridged) return;
-  bridged = true;
   void listen<LineEvent>("plugin_line", ({ payload }) => {
     const manifest = manifests.get(payload.pluginId);
     if (!manifest) return;
@@ -228,11 +227,11 @@ function bridge() {
     }
     cards.set(payload.pluginId, { ...card, rows: push.rows });
     emit();
-  });
+  }).catch(() => {});
   void listen<ExitEvent>("plugin_exit", ({ payload }) => {
     if (payload.code === 0 || payload.code === null) return;
     log(payload.pluginId, `${payload.label}: exited with ${payload.code}`);
-  });
+  }).catch(() => {});
 }
 
 function log(id: string, line: string) {

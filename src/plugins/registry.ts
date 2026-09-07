@@ -172,9 +172,11 @@ export function iconByName(name?: string): IconComponent {
     name && /^[A-Z]/.test(name)
       ? (iconSet as Record<string, unknown>)[name]
       : undefined;
-  return typeof found === "function"
-    ? (found as IconComponent)
-    : iconSet.Wrench;
+  // Wrapped icons are forwardRef components: objects, not functions.
+  const renderable =
+    typeof found === "function" ||
+    (typeof found === "object" && found !== null);
+  return renderable ? (found as IconComponent) : iconSet.Wrench;
 }
 
 let focusBound = false;
