@@ -4465,6 +4465,7 @@ export default function App({
     setSettingsOpen(false);
     setSearchViewOpen(false);
     setInboxViewOpen(false);
+    setPluginId(null);
     setNotesViewOpen(true);
   }, []);
 
