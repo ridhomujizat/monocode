@@ -177,10 +177,27 @@ export function iconByName(name?: string): IconComponent {
     : iconSet.Wrench;
 }
 
+let focusBound = false;
+
+/**
+ * Filesystem installs (copy a folder, drop a manifest) land outside the
+ * app's knowledge, and the list is otherwise scanned once per page load.
+ * Re-scan whenever the window regains focus so a new plugin shows up the
+ * next time the user looks at the rail — no manual Refresh needed.
+ */
+function bindFocusRefresh() {
+  if (focusBound) return;
+  focusBound = true;
+  window.addEventListener("focus", () => {
+    void refreshPlugins().catch(() => {});
+  });
+}
+
 function subscribePlugins(listener: () => void): () => void {
   listeners.add(listener);
   if (!loaded) {
     loaded = true;
+    bindFocusRefresh();
     void refreshPlugins().catch(() => {});
   }
   return () => listeners.delete(listener);
