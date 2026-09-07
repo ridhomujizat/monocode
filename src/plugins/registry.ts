@@ -9,15 +9,12 @@ import { syncPluginProcesses } from "./process";
 import { uiWorkspace } from "./ui/UiWorkspace";
 
 /**
- * Two ways to add a workspace under Notes:
- *
- * - built-in: a folder `src/plugins/<id>/index.tsx` default-exporting a
- *   `Plugin`. Picked up by `import.meta.glob`, ships with the app.
- * - user: a `plugin.json` manifest in `<appData>/plugins/<id>/`, installed at
- *   runtime. A manifest with `request` gets a workspace rendered by
- *   `ManifestWorkspace`; one with `startup`/`actions` runs argv commands and
- *   pushes a rail card instead (see `./process.ts`). It may do both.
- *   Reference: `docs/plugins-for-ai.md`.
+ * Every plugin is external: a `plugin.json` manifest in
+ * `<appData>/plugins/<id>/`, installed at runtime. A manifest with `request`
+ * gets a workspace rendered by `ManifestWorkspace`; one with `ui` renders its
+ * own interface in a sandboxed frame (`./ui/UiWorkspace.tsx`); one with
+ * `startup`/`actions` runs argv commands and pushes a rail card instead (see
+ * `./process.ts`). Any combination. Reference: `docs/plugins-for-ai.md`.
  */
 export type Plugin = {
   /** Rail id and config folder name. Lowercase letters, digits and dashes. */
@@ -59,7 +56,6 @@ export type PluginResponse = {
 export type InstalledPlugin = {
   id: string;
   label: string;
-  builtIn: boolean;
   enabled: boolean;
   description?: string;
   plugin?: Plugin;
@@ -71,16 +67,8 @@ export type InstalledPlugin = {
 type ManifestRow = { id: string; manifest: unknown; error?: string };
 
 const DISABLED_KEY = "monocode.plugins.disabled";
-
-const modules = import.meta.glob<{ default: Plugin }>("./*/index.tsx", {
-  eager: true,
-});
-
-const builtIns: Plugin[] = Object.values(modules)
-  .map((module) => module.default)
-  .filter((plugin): plugin is Plugin => !!plugin?.id && !!plugin.Workspace);
-
 const disabled = loadDisabled();
+
 let userPlugins: InstalledPlugin[] = [];
 let loaded = false;
 let enabledSnapshot: Plugin[] = [];
@@ -202,7 +190,6 @@ function manifestEntry(row: ManifestRow): InstalledPlugin {
   const broken = (error: string): InstalledPlugin => ({
     id: row.id,
     label: row.id,
-    builtIn: false,
     enabled: false,
     error,
   });
@@ -216,7 +203,6 @@ function manifestEntry(row: ManifestRow): InstalledPlugin {
   return {
     id: row.id,
     label: manifest.label,
-    builtIn: false,
     enabled: true,
     ...(manifest.description ? { description: manifest.description } : {}),
     manifest,
@@ -240,22 +226,12 @@ function manifestPlugin(manifest: PluginManifest): Plugin {
 }
 
 function recompute() {
-  installedSnapshot = [
-    ...builtIns.map((plugin) => ({
-      id: plugin.id,
-      label: plugin.label,
-      builtIn: true,
-      enabled: !disabled.has(plugin.id),
-      plugin,
-    })),
-    ...userPlugins.map((entry) => ({
+  installedSnapshot = userPlugins
+    .map((entry) => ({
       ...entry,
       enabled: !entry.error && !disabled.has(entry.id),
-    })),
-  ].sort((a, b) => a.label.localeCompare(b.label));
-  enabledSnapshot = installedSnapshot.flatMap((entry) =>
-    entry.enabled && entry.plugin?.Workspace ? [entry.plugin] : [],
-  );
+    }))
+    .sort((a, b) => a.label.localeCompare(b.label));
   syncPluginProcesses(
     installedSnapshot.flatMap((entry) =>
       entry.enabled && entry.manifest ? [entry.manifest] : [],

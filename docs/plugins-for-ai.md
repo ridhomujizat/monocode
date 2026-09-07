@@ -5,15 +5,10 @@ project rail. A plugin adds a menu entry under **Notes**; clicking it opens a
 full-screen workspace, and clicking a row in that workspace hands the item to
 the chat composer as a note-shaped chip.
 
-There are two kinds. **This document covers the manifest kind** — a single
-JSON file, no rebuild, no code:
+Every plugin is one folder under the app data dir containing a `plugin.json`
+manifest — installed at runtime, no rebuild, no code shipped with the app:
 
-| Kind         | Format                            | Needs a rebuild? |
-| ------------ | --------------------------------- | ---------------- |
-| **manifest** | `plugin.json` in the app data dir | no               |
-| built-in     | `src/plugins/<id>/index.tsx`      | yes              |
-
-A manifest plugin comes in three flavours, and one manifest may combine them:
+Three flavours, combinable in one manifest:
 
 | Flavour     | Declares                      | Can do                                                        |
 | ----------- | ----------------------------- | ------------------------------------------------------------- |
@@ -301,8 +296,6 @@ toolbar.
   whole `<appData>/plugins/<id>/` folder, manifest **and** stored token. It
   cannot be undone from the UI.
 - **By hand:** `rm -rf "<appData>/plugins/<id>"`, then Refresh.
-- Built-in plugins can be toggled off but never uninstalled — they ship with
-  the app.
 - Either one kills a process plugin's watcher and every child it spawned. A
   detached process the plugin started outside the host's knowledge is the
   plugin's own problem to reap.

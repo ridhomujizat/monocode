@@ -1200,7 +1200,7 @@ function PluginsPage() {
               <span className="flex items-center gap-2">
                 {entry.label}
                 <span className="text-[11px] font-normal text-content/35">
-                  {entry.builtIn ? "built-in" : entry.id}
+                  {entry.id}
                 </span>
               </span>
             }
@@ -1217,7 +1217,7 @@ function PluginsPage() {
                 onChange={(on) => setPluginEnabled(entry.id, on)}
               />
             )}
-            {entry.manifest?.fields?.length || !entry.builtIn ? (
+            {entry.manifest?.fields?.length ? (
               <SecondaryButton
                 onClick={() =>
                   setOpenId((current) =>
@@ -1228,7 +1228,7 @@ function PluginsPage() {
                 {openId === entry.id ? "Hide" : "Details"}
               </SecondaryButton>
             ) : null}
-            {entry.builtIn ? null : confirmId === entry.id ? (
+            {confirmId === entry.id ? (
               <SecondaryButton
                 danger
                 onClick={() => {
