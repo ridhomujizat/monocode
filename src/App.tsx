@@ -375,6 +375,9 @@ import {
   setQuitWorkspace,
   type ResumedWorkspace,
 } from "./lib/appLifecycle";
+// monocode-remote
+import { feedRemoteBridge } from "./lib/remote/bridge";
+// monocode-remote end
 
 function withPlanStatus(
   session: Session,
@@ -696,6 +699,12 @@ export default function App({
   filePickerOpenRef.current = filePickerOpen;
   const whatsNewVersionRef = useRef(whatsNewVersion);
   whatsNewVersionRef.current = whatsNewVersion;
+
+  // monocode-remote: no-op until the bridge is started (T6 settings toggle).
+  useEffect(() => {
+    feedRemoteBridge(sessions);
+  }, [sessions]);
+  // monocode-remote end
 
   useEffect(() => {
     if (!notesEnabled) setNotesViewOpen(false);
