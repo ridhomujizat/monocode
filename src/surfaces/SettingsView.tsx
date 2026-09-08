@@ -103,7 +103,7 @@ import {
   savePickerProviderVisible,
   subscribeModels,
 } from "../lib/models";
-import { prettyCwd, projectName } from "../lib/paths";
+import { prettyCwd, projectKey, projectName } from "../lib/paths";
 import { IS_MAC } from "../lib/platform";
 import {
   loadArchivedProjects,
@@ -125,6 +125,7 @@ import type { SessionSummary } from "../lib/sessionStore";
 import { clearInboxCache } from "../lib/githubTasks";
 import {
   disconnectLinear,
+  LINEAR_CHANGE_EVENT,
   linearConnected,
   listLinearTeams,
   loadHiddenLinearTeamIds,
@@ -556,6 +557,13 @@ function LinearSettings() {
       cancelled = true;
     };
   }, [loadTeams]);
+
+  // The inbox filter menu writes the same list, so follow it while both are mounted.
+  useEffect(() => {
+    const onChange = () => setHiddenTeamIds(loadHiddenLinearTeamIds());
+    window.addEventListener(LINEAR_CHANGE_EVENT, onChange);
+    return () => window.removeEventListener(LINEAR_CHANGE_EVENT, onChange);
+  }, []);
 
   const onSave = async () => {
     if (!token.trim() || busy) return;
@@ -1152,7 +1160,7 @@ function useArchivedProjects(): ArchivedProject[] {
 
 function archivedProjectLabel(path: string): string {
   return resolveTabGroupLabel(
-    projectName(path),
+    projectKey(path),
     loadTabGroupLabels(),
     projectName(path),
   );

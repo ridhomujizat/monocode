@@ -32,9 +32,14 @@ import {
 import { basename, type GitHistoryCommit } from "../lib/fs";
 import { IS_MAC, MOD } from "../lib/platform";
 import { resolveModel } from "../lib/models";
-import { projectName } from "../lib/paths";
+import { prettyParent, projectKey, projectName } from "../lib/paths";
 import { sessionDisplayTitle } from "../lib/session";
 import { nextUnseenFinishedSessions } from "../lib/sessionDone";
+import {
+  orderedSessionActionIds,
+  pruneSessionSelection,
+  toggleSessionSelection,
+} from "../lib/sessionSelection";
 import { paneDropFromPoint, setExternalPaneDrop } from "../lib/paneDrop";
 import type { PaneEdge } from "../lib/layout";
 import { suppressTextSelection } from "../lib/drag";
@@ -102,10 +107,10 @@ import { useSortable } from "../hooks/useSortable";
 import { useTabGroupLogos } from "../hooks/useTabGroupLogos";
 import {
   looksLikeProject,
+  projectRailItems,
   sameProjectPath,
   type RecentProject,
 } from "../lib/recents";
-import { CwdPicker } from "./CwdPicker";
 import { FolderColorSwatches } from "./FolderColorSwatches";
 import { ExplorerMenu, type ExplorerMenuItem } from "./ExplorerMenu";
 import { FileTree } from "./FileTree";
@@ -117,6 +122,7 @@ import { DevModeSlot, IconButton, TabVisitNav } from "./TitleBar";
 import { ProjectSearch } from "./ProjectSearch";
 import { ProjectLogoIcon } from "./ProjectLogoIcon";
 import { ProjectMascot } from "./ProjectMascot";
+import { Popover } from "./Popover";
 import { SessionFiltersMenu } from "./SessionFiltersMenu";
 import { SessionsEmpty } from "./SessionsEmpty";
 import { SidebarUpdateFooter } from "./SidebarUpdate";
@@ -172,8 +178,14 @@ type Props = {
   ) => void;
   onRenameSession?: (sessionId: string, title: string) => void;
   onArchiveSession?: (sessionId: string, archived: boolean) => void;
+  onArchiveSessions?: (
+    sessionIds: readonly string[],
+    archived: boolean,
+  ) => void;
   onPinSession?: (sessionId: string, pinned: boolean) => void;
+  onPinSessions?: (sessionIds: readonly string[], pinned: boolean) => void;
   onDeleteSession?: (sessionId: string) => void;
+  onDeleteSessions?: (sessionIds: readonly string[]) => void;
   onOpenFile: (path: string) => void;
   onOpenTerminal?: (cwd: string) => void;
   onFileMoved?: (from: string, to: string) => void;
@@ -243,8 +255,11 @@ function SidebarComponent({
   onPlaceSessionOnPane,
   onRenameSession,
   onArchiveSession,
+  onArchiveSessions,
   onPinSession,
+  onPinSessions,
   onDeleteSession,
+  onDeleteSessions,
   onOpenFile,
   onOpenTerminal,
   onFileMoved,
@@ -273,7 +288,6 @@ function SidebarComponent({
   onOpenProject,
   onRemoveProject,
   onNew,
-  onNewTerminal,
   onSearch,
   onOpenInbox,
   onOpenNotes,
@@ -316,6 +330,9 @@ function SidebarComponent({
     y: number;
     sessionId: string;
   } | null>(null);
+  const [selectedSessionIds, setSelectedSessionIds] = useState<Set<string>>(
+    () => new Set(),
+  );
   const [folderMenu, setFolderMenu] = useState<{
     x: number;
     y: number;
@@ -423,6 +440,16 @@ function SidebarComponent({
   useEffect(() => {
     onSessionNavigationOrder?.(sessionNavigationIds);
   }, [onSessionNavigationOrder, sessionNavigationKey]);
+  useEffect(() => {
+    if (tab !== "sessions") {
+      setSelectedSessionIds(new Set());
+      return;
+    }
+    const available = new Set(sessionNavigationIds);
+    setSelectedSessionIds((current) =>
+      pruneSessionSelection(current, available),
+    );
+  }, [cwd, tab, sessionNavigationKey]);
   const hasMoreSessions = shownUngroupedCount < ungroupedVisible.length;
   const sessionListKey = `${cwd}\0${sessionFilters.showArchived}\0${sessionFilters.time}\0${sessionFilters.hiddenHarnesses.join(",")}\0${sessionFilters.status.working}\0${sessionFilters.status.needsApproval}\0${sessionFilters.status.done}\0${searchQuery}`;
   const sessionHarnesses = harnessesInSessions(sessions);
@@ -546,6 +573,17 @@ function SidebarComponent({
     return () => scrollParent.removeEventListener("scroll", onScroll, true);
   }, [sessionMenu, folderMenu, filterMenu]);
 
+  useEffect(() => {
+    if (selectedSessionIds.size === 0) return;
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key !== "Escape") return;
+      setSelectedSessionIds(new Set());
+      setSessionMenu(null);
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [selectedSessionIds.size]);
+
   const commitSessionFolders = (next: SessionFolder[]) => {
     setSessionFolders(next);
     saveSessionFolders(cwd, next);
@@ -567,12 +605,33 @@ function SidebarComponent({
     });
   };
 
-  const menuSession = sessionMenu
-    ? sessions.find((session) => session.id === sessionMenu.sessionId)
-    : undefined;
-  const menuSessionFolder = sessionMenu
-    ? folderContaining(sessionFolders, sessionMenu.sessionId)
-    : undefined;
+  const menuSessionIds = sessionMenu
+    ? orderedSessionActionIds(
+        sessionMenu.sessionId,
+        selectedSessionIds,
+        sessionNavigationIds,
+      )
+    : [];
+  const menuSessions = menuSessionIds.flatMap((sessionId) => {
+    const session = listedSessions.find((entry) => entry.id === sessionId);
+    return session ? [session] : [];
+  });
+  const multipleMenuSessions = menuSessionIds.length > 1;
+  const allMenuSessionsPinned =
+    menuSessions.length > 0 && menuSessions.every((session) => session.pinned);
+  const allMenuSessionsArchived =
+    menuSessions.length > 0 &&
+    menuSessions.every((session) => session.archived);
+  const menuSessionFolder =
+    menuSessionIds.length === 1
+      ? folderContaining(sessionFolders, menuSessionIds[0])
+      : undefined;
+  const anyMenuSessionFoldered = menuSessionIds.some((sessionId) =>
+    sessionFolders.some((folder) => folder.sessionIds.includes(sessionId)),
+  );
+  const canRemoveMenuSessionsFromFolders = multipleMenuSessions
+    ? anyMenuSessionFoldered
+    : !!menuSessionFolder;
   const menuFolder = folderMenu
     ? sessionFolders.find((folder) => folder.id === folderMenu.folderId)
     : undefined;
@@ -582,16 +641,16 @@ function SidebarComponent({
     { kind: "item", id: "ungroup", label: "Ungroup" },
   ];
   const sessionMenuItems: ExplorerMenuItem[] = [
-    ...(onPinSession
+    ...(onPinSession || onPinSessions
       ? [
           {
             kind: "item" as const,
             id: "pin",
-            label: menuSession?.pinned ? "Unpin" : "Pin",
+            label: allMenuSessionsPinned ? "Unpin" : "Pin",
           },
         ]
       : []),
-    ...(onRenameSession
+    ...(!multipleMenuSessions && onRenameSession
       ? [
           {
             kind: "item" as const,
@@ -608,30 +667,39 @@ function SidebarComponent({
       kind: "item" as const,
       id: `folder-add:${folder.id}`,
       label: `Add to ${folder.name}`,
-      checked: menuSessionFolder?.id === folder.id,
+      checked:
+        menuSessionIds.length > 0 &&
+        menuSessionIds.every((sessionId) =>
+          folder.sessionIds.includes(sessionId),
+        ),
     })),
-    ...(menuSessionFolder
+    ...(canRemoveMenuSessionsFromFolders
       ? [
           {
             kind: "item" as const,
             id: "folder-remove",
-            label: "Remove from folder",
+            label: multipleMenuSessions
+              ? "Remove from folders"
+              : "Remove from folder",
           },
         ]
       : []),
-    ...(onArchiveSession || onDeleteSession
+    ...(onArchiveSession ||
+    onArchiveSessions ||
+    onDeleteSession ||
+    onDeleteSessions
       ? [
           { kind: "sep" as const },
-          ...(onArchiveSession
+          ...(onArchiveSession || onArchiveSessions
             ? [
                 {
                   kind: "item" as const,
                   id: "archive",
-                  label: menuSession?.archived ? "Unarchive" : "Archive",
+                  label: allMenuSessionsArchived ? "Unarchive" : "Archive",
                 },
               ]
             : []),
-          ...(onDeleteSession
+          ...(onDeleteSession || onDeleteSessions
             ? [
                 {
                   kind: "item" as const,
@@ -652,6 +720,9 @@ function SidebarComponent({
   ) => {
     e.preventDefault();
     e.stopPropagation();
+    if (!selectedSessionIds.has(sessionId)) {
+      setSelectedSessionIds(new Set([sessionId]));
+    }
     setFilterMenu(null);
     setFolderMenu(null);
     setSessionMenu({ x: e.clientX, y: e.clientY, sessionId });
@@ -671,11 +742,16 @@ function SidebarComponent({
   const onSessionMenuPick = (id: string) => {
     if (!sessionMenu) return;
     const sessionId = sessionMenu.sessionId;
-    const archived = !!menuSession?.archived;
-    const pinned = !!menuSession?.pinned;
+    const sessionIds = menuSessionIds;
+    const archived = allMenuSessionsArchived;
+    const pinned = allMenuSessionsPinned;
     setSessionMenu(null);
     if (id === "pin") {
-      onPinSession?.(sessionId, !pinned);
+      if (sessionIds.length > 1 && onPinSessions) {
+        onPinSessions(sessionIds, !pinned);
+      } else {
+        for (const id of sessionIds) onPinSession?.(id, !pinned);
+      }
       return;
     }
     if (id === "rename") {
@@ -685,7 +761,7 @@ function SidebarComponent({
     if (id === "folder-new") {
       const { folders, id: createdId } = createFolderWithSessions(
         sessionFolders,
-        [sessionId],
+        sessionIds,
       );
       if (!createdId) return;
       commitSessionFolders(folders);
@@ -694,24 +770,37 @@ function SidebarComponent({
     }
     if (id.startsWith("folder-add:")) {
       const folderId = id.slice("folder-add:".length);
+      const folders = sessionIds.reduce(
+        (current, id) => addSessionToFolder(current, folderId, id),
+        sessionFolders,
+      );
+      commitSessionFolders(setFolderCollapsed(folders, folderId, false));
+      return;
+    }
+    if (id === "folder-remove") {
       commitSessionFolders(
-        setFolderCollapsed(
-          addSessionToFolder(sessionFolders, folderId, sessionId),
-          folderId,
-          false,
+        sessionIds.reduce(
+          (current, id) => removeSessionFromFolder(current, id),
+          sessionFolders,
         ),
       );
       return;
     }
-    if (id === "folder-remove") {
-      commitSessionFolders(removeSessionFromFolder(sessionFolders, sessionId));
-      return;
-    }
     if (id === "archive") {
-      onArchiveSession?.(sessionId, !archived);
+      if (sessionIds.length > 1 && onArchiveSessions) {
+        onArchiveSessions(sessionIds, !archived);
+      } else {
+        for (const id of sessionIds) onArchiveSession?.(id, !archived);
+      }
       return;
     }
-    if (id === "delete") onDeleteSession?.(sessionId);
+    if (id === "delete") {
+      if (sessionIds.length > 1 && onDeleteSessions) {
+        onDeleteSessions(sessionIds);
+      } else {
+        for (const id of sessionIds) onDeleteSession?.(id);
+      }
+    }
   };
 
   const onFolderMenuPick = (id: string) => {
@@ -758,6 +847,21 @@ function SidebarComponent({
   const isSessionDrop = (kind: "folder" | "session", id: string) =>
     sessionDrop?.kind === kind && sessionDrop.id === id;
 
+  const onSessionCardSelect = (
+    sessionId: string,
+    event: ReactMouseEvent<HTMLButtonElement>,
+  ) => {
+    if (event.shiftKey) {
+      setSessionMenu(null);
+      setSelectedSessionIds((current) =>
+        toggleSessionSelection(current, sessionId),
+      );
+      return;
+    }
+    setSelectedSessionIds(new Set());
+    onSelectSession(sessionId);
+  };
+
   const renderSessionCard = (session: SessionSummary, compact = false) =>
     renamingSessionId === session.id && onRenameSession ? (
       <SessionRenameRow
@@ -775,13 +879,14 @@ function SidebarComponent({
       <SessionCard
         session={session}
         isActive={session.id === activeSessionId}
+        isSelected={selectedSessionIds.has(session.id)}
         busy={busySessionIds.has(session.id)}
         done={unseenFinishedIds.has(session.id)}
         needsApproval={approvalSessionIds.has(session.id)}
         dropTarget={isSessionDrop("session", session.id)}
         compact={compact}
         now={now}
-        onSelect={onSelectSession}
+        onSelect={onSessionCardSelect}
         onPrefetch={onPrefetchSession}
         onPlaceOnPane={onPlaceSessionOnPane}
         onListDrop={onSessionListDrop}
@@ -970,7 +1075,8 @@ function SidebarComponent({
               recents={recents}
               busy={projectPathBusy(busyProjectPaths, cwd)}
               onSelectProject={onSelectProject}
-              onNewTerminal={onNewTerminal}
+              onOpenProject={onOpenProject}
+              onNew={onNew}
               onSearch={onSearch}
               onOpenInbox={onOpenInbox}
               onOpenNotes={notesEnabled ? onOpenNotes : undefined}
@@ -1300,7 +1406,11 @@ function SidebarComponent({
           x={sessionMenu.x}
           y={sessionMenu.y}
           items={sessionMenuItems}
-          ariaLabel="Session actions"
+          ariaLabel={
+            multipleMenuSessions
+              ? `${menuSessionIds.length} selected session actions`
+              : "Session actions"
+          }
           onPick={onSessionMenuPick}
           onClose={() => setSessionMenu(null)}
         />
@@ -1404,7 +1514,8 @@ function SidebarProjectPicker({
   recents,
   busy,
   onSelectProject,
-  onNewTerminal,
+  onOpenProject,
+  onNew,
   onSearch,
   onOpenInbox,
   onOpenNotes,
@@ -1417,7 +1528,8 @@ function SidebarProjectPicker({
   recents: RecentProject[];
   busy: boolean;
   onSelectProject: (path: string) => void;
-  onNewTerminal?: () => void;
+  onOpenProject?: () => void;
+  onNew?: () => void;
   onSearch?: () => void;
   onOpenInbox?: () => void;
   onOpenNotes?: () => void;
@@ -1426,58 +1538,248 @@ function SidebarProjectPicker({
   notesActive?: boolean;
   inboxUnseen?: boolean;
 }) {
+  const [open, setOpen] = useState(false);
+  const [query, setQuery] = useState("");
+  const [active, setActive] = useState(0);
+  const pickerRef = useRef<HTMLDivElement>(null);
   const [groupLabels] = useState(loadTabGroupLabels);
   const [groupColors] = useState(loadTabGroupColors);
   const [groupCustomColors] = useState(loadTabGroupCustomColors);
   const [groupMascots] = useState(loadTabGroupMascots);
   const groupLogos = useTabGroupLogos();
-  const projectKey = projectName(cwd);
-  const label = resolveTabGroupLabel(
-    projectKey,
-    groupLabels,
-    basename(cwd) || projectKey,
-  );
-  const logoPath = resolveTabGroupLogo(projectKey, groupLogos);
-  const color = resolveTabGroupColor(
-    projectKey,
-    groupColors,
-    groupCustomColors,
-    projectKey,
-  );
+  const seed = projectName(cwd);
+  const key = projectKey(cwd);
+  const label = resolveTabGroupLabel(key, groupLabels, basename(cwd) || seed);
+  const logoPath = resolveTabGroupLogo(key, groupLogos);
+  const color = resolveTabGroupColor(key, groupColors, groupCustomColors, seed);
+  const projects = projectRailItems(recents, cwd);
+  const orderedProjects = [
+    ...projects.filter((item) => sameProjectPath(item.path, cwd)),
+    ...projects.filter((item) => !sameProjectPath(item.path, cwd)),
+  ];
+  const normalizedQuery = query.trim().toLocaleLowerCase();
+  const filteredProjects = normalizedQuery
+    ? orderedProjects.filter((item) => {
+        const itemKey = projectKey(item.path);
+        const itemLabel = resolveTabGroupLabel(
+          itemKey,
+          groupLabels,
+          basename(item.path) || projectName(item.path),
+        );
+        return `${itemLabel}\n${item.path}`
+          .toLocaleLowerCase()
+          .includes(normalizedQuery);
+      })
+    : orderedProjects;
+
+  const closePicker = () => {
+    setOpen(false);
+    setQuery("");
+    setActive(0);
+  };
+
+  const openPicker = () => {
+    setOpen(true);
+    setQuery("");
+    setActive(0);
+  };
+
+  const pickProject = (path: string) => {
+    closePicker();
+    if (!sameProjectPath(path, cwd)) onSelectProject(path);
+  };
+
+  const onPickerKeyDown = (event: ReactKeyboardEvent<HTMLElement>) => {
+    if (!(event.target instanceof HTMLInputElement)) return;
+    if (event.key === "ArrowDown") {
+      event.preventDefault();
+      if (filteredProjects.length === 0) return;
+      setActive((index) => Math.min(filteredProjects.length - 1, index + 1));
+      return;
+    }
+    if (event.key === "ArrowUp") {
+      event.preventDefault();
+      setActive((index) => Math.max(0, index - 1));
+      return;
+    }
+    if (event.key === "Enter") {
+      const project = filteredProjects[active];
+      if (!project) return;
+      event.preventDefault();
+      pickProject(project.path);
+    }
+  };
 
   return (
     <div
       className="flex h-9 items-center gap-0.5 border-b border-content/10 px-2"
       data-tauri-drag-region="deep"
     >
-      <CwdPicker
-        cwd={cwd}
-        recents={recents}
-        placement="below"
-        chevron
-        onCwdChange={onSelectProject}
-        onNewTerminal={onNewTerminal}
-        className="min-w-0 items-center"
-        buttonClassName="flex h-6.5 w-full items-center gap-1.5 rounded-md px-2 text-[12px] leading-none text-content/50 hover:text-content"
+      <div
+        ref={pickerRef}
+        className="relative flex h-full min-w-0 flex-1 items-center"
       >
-        {logoPath ? (
-          <ProjectLogoIcon
-            path={logoPath}
-            className="size-3.5 shrink-0 rounded-sm"
-            imageClassName="size-3.5"
+        <button
+          type="button"
+          title={cwd}
+          aria-label={`Switch project, current project ${label}`}
+          aria-expanded={open}
+          aria-haspopup="dialog"
+          data-tauri-drag-region="false"
+          onClick={() => (open ? closePicker() : openPicker())}
+          onKeyDown={(event) => {
+            if (open) return;
+            if (event.key !== "ArrowDown") return;
+            event.preventDefault();
+            openPicker();
+          }}
+          className={`flex h-6.5 min-w-0 items-center gap-1.5 rounded-md px-2 text-[12px] leading-none hover:text-content ${
+            open
+              ? "bg-content/10 text-content"
+              : "text-content/50 hover:bg-content/5"
+          }`}
+        >
+          {logoPath ? (
+            <ProjectLogoIcon
+              path={logoPath}
+              className="size-3.5 shrink-0 rounded-sm"
+              imageClassName="size-3.5"
+            />
+          ) : (
+            <ProjectMascot
+              project={seed}
+              color={color}
+              name={resolveTabGroupMascot(key, groupMascots)}
+              className="size-3 shrink-0"
+              active={busy}
+            />
+          )}
+          <span className="min-w-0 truncate font-medium text-content/90">
+            {label}
+          </span>
+          <ChevronDown
+            className={`size-3 shrink-0 text-content/45 transition-transform ${
+              open ? "rotate-180" : ""
+            }`}
+            strokeWidth={1.75}
           />
-        ) : (
-          <ProjectMascot
-            project={projectKey}
-            color={color}
-            name={resolveTabGroupMascot(projectKey, groupMascots)}
-            className="size-3 shrink-0"
-            active={busy}
-          />
-        )}
-        <span className="min-w-0 truncate">{label}</span>
-      </CwdPicker>
+        </button>
+        {open ? (
+          <Popover
+            anchor={pickerRef}
+            side="bottom"
+            align="start"
+            gap={4}
+            width={286}
+            maxHeight={380}
+            role="dialog"
+            aria-label="Project picker"
+            onDismiss={() => closePicker()}
+            onKeyDown={onPickerKeyDown}
+            className="flex flex-col overflow-hidden"
+          >
+            <label className="flex h-11 shrink-0 items-center gap-2.5 border-b border-content/10 px-3 text-content/45 focus-within:text-content/70">
+              <Search className="size-4 shrink-0" strokeWidth={1.75} />
+              <span className="sr-only">Search projects</span>
+              <input
+                autoFocus
+                value={query}
+                onChange={(event) => {
+                  setQuery(event.target.value);
+                  setActive(0);
+                }}
+                placeholder="Search projects..."
+                className="min-w-0 flex-1 bg-transparent text-[13px] text-content outline-none placeholder:text-content/35"
+              />
+            </label>
+            <div className="min-h-0 flex-1 overflow-y-auto overscroll-none p-1.5">
+              {filteredProjects.length > 0 ? (
+                filteredProjects.map((item, index) => {
+                  const current = sameProjectPath(item.path, cwd);
+                  const itemKey = projectKey(item.path);
+                  const itemSeed = projectName(item.path);
+                  const itemLabel = resolveTabGroupLabel(
+                    itemKey,
+                    groupLabels,
+                    basename(item.path) || itemSeed,
+                  );
+                  const itemLogo = resolveTabGroupLogo(itemKey, groupLogos);
+                  const itemColor = resolveTabGroupColor(
+                    itemKey,
+                    groupColors,
+                    groupCustomColors,
+                    itemSeed,
+                  );
+                  return (
+                    <button
+                      key={item.path}
+                      type="button"
+                      title={item.path}
+                      onMouseEnter={() => setActive(index)}
+                      onClick={() => pickProject(item.path)}
+                      className={`flex h-9 w-full items-center gap-2.5 rounded-lg px-2.5 text-left ${
+                        active === index
+                          ? "bg-content/10 text-content"
+                          : "text-content/75 hover:bg-content/5 hover:text-content"
+                      }`}
+                    >
+                      <span className="grid size-4 shrink-0 place-items-center">
+                        {current ? (
+                          <Check className="size-3.5" strokeWidth={2} />
+                        ) : itemLogo ? (
+                          <ProjectLogoIcon
+                            path={itemLogo}
+                            className="size-4 rounded-sm"
+                            imageClassName="size-4"
+                          />
+                        ) : (
+                          <ProjectMascot
+                            project={itemSeed}
+                            color={itemColor}
+                            name={resolveTabGroupMascot(itemKey, groupMascots)}
+                            className="size-3.5"
+                          />
+                        )}
+                      </span>
+                      <span className="min-w-0 flex-1 truncate text-[13px] font-medium">
+                        {itemLabel}
+                      </span>
+                      <span className="max-w-44 shrink truncate font-mono text-[11px] text-content/40">
+                        {prettyParent(item.path)}
+                      </span>
+                    </button>
+                  );
+                })
+              ) : (
+                <p className="px-2.5 py-5 text-center text-[12px] text-content/45">
+                  No projects found
+                </p>
+              )}
+            </div>
+            {onOpenProject ? (
+              <div className="shrink-0 border-t border-content/10 p-1.5">
+                <button
+                  type="button"
+                  onClick={() => {
+                    closePicker();
+                    onOpenProject();
+                  }}
+                  className="flex h-9 w-full items-center gap-2.5 rounded-lg px-2.5 text-left text-[13px] text-content/75 hover:bg-content/8 hover:text-content"
+                >
+                  <Plus className="size-4 shrink-0" strokeWidth={1.75} />
+                  <span>New project</span>
+                </button>
+              </div>
+            ) : null}
+          </Popover>
+        ) : null}
+      </div>
       <div className="flex items-center ml-auto">
+        {onNew ? (
+          <IconButton label={`New tab (${MOD}T)`} onClick={onNew}>
+            <Plus className="size-3.5" strokeWidth={1.75} />
+          </IconButton>
+        ) : null}
         {onSearch ? (
           <IconButton
             label={`Search (${MOD}K)`}
@@ -1769,6 +2071,7 @@ function FolderRenameRow({
 function SessionCard({
   session,
   isActive,
+  isSelected,
   busy,
   done,
   needsApproval,
@@ -1787,13 +2090,17 @@ function SessionCard({
 }: {
   session: SessionSummary;
   isActive: boolean;
+  isSelected: boolean;
   busy: boolean;
   done: boolean;
   needsApproval: boolean;
   dropTarget?: boolean;
   compact?: boolean;
   now: number;
-  onSelect: (sessionId: string) => void;
+  onSelect: (
+    sessionId: string,
+    event: ReactMouseEvent<HTMLButtonElement>,
+  ) => void;
   onPrefetch?: (sessionId: string) => void;
   onPlaceOnPane?: (sessionId: string, targetId: string, edge: PaneEdge) => void;
   onListDrop?: (draggedId: string, target: SessionListDropTarget) => void;
@@ -1962,13 +2269,15 @@ function SessionCard({
         type="button"
         title={title}
         aria-current={isActive ? "true" : undefined}
+        aria-pressed={isSelected}
         data-session-card={session.id}
+        data-session-selected={isSelected ? "true" : undefined}
         data-tauri-drag-region="false"
         onPointerDown={onPointerDown}
         onPointerEnter={() => onPrefetch?.(session.id)}
-        onClick={() => {
+        onClick={(event) => {
           if (performance.now() < skipClickUntil.current) return;
-          onSelect(session.id);
+          onSelect(session.id, event);
         }}
         onContextMenu={onContextMenu}
         onKeyDown={onKeyDown}
@@ -1977,11 +2286,13 @@ function SessionCard({
         } ${dragging ? "opacity-40" : ""} ${
           dropTarget
             ? "text-content border-transparent"
-            : needsApproval
-              ? "bg-content/20 text-content border-content/30 border-dashed"
-              : isActive
-                ? "bg-content/10 text-content border-transparent"
-                : "text-content/80 hover:bg-content/5 hover:text-content border-transparent"
+            : isSelected
+              ? "bg-accent/15 text-content border-transparent"
+              : needsApproval
+                ? "bg-content/20 text-content border-content/30 border-dashed"
+                : isActive
+                  ? "bg-content/10 text-content border-transparent"
+                  : "text-content/80 hover:bg-content/5 hover:text-content border-transparent"
         }`}
       >
         {dropTarget ? (

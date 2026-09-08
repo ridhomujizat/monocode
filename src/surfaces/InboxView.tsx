@@ -11,6 +11,7 @@ import {
   GitPullRequestClosed,
   GitPullRequestDraft,
   Inbox,
+  MessageSquare,
   ListFilter,
   LoaderCircle,
   RefreshCw,
@@ -65,6 +66,7 @@ import {
 import {
   applyInboxFilters,
   hasActiveInboxFilters,
+  linearProjectOptions,
   inboxFetchState,
   loadInboxFilters,
   loadInboxSource,
@@ -74,7 +76,7 @@ import {
   type InboxFilters,
   type InboxSource,
 } from "../lib/inboxFilters";
-import { projectName } from "../lib/paths";
+import { projectKey, projectName } from "../lib/paths";
 import { IS_MAC } from "../lib/platform";
 import { sameProjectPath, type RecentProject } from "../lib/recents";
 import {
@@ -88,10 +90,13 @@ import {
   linearIssueComment,
   linearIssueDetails,
   linearIssueThread,
+  listLinearTeams,
   loadHiddenLinearTeamIds,
   peekLinearIssueDetails,
   peekLinearIssueThread,
+  saveHiddenLinearTeamIds,
   type LinearIssueThread,
+  type LinearTeam,
 } from "../lib/linear";
 import {
   loadTabGroupColors,
@@ -108,9 +113,21 @@ import {
   type InboxReplyTarget,
 } from "./InboxComments";
 import { InboxPrDiff } from "./InboxPrDiff";
+import {
+  InboxDiscussionPanel,
+  type InboxSessionPortal,
+} from "./InboxDiscussionPanel";
+import { inboxAskKey } from "../lib/inboxAsk";
 
 const MIN_WIDTH = 240;
 const MAX_WIDTH = 420;
+
+// One height for the whole detail action row; `border` is inside it, so the
+// outline variant lines up with the filled and ghost ones.
+const ACTION = "inline-flex items-center gap-1.5 rounded-md px-3 text-[12px]";
+const ACTION_FILLED = `${ACTION} h-6.5 bg-content text-background-base hover:bg-content/80`;
+const ACTION_OUTLINE = `${ACTION} h-7 border border-content/15 text-content/80 hover:bg-content/5`;
+const ACTION_GHOST = `${ACTION} h-7 text-content/70 hover:bg-content/10 hover:text-content`;
 const DEFAULT_WIDTH = 280;
 
 let rememberedWidth = DEFAULT_WIDTH;
@@ -132,13 +149,14 @@ function inboxProjectOptions(
   const custom = loadTabGroupCustomColors();
   return [...projects]
     .map((project) => {
-      const key = projectName(project.path);
+      const name = projectName(project.path);
+      const key = projectKey(project.path);
       return {
         path: project.path,
-        name: key,
+        name,
         logoPath: resolveTabGroupLogo(key, logos),
         mascotName: resolveTabGroupMascot(key, mascots),
-        mascotColor: resolveTabGroupColor(key, colors, custom, key),
+        mascotColor: resolveTabGroupColor(key, colors, custom, name),
       };
     })
     .sort((a, b) => a.name.localeCompare(b.name));
@@ -246,6 +264,9 @@ function InboxDetailTab({
 }
 
 type Props = {
+  onAsk: (item: InboxItem) => Promise<string>;
+  onAskRestart: (item: InboxItem) => Promise<string>;
+  onAskMount: (portal: InboxSessionPortal | null) => void;
   cwd: string;
   recents: RecentProject[];
   besideRail?: boolean;
@@ -255,6 +276,9 @@ type Props = {
 };
 
 export function InboxView({
+  onAsk,
+  onAskRestart,
+  onAskMount,
   cwd,
   recents,
   besideRail = false,
@@ -262,6 +286,7 @@ export function InboxView({
   onToggleSidebar,
   onStart,
 }: Props) {
+  const [discussionOpen, setDiscussionOpen] = useState(false);
   const listLock = useLockOverscroll<HTMLDivElement>();
   const detailLock = useLockOverscroll<HTMLDivElement>();
   const onCloseRef = useRef(onClose);
@@ -292,6 +317,7 @@ export function InboxView({
   const [linearHiddenTeamIds, setLinearHiddenTeamIds] = useState(
     loadHiddenLinearTeamIds,
   );
+  const [linearTeams, setLinearTeams] = useState<LinearTeam[]>([]);
   const prevRefresh = useRef(refresh);
 
   const projects = useMemo(
@@ -302,6 +328,7 @@ export function InboxView({
     () => inboxProjectOptions(projects, logos),
     [logos, projects],
   );
+  const linearProjects = useMemo(() => linearProjectOptions(items), [items]);
   const activeFilters = useMemo(
     () =>
       pruneInboxFilters(
@@ -310,7 +337,11 @@ export function InboxView({
       ),
     [filters, projects],
   );
-  const filtersActive = hasActiveInboxFilters(activeFilters, source);
+  const filtersActive = hasActiveInboxFilters(
+    activeFilters,
+    source,
+    linearHiddenTeamIds,
+  );
   const fetchState = inboxFetchState(activeFilters);
   const fetchQuery = useMemo<InboxQuery>(
     () => ({
@@ -355,6 +386,23 @@ export function InboxView({
     window.addEventListener(LINEAR_CHANGE_EVENT, onChange);
     return () => window.removeEventListener(LINEAR_CHANGE_EVENT, onChange);
   }, []);
+
+  // The roster has to come from Linear, not from the fetched issues: hiding a
+  // team drops its issues, so a derived list could never offer it back.
+  useEffect(() => {
+    if (source !== "linear") return;
+    let cancelled = false;
+    void listLinearTeams()
+      .then((teams) => {
+        if (!cancelled) setLinearTeams(teams);
+      })
+      .catch(() => {
+        if (!cancelled) setLinearTeams([]);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [source, linearHiddenTeamIds]);
 
   useEffect(() => {
     const force = refresh !== prevRefresh.current;
@@ -567,19 +615,19 @@ export function InboxView({
           <ul className="flex flex-col gap-0.5 p-1.5">
             {visibleItems.map((item) => {
               const key = inboxItemKey(item);
-              const projectKey = projectName(item.projectPath);
+              const projectId = projectKey(item.projectPath);
               return (
                 <li key={key}>
                   <InboxCard
                     item={item}
                     active={selected != null && key === inboxItemKey(selected)}
-                    logoPath={resolveTabGroupLogo(projectKey, logos)}
-                    mascotName={resolveTabGroupMascot(projectKey, groupMascots)}
+                    logoPath={resolveTabGroupLogo(projectId, logos)}
+                    mascotName={resolveTabGroupMascot(projectId, groupMascots)}
                     mascotColor={resolveTabGroupColor(
-                      projectKey,
+                      projectId,
                       groupColors,
                       groupCustomColors,
-                      projectKey,
+                      projectName(item.projectPath),
                     )}
                     onSelect={() => {
                       markInboxItemSeen({
@@ -613,9 +661,13 @@ export function InboxView({
       x={filterMenu.x}
       y={filterMenu.y}
       projects={projectOptions}
+      linearProjects={linearProjects}
+      linearTeams={linearTeams}
+      hiddenLinearTeamIds={linearHiddenTeamIds}
       source={source}
       filters={activeFilters}
       onChange={onFiltersChange}
+      onLinearTeamsChange={saveHiddenLinearTeamIds}
       onClose={() => setFilterMenu(null)}
     />
   ) : null;
@@ -647,17 +699,30 @@ export function InboxView({
 
       <div className="flex min-h-0 min-w-0 flex-1">
         {list}
-        <div
-          ref={detailLock}
-          className="min-h-0 min-w-0 flex-1 overflow-y-auto overscroll-none"
-        >
-          <InboxDetailBody
-            item={selected}
-            cwd={cwd}
-            projects={projectOptions}
-            revision={refresh}
-            onStart={onStart}
-          />
+        <div className="relative flex min-h-0 min-w-0 flex-1">
+          <div
+            ref={detailLock}
+            className="min-h-0 min-w-0 flex-1 overflow-y-auto overscroll-none"
+          >
+            <InboxDetailBody
+              item={selected}
+              cwd={cwd}
+              projects={projectOptions}
+              revision={refresh}
+              onDiscuss={() => setDiscussionOpen(true)}
+              onStart={onStart}
+            />
+          </div>
+          {discussionOpen && selected ? (
+            <InboxDiscussionPanel
+              onOpen={onAsk}
+              onRestart={onAskRestart}
+              onMount={onAskMount}
+              key={inboxAskKey(selected)}
+              item={selected}
+              onClose={() => setDiscussionOpen(false)}
+            />
+          ) : null}
         </div>
       </div>
       {filtersPortal}
@@ -670,12 +735,14 @@ function InboxDetailBody({
   cwd,
   projects,
   revision = 0,
+  onDiscuss,
   onStart,
 }: {
   item: InboxItem | null;
   cwd: string;
   projects: InboxProjectOption[];
   revision?: number;
+  onDiscuss?: () => void;
   onStart?: (item: InboxItem, body?: string) => void | Promise<void>;
 }) {
   if (!item) {
@@ -695,6 +762,7 @@ function InboxDetailBody({
       cwd={cwd}
       projects={projects}
       revision={revision}
+      onDiscuss={onDiscuss}
       onStart={onStart}
     />
   );
@@ -841,12 +909,14 @@ function InboxDetail({
   cwd,
   projects,
   revision,
+  onDiscuss,
   onStart,
 }: {
   item: InboxItem;
   cwd: string;
   projects: InboxProjectOption[];
   revision: number;
+  onDiscuss?: () => void;
   onStart?: (item: InboxItem, body?: string) => void | Promise<void>;
 }) {
   const linear = item.provider === "linear";
@@ -1218,7 +1288,7 @@ function InboxDetail({
                     })
                     .finally(() => setStarting(false));
                 }}
-                className="inline-flex items-center gap-1 rounded-md bg-content px-3 h-6.5 text-[12px] text-background-base hover:bg-content/80 disabled:cursor-default disabled:opacity-40"
+                className={`${ACTION_FILLED} disabled:cursor-default disabled:opacity-40`}
               >
                 {starting ? "Sending..." : "Send to agent"}
               </button>
@@ -1233,12 +1303,15 @@ function InboxDetail({
           ) : null}
           <button
             type="button"
+            onClick={onDiscuss}
+            className={item.kind === "pr" ? ACTION_FILLED : ACTION_OUTLINE}
+          >
+            <MessageSquare className="size-3.5" strokeWidth={1.75} /> Ask
+          </button>
+          <button
+            type="button"
             onClick={() => void openUrl(item.url)}
-            className={
-              item.kind === "pr"
-                ? "inline-flex items-center gap-1.5 rounded-md bg-content px-3 h-7 text-[12px] text-background-base hover:bg-content/80"
-                : "inline-flex items-center gap-1.5 rounded-md px-3 h-7 text-[12px] text-content/70 hover:bg-content/10 hover:text-content"
-            }
+            className={ACTION_GHOST}
           >
             <ExternalLink className="size-3.5" strokeWidth={1.75} />
             {item.kind === "pr"
