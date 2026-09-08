@@ -335,6 +335,49 @@ pub fn workspace_get_snapshot(store: State<'_, SessionStore>) -> Result<Option<V
     }
 }
 
+// monocode-remote: transport config, keys `hostId` / `hostToken` / `relayUrl` /
+// `enabled`. `hostToken` is a credential: no value read or written here may
+// reach a log, an error message, or `localStorage` (ADR 0003).
+#[tauri::command(async)]
+pub fn remote_config_get(
+    store: State<'_, SessionStore>,
+    key: String,
+) -> Result<Option<String>, String> {
+    let conn = store.lock_conn()?;
+    get_remote_config(&conn, &key).map_err(|e| e.to_string())
+}
+
+#[tauri::command(async)]
+pub fn remote_config_set(
+    store: State<'_, SessionStore>,
+    key: String,
+    value: String,
+) -> Result<(), String> {
+    let conn = store.lock_conn()?;
+    // A rusqlite message cannot echo a bound parameter, but this is the one
+    // write path carrying a token — keep that unarguable.
+    set_remote_config(&conn, &key, &value).map_err(|_| "Failed to save remote config".to_string())
+}
+
+fn get_remote_config(conn: &Connection, key: &str) -> rusqlite::Result<Option<String>> {
+    conn.query_row(
+        "SELECT value FROM remote_config WHERE key = ?1",
+        params![key],
+        |row| row.get(0),
+    )
+    .optional()
+}
+
+fn set_remote_config(conn: &Connection, key: &str, value: &str) -> rusqlite::Result<()> {
+    conn.execute(
+        "INSERT INTO remote_config (key, value) VALUES (?1, ?2)
+         ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+        params![key, value],
+    )?;
+    Ok(())
+}
+// monocode-remote end
+
 /// Add a `sessions` column when it is absent, so a half-applied history cannot
 /// leave the schema short of what the queries select.
 fn ensure_session_column(conn: &Connection, column: &str, decl: &str) -> rusqlite::Result<()> {
@@ -557,6 +600,17 @@ fn migrate(conn: &Connection) -> rusqlite::Result<()> {
         "CREATE INDEX IF NOT EXISTS sessions_legacy_inbox
          ON sessions (id) WHERE inbox_ask IS NOT NULL;",
     )?;
+    // monocode-remote: first credential table in this database (`hostToken`).
+    // Deliberately not version-gated: upstream is active and may take the next
+    // migration number itself, which would leave this fork's DB without the
+    // table. `IF NOT EXISTS` makes re-running free.
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS remote_config (
+           key   TEXT PRIMARY KEY,
+           value TEXT NOT NULL
+         );",
+    )?;
+    // monocode-remote end
     crate::notes::ensure_notes_table(conn)?;
     Ok(())
 }
@@ -1853,4 +1907,40 @@ mod tests {
         assert!(result.hits.is_empty());
         assert!(!result.truncated);
     }
+
+    // monocode-remote: remote_config
+    #[test]
+    fn remote_config_reads_back_what_it_wrote() {
+        let store = SessionStore::open_in_memory().unwrap();
+        let conn = store.lock_conn().unwrap();
+        set_remote_config(&conn, "hostId", "h_7f3a").unwrap();
+        assert_eq!(
+            get_remote_config(&conn, "hostId").unwrap().as_deref(),
+            Some("h_7f3a")
+        );
+    }
+
+    #[test]
+    fn remote_config_overwrites_a_key_in_place() {
+        let store = SessionStore::open_in_memory().unwrap();
+        let conn = store.lock_conn().unwrap();
+        set_remote_config(&conn, "relayUrl", "wss://old.example/ws/host").unwrap();
+        set_remote_config(&conn, "relayUrl", "wss://new.example/ws/host").unwrap();
+        assert_eq!(
+            get_remote_config(&conn, "relayUrl").unwrap().as_deref(),
+            Some("wss://new.example/ws/host")
+        );
+        let rows: i64 = conn
+            .query_row("SELECT COUNT(*) FROM remote_config", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(rows, 1);
+    }
+
+    #[test]
+    fn remote_config_missing_key_is_none() {
+        let store = SessionStore::open_in_memory().unwrap();
+        let conn = store.lock_conn().unwrap();
+        assert!(get_remote_config(&conn, "hostToken").unwrap().is_none());
+    }
+    // monocode-remote end
 }

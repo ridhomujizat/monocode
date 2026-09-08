@@ -311,6 +311,9 @@ pub fn run() {
             session_store::session_take_in_flight,
             session_store::workspace_set_snapshot,
             session_store::workspace_get_snapshot,
+            // monocode-remote
+            session_store::remote_config_get,
+            session_store::remote_config_set,
             notes::notes_list,
             notes::notes_get,
             notes::notes_upsert,
