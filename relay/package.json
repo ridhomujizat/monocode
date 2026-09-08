@@ -1,0 +1,17 @@
+{
+  "name": "monocode-relay",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "description": "Splice relay for MonoCode Remote: one host socket and N client sockets per hostId.",
+  "engines": {
+    "node": ">=22.18"
+  },
+  "scripts": {
+    "start": "node server.ts",
+    "test": "node --test"
+  },
+  "dependencies": {
+    "ws": "^8.21.3"
+  }
+}
