@@ -5,7 +5,9 @@ import {
   Keyboard,
   Palette,
   SlidersHorizontal,
+  Sparkles,
   Wrench,
+
   type IconComponent,
 } from "./icons";
 import { useLockOverscroll } from "../hooks/useLockOverscroll";
@@ -17,6 +19,8 @@ const SECTION_ICONS: Record<SettingsSectionId, IconComponent> = {
   keybindings: Keyboard,
   providers: Bot,
   plugins: Wrench,
+  skills: Sparkles,
+
   archive: Archive,
 };
 

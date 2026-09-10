@@ -1,11 +1,14 @@
+import { openUrl } from "@tauri-apps/plugin-opener";
 import {
   Archive,
   Check,
   ChevronDown,
   ChevronRight,
   CircleAlert,
+  CircleDot,
   Folder,
   GitBranch,
+  GitPullRequest,
   Inbox,
   ListFilter,
   Pin,
@@ -29,7 +32,11 @@ import {
   saveSidebarTabOrder,
   type SidebarTabId,
 } from "../lib/appearance";
-import { basename, type GitHistoryCommit } from "../lib/fs";
+import {
+  basename,
+  type GitFileDiffKind,
+  type GitHistoryCommit,
+} from "../lib/fs";
 import { IS_MAC, MOD } from "../lib/platform";
 import { resolveModel } from "../lib/models";
 import { prettyParent, projectKey, projectName } from "../lib/paths";
@@ -83,7 +90,7 @@ import {
   saveSessionSidebarFilters,
   type SessionSidebarFilters,
 } from "../lib/sessionFilters";
-import type { HarnessId } from "../lib/session";
+import type { HarnessId, LinkedWorkItem } from "../lib/session";
 import type { LiveAgent } from "../lib/liveAgents";
 import type { SessionSummary } from "../lib/sessionStore";
 import type { SettingsSectionId } from "../lib/settings";
@@ -200,9 +207,11 @@ type Props = {
   canGoForward?: boolean;
   onGoBack?: () => void;
   onGoForward?: () => void;
-  onOpenDiff?: (path: string) => void;
+  onOpenDiff?: (path: string, kind?: GitFileDiffKind) => void;
+  onOpenAllChanges?: () => void;
   onOpenCommit?: (commit: GitHistoryCommit) => void;
   selectedDiffPath?: string;
+  selectedDiffKind?: GitFileDiffKind;
   selectedCommitSha?: string;
   textHarness?: HarnessId;
   onShowSourceControl?: () => void;
@@ -217,6 +226,7 @@ type Props = {
   onNewTerminal?: () => void;
   onSearch?: () => void;
   onOpenInbox?: () => void;
+  onOpenInboxItem?: (item: LinkedWorkItem) => void;
   onOpenNotes?: () => void;
   onGoToFile?: () => void;
   searchActive?: boolean;
@@ -275,8 +285,10 @@ function SidebarComponent({
   onGoBack,
   onGoForward,
   onOpenDiff,
+  onOpenAllChanges,
   onOpenCommit,
   selectedDiffPath,
+  selectedDiffKind,
   selectedCommitSha,
   textHarness,
   onShowSourceControl,
@@ -290,6 +302,7 @@ function SidebarComponent({
   onNew,
   onSearch,
   onOpenInbox,
+  onOpenInboxItem,
   onOpenNotes,
   onGoToFile,
   searchActive = false,
@@ -333,6 +346,7 @@ function SidebarComponent({
   const [selectedSessionIds, setSelectedSessionIds] = useState<Set<string>>(
     () => new Set(),
   );
+  const contextSelectionRef = useRef(false);
   const [folderMenu, setFolderMenu] = useState<{
     x: number;
     y: number;
@@ -564,7 +578,7 @@ function SidebarComponent({
   useEffect(() => {
     if (!sessionMenu && !folderMenu && !filterMenu) return;
     const onScroll = () => {
-      setSessionMenu(null);
+      closeSessionMenu();
       setFolderMenu(null);
       setFilterMenu(null);
     };
@@ -575,13 +589,29 @@ function SidebarComponent({
 
   useEffect(() => {
     if (selectedSessionIds.size === 0) return;
-    const onKeyDown = (event: KeyboardEvent) => {
-      if (event.key !== "Escape") return;
+    const clear = () => {
+      contextSelectionRef.current = false;
       setSelectedSessionIds(new Set());
       setSessionMenu(null);
     };
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key !== "Escape") return;
+      clear();
+    };
+    // A pointer landing off the cards drops the selection; a menu acting on
+    // it stays open, and the cards handle their own clicks.
+    const onPointerDown = (event: PointerEvent) => {
+      const target = event.target;
+      const el = target instanceof Element ? target : null;
+      if (el?.closest("[data-session-card],[data-popover-side]")) return;
+      clear();
+    };
     window.addEventListener("keydown", onKeyDown);
-    return () => window.removeEventListener("keydown", onKeyDown);
+    window.addEventListener("pointerdown", onPointerDown);
+    return () => {
+      window.removeEventListener("keydown", onKeyDown);
+      window.removeEventListener("pointerdown", onPointerDown);
+    };
   }, [selectedSessionIds.size]);
 
   const commitSessionFolders = (next: SessionFolder[]) => {
@@ -716,16 +746,24 @@ function SidebarComponent({
 
   const onSessionContextMenu = (
     sessionId: string,
-    e: ReactMouseEvent<HTMLButtonElement>,
+    e: ReactMouseEvent<HTMLDivElement>,
   ) => {
     e.preventDefault();
     e.stopPropagation();
-    if (!selectedSessionIds.has(sessionId)) {
+    contextSelectionRef.current = !selectedSessionIds.has(sessionId);
+    if (contextSelectionRef.current) {
       setSelectedSessionIds(new Set([sessionId]));
     }
     setFilterMenu(null);
     setFolderMenu(null);
     setSessionMenu({ x: e.clientX, y: e.clientY, sessionId });
+  };
+
+  const closeSessionMenu = () => {
+    setSessionMenu(null);
+    if (!contextSelectionRef.current) return;
+    contextSelectionRef.current = false;
+    setSelectedSessionIds(new Set());
   };
 
   const onFolderContextMenu = (
@@ -745,7 +783,7 @@ function SidebarComponent({
     const sessionIds = menuSessionIds;
     const archived = allMenuSessionsArchived;
     const pinned = allMenuSessionsPinned;
-    setSessionMenu(null);
+    closeSessionMenu();
     if (id === "pin") {
       if (sessionIds.length > 1 && onPinSessions) {
         onPinSessions(sessionIds, !pinned);
@@ -849,9 +887,10 @@ function SidebarComponent({
 
   const onSessionCardSelect = (
     sessionId: string,
-    event: ReactMouseEvent<HTMLButtonElement>,
+    event: { shiftKey: boolean },
   ) => {
     if (event.shiftKey) {
+      contextSelectionRef.current = false;
       setSessionMenu(null);
       setSelectedSessionIds((current) =>
         toggleSessionSelection(current, sessionId),
@@ -867,7 +906,6 @@ function SidebarComponent({
       <SessionRenameRow
         session={session}
         isActive={session.id === activeSessionId}
-        busy={busySessionIds.has(session.id)}
         needsApproval={approvalSessionIds.has(session.id)}
         onCommit={(title) => {
           onRenameSession(session.id, title);
@@ -887,6 +925,7 @@ function SidebarComponent({
         compact={compact}
         now={now}
         onSelect={onSessionCardSelect}
+        onOpenWorkItem={onOpenInboxItem}
         onPrefetch={onPrefetchSession}
         onPlaceOnPane={onPlaceSessionOnPane}
         onListDrop={onSessionListDrop}
@@ -1021,7 +1060,9 @@ function SidebarComponent({
           {isChangesTab && hasChangeStats ? (
             <DiffStat additions={changeAdditions} deletions={changeDeletions} />
           ) : (
-            <span className="block truncate">{TAB_LABELS[itemId]}</span>
+            <span className="block truncate leading-label">
+              {TAB_LABELS[itemId]}
+            </span>
           )}
         </button>
       </div>
@@ -1376,8 +1417,10 @@ function SidebarComponent({
               enabled={open}
               textHarness={textHarness}
               selectedPath={selectedDiffPath}
+              selectedKind={selectedDiffKind}
               selectedSha={selectedCommitSha}
               onOpenFile={onOpenDiff ?? onOpenFile}
+              onOpenAllChanges={onOpenAllChanges ?? (() => {})}
               onOpenCommit={onOpenCommit ?? (() => {})}
             />
           </div>
@@ -1389,7 +1432,7 @@ function SidebarComponent({
               onOpenWhatsNew={onOpenWhatsNew}
               onDismissUpdate={onDismissUpdate}
             />
-            <div className="flex shrink-0 flex-col gap-px p-2 pt-0">
+            <div className="flex shrink-0 flex-col gap-px p-2">
               <RailAction
                 label="Settings"
                 icon={Settings}
@@ -1412,7 +1455,7 @@ function SidebarComponent({
               : "Session actions"
           }
           onPick={onSessionMenuPick}
-          onClose={() => setSessionMenu(null)}
+          onClose={closeSessionMenu}
         />
       ) : null}
       {folderMenu ? (
@@ -2079,6 +2122,7 @@ function SessionCard({
   compact = false,
   now,
   onSelect,
+  onOpenWorkItem,
   onPrefetch,
   onPlaceOnPane,
   onListDrop,
@@ -2097,15 +2141,13 @@ function SessionCard({
   dropTarget?: boolean;
   compact?: boolean;
   now: number;
-  onSelect: (
-    sessionId: string,
-    event: ReactMouseEvent<HTMLButtonElement>,
-  ) => void;
+  onSelect: (sessionId: string, event: { shiftKey: boolean }) => void;
+  onOpenWorkItem?: (item: LinkedWorkItem) => void;
   onPrefetch?: (sessionId: string) => void;
   onPlaceOnPane?: (sessionId: string, targetId: string, edge: PaneEdge) => void;
   onListDrop?: (draggedId: string, target: SessionListDropTarget) => void;
   onListDropTargetChange?: (target: SessionListDropTarget | null) => void;
-  onContextMenu?: (e: ReactMouseEvent<HTMLButtonElement>) => void;
+  onContextMenu?: (e: ReactMouseEvent<HTMLDivElement>) => void;
   onArchive?: () => void;
   onRename?: () => void;
   onDelete?: () => void;
@@ -2150,7 +2192,49 @@ function SessionCard({
     </span>
   );
 
-  const onKeyDown = (e: ReactKeyboardEvent<HTMLButtonElement>) => {
+  const linkedWorkItem = session.linkedWorkItem;
+  const workItemBadge = linkedWorkItem ? (
+    <button
+      type="button"
+      data-no-drag
+      data-tauri-drag-region="false"
+      title={`Open ${linkedWorkItem.kind === "pr" ? "PR" : "issue"} #${linkedWorkItem.number} in Inbox (${MOD}-click for GitHub)`}
+      aria-label={`Open ${linkedWorkItem.kind === "pr" ? "PR" : "issue"} #${linkedWorkItem.number}`}
+      onPointerDown={(event) => event.stopPropagation()}
+      onClick={(event) => {
+        event.preventDefault();
+        event.stopPropagation();
+        if (event.metaKey || event.ctrlKey) {
+          void openUrl(linkedWorkItem.url).catch(() => undefined);
+          return;
+        }
+        if (onOpenWorkItem) onOpenWorkItem(linkedWorkItem);
+        else void openUrl(linkedWorkItem.url).catch(() => undefined);
+      }}
+      onAuxClick={(event) => {
+        if (event.button !== 1) return;
+        event.preventDefault();
+        event.stopPropagation();
+        void openUrl(linkedWorkItem.url).catch(() => undefined);
+      }}
+      className="flex shrink-0 cursor-pointer items-center gap-0.5 rounded px-0.5 text-[11px] tabular-nums text-accent hover:underline"
+    >
+      {linkedWorkItem.kind === "pr" ? (
+        <GitPullRequest className="size-3" strokeWidth={1.75} />
+      ) : (
+        <CircleDot className="size-3" strokeWidth={1.75} />
+      )}
+      <span>#{linkedWorkItem.number}</span>
+    </button>
+  ) : null;
+
+  const onKeyDown = (e: ReactKeyboardEvent<HTMLDivElement>) => {
+    if (e.target !== e.currentTarget) return;
+    if (e.key === "Enter" || e.key === " ") {
+      e.preventDefault();
+      onSelect(session.id, { shiftKey: e.shiftKey });
+      return;
+    }
     if (e.key === "F2" && onRename) {
       e.preventDefault();
       onRename();
@@ -2162,7 +2246,7 @@ function SessionCard({
     }
   };
 
-  const onPointerDown = (event: ReactPointerEvent<HTMLButtonElement>) => {
+  const onPointerDown = (event: ReactPointerEvent<HTMLDivElement>) => {
     if (event.button !== 0) return;
     // Warm the transcript during the press. Opening stays on click so a
     // drag-to-pane gesture does not switch conversations.
@@ -2265,8 +2349,9 @@ function SessionCard({
 
   return (
     <div className="group relative">
-      <button
-        type="button"
+      <div
+        role="button"
+        tabIndex={0}
         title={title}
         aria-current={isActive ? "true" : undefined}
         aria-pressed={isSelected}
@@ -2309,7 +2394,10 @@ function SessionCard({
                 {model}
               </span>
             </span>
-            {status}
+            <span className="flex shrink-0 items-center gap-1.5">
+              {workItemBadge}
+              {status}
+            </span>
           </span>
         )}
         <span
@@ -2326,7 +2414,12 @@ function SessionCard({
           <span className="min-w-0 flex-1 line-clamp-1 text-[13px] font-semibold leading-snug text-content">
             {title}
           </span>
-          {compact ? status : null}
+          {compact ? (
+            <span className="flex shrink-0 items-center gap-1.5">
+              {workItemBadge}
+              {status}
+            </span>
+          ) : null}
         </span>
         <span className="relative mt-1 flex items-center gap-2">
           {gitLabel ? (
@@ -2350,7 +2443,7 @@ function SessionCard({
             />
           </span>
         </span>
-      </button>
+      </div>
       {onArchive ? (
         <button
           type="button"
@@ -2377,14 +2470,12 @@ function SessionCard({
 function SessionRenameRow({
   session,
   isActive,
-  busy,
   needsApproval,
   onCommit,
   onCancel,
 }: {
   session: SessionSummary;
   isActive: boolean;
-  busy: boolean;
   needsApproval: boolean;
   onCommit: (title: string) => void;
   onCancel: () => void;
@@ -2443,7 +2534,6 @@ function SessionRenameRow({
       <input
         ref={inputRef}
         value={value}
-        disabled={busy}
         onChange={(e) => setValue(e.target.value)}
         onBlur={() => finish(true)}
         onKeyDown={onKeyDown}

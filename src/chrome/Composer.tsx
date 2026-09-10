@@ -72,6 +72,7 @@ import type {
   UserQuestionPrompt,
   UserQuestionReply,
 } from "../lib/userQuestion";
+import { isImeComposition } from "../lib/keyboard";
 import {
   createBlankSkill,
   rankSkills,
@@ -302,6 +303,7 @@ function MessageQueue({
                     rows={1}
                     onChange={(event) => setEditDraft(event.target.value)}
                     onKeyDown={(event) => {
+                      if (isImeComposition(event.nativeEvent)) return;
                       if (event.key === "Escape") {
                         event.preventDefault();
                         cancelEdit();
@@ -941,6 +943,7 @@ export function Composer({
   };
 
   const onKeyDown = (e: KeyboardEvent<HTMLTextAreaElement>) => {
+    if (isImeComposition(e.nativeEvent)) return;
     if (creatingSkill) return;
 
     if (mentionOpen) {
@@ -1147,7 +1150,7 @@ export function Composer({
         <div
           ref={boxRef}
           data-composer-box
-          className={`relative z-10 rounded-lg border bg-content/3 ${
+          className={`relative z-10 rounded-lg border bg-content/3 backdrop-blur-sm ${
             fileDrag
               ? "border-accent/60"
               : "border-content/10 has-focus:border-content/20"
@@ -1245,7 +1248,7 @@ export function Composer({
                     : handoffCard
                       ? "Add context, or send to continue…"
                       : shell
-                        ? "How can I help you today?"
+                        ? "Ask, build, / for commands, @ for references... "
                         : "Ask, build, / for commands, @ for references... "
               }
               className={`composer-field scrollbar-none relative max-h-40 w-full resize-none overflow-x-hidden whitespace-pre-wrap break-words bg-transparent px-3 text-sm leading-5.5 outline-none placeholder:overflow-hidden placeholder:text-ellipsis placeholder:whitespace-nowrap font-sans ${
@@ -1503,7 +1506,7 @@ function ComposerAction({
             title="Send"
             aria-label="Send"
             onClick={onSend}
-            className="grid size-6.5 place-items-center rounded-md bg-white text-black hover:bg-white/90"
+            className="composer-send grid size-6.5 place-items-center rounded-md bg-white text-black hover:bg-white/90"
           >
             <ArrowUp className="size-3.5" strokeWidth={2.25} />
           </button>
@@ -1528,7 +1531,7 @@ function ComposerAction({
       aria-label="Send"
       disabled={!hasValue}
       onClick={onSend}
-      className="grid size-6.5 place-items-center rounded-md bg-white text-black hover:bg-white/90 disabled:cursor-default disabled:bg-white/30 disabled:text-black/40 disabled:hover:bg-white/30"
+      className="composer-send grid size-6.5 place-items-center rounded-md bg-white text-black hover:bg-white/90 disabled:cursor-default disabled:bg-white/30 disabled:text-black/40 disabled:hover:bg-white/30"
     >
       <ArrowUp className="size-3.5" strokeWidth={2.25} />
     </button>

@@ -22,9 +22,11 @@ import {
   useState,
   type ReactNode,
 } from "react";
+import { flushSync } from "react-dom";
 import { AttachmentChip } from "../chrome/AttachmentChip";
 import { FilePreview } from "../chrome/FilePreview";
 import { FileTypeIcon } from "../chrome/FileTypeIcon";
+import { ToolDiffPreview } from "../chrome/ToolDiffPreview";
 import { PlanPreview } from "../chrome/PlanPreview";
 import { TaskListPreview } from "../chrome/TaskListPreview";
 import {
@@ -116,6 +118,10 @@ type Props = {
   onHandoff?: (harness: HarnessId, turn: Block[], model: string) => void;
   onJumpToBottomChange?: (show: boolean) => void;
   onJumpToBottomReady?: (jump: () => void) => void;
+  /** Passes a function that renders the turn that holds a block. The render completes before the function returns. */
+  onRevealReady?: (reveal: (blockId: string) => boolean) => void;
+  /** Session-level output shown after the latest reply and before its action row. */
+  latestTurnAccessory?: ReactNode;
   /** False while another tab is in front; local transcript state is retained. */
   visible?: boolean;
 };
@@ -138,6 +144,8 @@ function AgentTranscriptComponent({
   onHandoff,
   onJumpToBottomChange,
   onJumpToBottomReady,
+  onRevealReady,
+  latestTurnAccessory,
   visible = true,
 }: Props) {
   const lockOverscroll = useLockOverscroll<HTMLDivElement>();
@@ -293,6 +301,10 @@ function AgentTranscriptComponent({
   const turns = groupTurns(blocks);
   const firstVisibleTurn = Math.max(0, turns.length - visibleTurnCount);
   const visibleTurns = turns.slice(firstVisibleTurn);
+  const turnsRef = useRef(turns);
+  turnsRef.current = turns;
+  const visibleTurnCountRef = useRef(visibleTurnCount);
+  visibleTurnCountRef.current = visibleTurnCount;
 
   useLayoutEffect(() => {
     const previousHeight = prependHeight.current;
@@ -304,14 +316,39 @@ function AgentTranscriptComponent({
       el.scrollHeight - el.scrollTop - el.clientHeight;
   }, [visibleTurnCount]);
 
-  const loadEarlier = () => {
+  const prepareToPrepend = useCallback(() => {
     const el = scroller.current;
     if (el) prependHeight.current = el.scrollHeight;
     stickToBottom.current = false;
+  }, []);
+
+  const loadEarlier = () => {
+    prepareToPrepend();
     setVisibleTurnCount((count) =>
       Math.min(turns.length, count + TURN_PAGE_SIZE),
     );
   };
+
+  const revealBlock = useCallback(
+    (blockId: string): boolean => {
+      const all = turnsRef.current;
+      const index = all.findIndex((turn) =>
+        turn.some((block) => block.id === blockId),
+      );
+      if (index < 0) return false;
+      const needed = all.length - index;
+      if (needed <= visibleTurnCountRef.current) return true;
+      prepareToPrepend();
+      // Synchronous. The caller finds the turn in the DOM after this call.
+      flushSync(() => setVisibleTurnCount(needed));
+      return true;
+    },
+    [prepareToPrepend],
+  );
+
+  useEffect(() => {
+    onRevealReady?.(revealBlock);
+  }, [revealBlock, onRevealReady]);
 
   return (
     <div
@@ -496,6 +533,7 @@ function AgentTranscriptComponent({
                 return [foldLineRow, row];
               })}
               {foldLineAt >= items.length ? foldLineRow : null}
+              {isLastTurn && latestTurnAccessory ? latestTurnAccessory : null}
               {durationMs != null && settled ? (
                 <TurnDuration
                   elapsedMs={durationMs}
@@ -956,6 +994,7 @@ function UserMessageBlock({
 
   return (
     <div
+      data-prompt-anchor={block.id}
       className={
         chat ? "flex justify-end pt-1.5 pr-4 pb-4 pl-14" : "p-1.5 pb-3"
       }
@@ -1673,14 +1712,6 @@ function ActivityToolRow({
   const label = toolCallLabel(block, cwd);
   const state = toolCallState(block);
   const pending = needsApproval(block);
-  const openFile = isEditTool(
-    block.tool?.kind,
-    block.text || block.tool?.title,
-    block.tool?.preview,
-  )
-    ? (onOpenDiff ?? onOpenFile)
-    : onOpenFile;
-
   return (
     <div className="flex min-w-0 flex-col">
       <div
@@ -1694,7 +1725,9 @@ function ActivityToolRow({
           cwd={cwd}
           chip={bare}
           failed={state === "rejected"}
-          onOpenFile={openFile}
+          status={state}
+          onOpenFile={onOpenFile}
+          onOpenDiff={onOpenDiff}
         />
         {pending ? null : <ToolCallStatusIcon state={state} />}
       </div>
@@ -1852,12 +1885,27 @@ function ToolCall({
   if (editTool) {
     return (
       <div className={frame}>
-        <FilePreview
-          preview={preview ?? stubFilePreview(block.tool?.kind, label)}
-          status={state}
-          cwd={cwd}
-          onOpenFile={onOpenDiff ?? onOpenFile}
-        />
+        {needsApproval(block) ? (
+          <FilePreview
+            preview={preview ?? stubFilePreview(block.tool?.kind, label)}
+            status={state}
+            cwd={cwd}
+            onOpenFile={onOpenDiff ?? onOpenFile}
+          />
+        ) : (
+          <div className="flex min-w-0 items-center gap-2 py-1">
+            <ToolCallIcon state={state} />
+            <ToolCallSummary
+              label={label}
+              preview={preview}
+              cwd={cwd}
+              failed={state === "rejected"}
+              status={state}
+              onOpenFile={onOpenFile}
+              onOpenDiff={onOpenDiff}
+            />
+          </div>
+        )}
         <ApprovalControls block={block} onApproval={onApproval} />
       </div>
     );
@@ -1918,18 +1966,22 @@ function ToolCallSummary({
   preview,
   cwd,
   onOpenFile,
+  onOpenDiff,
   interactive = true,
   chip = false,
   failed = false,
+  status = "accepted",
 }: {
   label: string;
   preview?: ToolPreview;
   cwd?: string;
   onOpenFile?: (path: string) => void;
+  onOpenDiff?: (path: string) => void;
   interactive?: boolean;
   /** Sets the file off in a chip, for rows that lean on a rail for structure. */
   chip?: boolean;
   failed?: boolean;
+  status?: ToolCallState;
 }) {
   const parts = label.match(/^(Read|Find|Skill|List|Edit|Write)\s+(.+)$/);
   // A write preview carries the path itself, so edits get the same verb + file
@@ -1986,7 +2038,16 @@ function ToolCallSummary({
       .pop() ||
     "file";
   const filePath = resolveWorkspacePath(preview?.path || target, cwd);
-  const canOpen = interactive && !!onOpenFile && !!filePath;
+  const openFile =
+    action === "Edit" || action === "Write"
+      ? (onOpenDiff ?? onOpenFile)
+      : onOpenFile;
+  const canOpen = interactive && !!openFile && !!filePath;
+  const canPreview =
+    interactive &&
+    preview?.kind === "write" &&
+    (preview.contentOnly ||
+      preview.lines?.some((line) => line.kind !== "context"));
   const actionTone = failed ? "text-red-400" : "text-content/50";
   const targetTone = failed
     ? "text-red-400"
@@ -2000,7 +2061,24 @@ function ToolCallSummary({
         {action}
       </span>
       {isFile ? (
-        canOpen ? (
+        canPreview ? (
+          <ToolDiffPreview
+            preview={preview}
+            label={target}
+            status={status}
+            cwd={cwd}
+            onOpen={openFile && filePath ? () => openFile(filePath) : undefined}
+            onOpenFile={onOpenFile}
+            className={`-my-0.5 flex min-w-0 cursor-pointer items-center gap-1 rounded px-1 py-0.5 text-left hover:text-sky-300 ${
+              chip
+                ? `max-w-full bg-content/6 hover:bg-content/10 ${targetTone}`
+                : `flex-1 hover:bg-content/6 ${targetTone}`
+            }`}
+          >
+            <FileTypeIcon name={fileName} isDir={false} />
+            <span className="min-w-0 truncate">{target}</span>
+          </ToolDiffPreview>
+        ) : canOpen ? (
           <button
             type="button"
             className={`-my-0.5 flex min-w-0 cursor-pointer items-center gap-1 rounded px-1 py-0.5 text-left hover:text-sky-300 ${
@@ -2011,7 +2089,7 @@ function ToolCallSummary({
             title={preview?.path || target}
             onClick={(event) => {
               event.stopPropagation();
-              onOpenFile?.(filePath);
+              openFile?.(filePath);
             }}
           >
             <FileTypeIcon name={fileName} isDir={action === "List"} />

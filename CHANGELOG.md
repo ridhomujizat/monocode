@@ -7,6 +7,93 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.42] - 2026-09-10
+
+### Added
+
+- GitLab joins the Inbox alongside GitHub and Linear. Connect GitLab.com or a self-managed instance from Settings, then browse and filter issues and merge requests, inspect details, comments, assignees, labels, and diffs, post comments, and start or discuss work without leaving MonoCode.
+- Sessions started from a GitHub Inbox item, or whose first prompt references a GitHub issue or pull request, remember that work item. Session cards link back to it, Inbox rows show related thread counts, and issue or pull request details link to every matching current or archived thread.
+- Settings → Skills lists file-based skills from MonoCode, the current project, personal folders, and supported harnesses. Filter or refresh the catalog, enable and disable individual skills, create a starter project or personal `SKILL.md`, and copy or reveal a skill's path. In #137 by @imnakul.
+- Edit and Write activity in agent transcripts shows the tool's exact diff or written content in an accessible hover and keyboard-focus preview; click through to open the full file or diff.
+- Right-click file tabs to open a file in its default app, reveal it in the system file manager, copy its name or absolute or project-relative path, or close the tab.
+- Selecting code in the editor opens an **Add to chat** action that inserts the file and selected line range into the composer without copying the code itself.
+- Press a mouse's middle button or scroll wheel on a workspace, file, or terminal tab to close it without selecting a background tab first. Existing unsaved-file and running-terminal confirmations still apply, and the sole blank workspace tab remains open. In #154 by @50BytesOfJohn.
+
+### Changed
+
+- The Settings model picker now uses MonoCode's theme-aware popover, with keyboard navigation, active-option announcements, and reliable focus restoration instead of the operating system's native select menu. In #149 by @ardevdevts.
+- Skill names, sources, paths, and creation controls use the same sans-serif interface typography as the rest of Settings.
+
+### Fixed
+
+- Renaming a session remains editable when its agent is working, including when the turn starts after rename mode opens. In #143 by @yankawai.
+- Disabling a project skill allows an enabled personal skill with the same name to take its place; disabling either path no longer hides the wrong skill.
+- Empty sessions update their displayed project label immediately when the tab group's custom label is changed or cleared.
+
+## [0.1.41] - 2026-09-09
+
+### Added
+
+- OMP models support fast mode, including live RPC and configuration updates with a clear fallback when a model does not support it.
+
+### Changed
+
+- The file explorer avoids unnecessary rerenders and preserves unchanged file-icon DOM for smoother updates.
+- The Changes panel header consistently shows its label instead of replacing it with diff counts.
+
+### Fixed
+
+- The sidebar update control stays hidden when no update is available and prevents duplicate installs from concurrent clicks. In #132 by @fobsouza.
+
+## [0.1.40] - 2026-09-08
+
+### Added
+
+- Working-tree reviews now separate staged changes against `HEAD` from unstaged changes against the index, including partially staged files.
+- The Changes panel can organize files into a collapsible directory tree, remembers the selected list or tree view, and can open every change in one review.
+
+### Fixed
+
+- Code block syntax highlighting follows MonoCode's appearance preference instead of the system color scheme. In #117 by @kartava.
+- Split conversation panes share one continuous chat background instead of repeating the image in every pane.
+- Project search safely treats include filters beginning with `-` as path patterns instead of Git options. In #125 by @Karajelly.
+- Release publishing validates and uploads the expected versioned artifacts for every supported platform.
+
+## [0.1.39] - 2026-09-08
+
+### Added
+
+- Windows releases now check for, download, and install signed updates through the same in-app update flow as macOS.
+
+### Changed
+
+- The prompt outline remains visible on slightly narrower windows.
+- Removed the scrolled transcript's top-edge fade and blur effect.
+
+## [0.1.38] - 2026-09-08
+
+### Added
+
+- The sidebar project picker is now searchable and keyboard navigable, shows each project's parent path, and includes actions for opening a new project or starting a new tab.
+- Right-click a title-bar tab to close that tab, the other tabs, or every tab to its left or right. Bulk closing still protects unsaved files and running terminals.
+- Shift-click conversations in the sidebar to select several at once, then pin, unpin, archive, unarchive, move into or out of folders, or delete them together.
+- Settings → Appearance → Chat background adds an on-device image behind empty sessions or every conversation, with adjustable visibility. Each project can override the global image from its project-rail menu.
+- Long transcripts have a vertical prompt outline for jumping between turns. Hover or keyboard-focus a marker to preview its prompt and reply. In #90 by @kartava.
+- Drag image files into a note to copy them into MonoCode's local note storage and insert them into the note at the cursor.
+- Archive the focused conversation with Shift+Command/Ctrl+A. The shortcut stays out of editors, terminals, diffs, and open overlays. In #89 by @kualta.
+
+### Changed
+
+- Scrolled transcripts fade and blur smoothly beneath the title bar, and popover backdrops now use theme-aware tints.
+- Light mode uses an opaque native window for legibility, preserves the dark-mode glass settings, and gives the composer theme-specific shadows and send-button states.
+
+### Fixed
+
+- Enabling Sounds now plays the switch cue immediately. In #111 by @kartava.
+- Sidebar multi-selection clears reliably when its menu closes or the pointer moves outside the selected conversation cards.
+- Chat background changes appear across open session panes immediately, and the empty-session arcade stays hidden when a background is visible.
+- Composer keyboard handlers ignore active IME composition, preventing Enter, Escape, and picker actions from firing while composing text.
+
 ## [0.1.37] - 2026-09-07
 
 ### Fixed
@@ -576,7 +663,14 @@ First public release. macOS (Apple Silicon) only.
 - Updater endpoint and minisign public key are injected at release time rather than committed, so forks do not inherit the maintainer's update channel.
 - macOS release builds sign with `APPLE_SIGNING_IDENTITY` via a config overlay; the committed default remains ad-hoc `-` for community builds.
 
-[Unreleased]: https://github.com/hardbeat920/monocode/compare/v0.1.35...HEAD
+[Unreleased]: https://github.com/hardbeat920/monocode/compare/v0.1.42...HEAD
+[0.1.42]: https://github.com/hardbeat920/monocode/compare/v0.1.41...v0.1.42
+[0.1.41]: https://github.com/hardbeat920/monocode/compare/v0.1.40...v0.1.41
+[0.1.40]: https://github.com/hardbeat920/monocode/compare/v0.1.39...v0.1.40
+[0.1.39]: https://github.com/hardbeat920/monocode/compare/v0.1.38...v0.1.39
+[0.1.38]: https://github.com/hardbeat920/monocode/compare/v0.1.37...v0.1.38
+[0.1.37]: https://github.com/hardbeat920/monocode/compare/v0.1.36...v0.1.37
+[0.1.36]: https://github.com/hardbeat920/monocode/compare/v0.1.35...v0.1.36
 [0.1.35]: https://github.com/hardbeat920/monocode/compare/v0.1.34...v0.1.35
 [0.1.34]: https://github.com/hardbeat920/monocode/compare/v0.1.33...v0.1.34
 [0.1.33]: https://github.com/hardbeat920/monocode/compare/v0.1.32...v0.1.33

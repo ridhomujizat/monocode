@@ -7,6 +7,8 @@ import {
   Folder,
   FolderOpen,
   FolderPlus,
+  ImagePlus,
+
   Inbox,
   MoreHorizontal,
   Pin,
@@ -105,6 +107,7 @@ import { ExplorerMenu, type ExplorerMenuItem } from "./ExplorerMenu";
 import { FolderColorSwatches } from "./FolderColorSwatches";
 import { HarnessIcon } from "./HarnessIcon";
 import { ProjectLogoIcon } from "./ProjectLogoIcon";
+import { ProjectBackgroundDialog } from "./ProjectBackgroundDialog";
 import { ProjectMascot } from "./ProjectMascot";
 import { RailAction, RailSearch } from "./RailAction";
 import { RemoveProjectDialog } from "./RemoveProjectDialog";
@@ -133,6 +136,11 @@ function projectMenuExtraItems(
 ): TabGroupMenuExtraItem[] {
   const items: TabGroupMenuExtraItem[] = [
     { id: "group-new", label: "New group", icon: FolderPlus },
+    {
+      id: "background",
+      label: "Background image",
+      icon: ImagePlus,
+    },
     ...(memberGroupIds.length > 0
       ? []
       : [
@@ -140,6 +148,7 @@ function projectMenuExtraItems(
             ? { id: "unpin", label: "Unpin project", icon: PinOff }
             : { id: "pin", label: "Pin project", icon: Pin },
         ]),
+
     { id: "reveal", label: REVEAL_LABEL, icon: FolderOpen },
   ];
   for (const group of groups) {
@@ -275,6 +284,11 @@ export function ProjectRail({
     groupId: string;
   } | null>(null);
   const [renamingGroupId, setRenamingGroupId] = useState<string | null>(null);
+  const [backgroundProject, setBackgroundProject] = useState<{
+    project: string;
+    name: string;
+  } | null>(null);
+
   const lockOverscroll = useLockOverscroll<HTMLDivElement>();
   const scrollRef = useRef<HTMLDivElement>(null);
   const groupLogos = useTabGroupLogos();
@@ -506,7 +520,12 @@ export function ProjectRail({
     if (!projectMenu) return;
     const { path, projectKey } = projectMenu;
     if (action === "pin" || action === "unpin") onTogglePin(path);
-    else if (action === "reveal") void revealPath(path);
+    else if (action === "background") {
+      setBackgroundProject({
+        project: projectKey,
+        name: resolveTabGroupLabel(projectKey, groupLabels, basename(path)),
+      });
+    } else if (action === "reveal") void revealPath(path);
     else if (action === "archive") {
       onRemoveProject?.(path, { purgeData: false });
     } else if (action === "delete") {
@@ -997,7 +1016,7 @@ export function ProjectRail({
             onOpenWhatsNew={onOpenWhatsNew}
             onDismissUpdate={onDismissUpdate}
           />
-          <div className="flex shrink-0 flex-col gap-px p-2 pt-0">
+          <div className="flex shrink-0 flex-col gap-px p-2">
             <RailAction
               label="Settings"
               icon={Settings}
@@ -1140,6 +1159,13 @@ export function ProjectRail({
           paths={removing.paths}
           onConfirm={onConfirmDelete}
           onCancel={() => setRemoving(null)}
+        />
+      ) : null}
+      {backgroundProject ? (
+        <ProjectBackgroundDialog
+          project={backgroundProject.project}
+          name={backgroundProject.name}
+          onClose={() => setBackgroundProject(null)}
         />
       ) : null}
       <div

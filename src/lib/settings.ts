@@ -8,6 +8,7 @@ export type SettingsSectionId =
   | "keybindings"
   | "providers"
   | "plugins"
+  | "skills"
   | "archive";
 
 export const SETTINGS_SECTIONS: {
@@ -42,6 +43,12 @@ export const SETTINGS_SECTIONS: {
     label: "Plugins",
     description:
       "Workspaces on the project rail, built in or installed from a plugin.json manifest.",
+  },
+  {
+    id: "skills",
+    label: "Skills",
+    description:
+      "Discover and manage file skills from project, personal, and harness folders.",
   },
   {
     id: "archive",
@@ -356,6 +363,11 @@ export const KEYBINDINGS: KeybindingRow[] = [
   { command: "Tab: Forward", keys: `${MOD}]`, when: "Always" },
   { command: "Tab: Activate 1–8", keys: `${MOD}1 … ${MOD}8`, when: "Always" },
   { command: "Tab: Activate Last", keys: `${MOD}9`, when: "Always" },
+  {
+    command: "Session: Archive",
+    keys: `${MOD}${SHIFT}A`,
+    when: "sessionFocus && !overlay",
+  },
   {
     command: "Session: Previous",
     keys: `${MOD}${SHIFT}↑`,
