@@ -473,13 +473,7 @@ fn default_shell() -> (String, Vec<String>) {
         let shell = std::env::var("SHELL")
             .ok()
             .filter(|shell| !shell.is_empty())
-            .unwrap_or_else(|| {
-                if cfg!(target_os = "macos") {
-                    "/bin/zsh".into()
-                } else {
-                    "/bin/bash".into()
-                }
-            });
+            .unwrap_or_else(crate::harness::default_login_shell);
         let args = login_args(&shell)
             .iter()
             .map(|arg| (*arg).to_string())
@@ -791,6 +785,8 @@ mod tests {
     #[test]
     fn login_args_for_common_shells() {
         assert_eq!(login_args("/bin/zsh"), &["-l"]);
+        // The NixOS fallback: no /bin/bash there, so /bin/sh must still log in.
+        assert_eq!(login_args("/bin/sh"), &["-l"]);
         assert_eq!(login_args("/bin/bash"), &["-l"]);
         assert_eq!(login_args("/usr/bin/fish"), &["-l"]);
         assert_eq!(login_args("/usr/local/bin/nu"), &[] as &[&str]);

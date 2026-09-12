@@ -1216,9 +1216,7 @@ fn resolve_cursor_agent() -> Option<PathBuf> {
     candidates.push(PathBuf::from("/usr/local/bin/cursor-agent"));
     candidates.push(PathBuf::from("/usr/bin/cursor-agent"));
     candidates.push(PathBuf::from("/snap/bin/cursor-agent"));
-    if let Some(from_shell) = which_via_login_shell("cursor-agent") {
-        candidates.push(from_shell);
-    }
+    push_login_shell_candidates(&mut candidates, &["cursor-agent"]);
 
     first_binary_matching(candidates, is_cursor_agent)
 }
@@ -1237,9 +1235,7 @@ fn resolve_codex() -> Option<PathBuf> {
     candidates.push(PathBuf::from("/usr/local/bin/codex"));
     candidates.push(PathBuf::from("/usr/bin/codex"));
     candidates.push(PathBuf::from("/snap/bin/codex"));
-    if let Some(from_shell) = which_via_login_shell("codex") {
-        candidates.push(from_shell);
-    }
+    push_login_shell_candidates(&mut candidates, &["codex"]);
 
     // Last resort: the Codex app bundles its own CLI, but never puts it on
     // PATH. It is pinned to the app release (often a prerelease), so a real
@@ -1269,9 +1265,7 @@ fn resolve_opencode() -> Option<PathBuf> {
     candidates.push(PathBuf::from("/usr/local/bin/opencode"));
     candidates.push(PathBuf::from("/usr/bin/opencode"));
     candidates.push(PathBuf::from("/snap/bin/opencode"));
-    if let Some(from_shell) = which_via_login_shell("opencode") {
-        candidates.push(from_shell);
-    }
+    push_login_shell_candidates(&mut candidates, &["opencode"]);
 
     first_binary(candidates)
 }
@@ -1292,9 +1286,7 @@ fn resolve_claude() -> Option<PathBuf> {
     candidates.push(PathBuf::from("/usr/local/bin/claude"));
     candidates.push(PathBuf::from("/usr/bin/claude"));
     candidates.push(PathBuf::from("/snap/bin/claude"));
-    if let Some(from_shell) = which_via_login_shell("claude") {
-        candidates.push(from_shell);
-    }
+    push_login_shell_candidates(&mut candidates, &["claude"]);
 
     first_binary(candidates)
 }
@@ -1318,12 +1310,7 @@ fn resolve_pi() -> Option<PathBuf> {
         candidates.push(PathBuf::from("/usr/bin").join(name));
         candidates.push(PathBuf::from("/snap/bin").join(name));
     }
-    if let Some(from_shell) = which_via_login_shell("pi-coding-agent") {
-        candidates.push(from_shell);
-    }
-    if let Some(from_shell) = which_via_login_shell("pi") {
-        candidates.push(from_shell);
-    }
+    push_login_shell_candidates(&mut candidates, &["pi-coding-agent", "pi"]);
 
     first_binary_matching(candidates, is_pi_coding_agent)
 }
@@ -1345,9 +1332,7 @@ fn resolve_omp() -> Option<PathBuf> {
     candidates.push(PathBuf::from("/usr/local/bin/omp"));
     candidates.push(PathBuf::from("/usr/bin/omp"));
     candidates.push(PathBuf::from("/snap/bin/omp"));
-    if let Some(from_shell) = which_via_login_shell("omp") {
-        candidates.push(from_shell);
-    }
+    push_login_shell_candidates(&mut candidates, &["omp"]);
 
     first_binary_matching(candidates, is_omp_agent)
 }
@@ -1382,9 +1367,7 @@ fn resolve_fx() -> Option<PathBuf> {
     candidates.push(PathBuf::from("/usr/local/bin/fx"));
     candidates.push(PathBuf::from("/usr/bin/fx"));
     candidates.push(PathBuf::from("/snap/bin/fx"));
-    if let Some(from_shell) = which_via_login_shell("fx") {
-        candidates.push(from_shell);
-    }
+    push_login_shell_candidates(&mut candidates, &["fx"]);
 
     first_binary_matching(candidates, is_fx_agent)
 }
@@ -1405,9 +1388,7 @@ fn resolve_grok() -> Option<PathBuf> {
     candidates.push(PathBuf::from("/usr/local/bin/grok"));
     candidates.push(PathBuf::from("/usr/bin/grok"));
     candidates.push(PathBuf::from("/snap/bin/grok"));
-    if let Some(from_shell) = which_via_login_shell("grok") {
-        candidates.push(from_shell);
-    }
+    push_login_shell_candidates(&mut candidates, &["grok"]);
 
     first_binary_matching(candidates, is_grok_agent)
 }
@@ -1687,6 +1668,92 @@ fn first_binary_matching(
     })
 }
 
+/// Queue the login-shell hits among `candidates`, keeping `names` in order.
+///
+/// macOS keeps them last: `command -v` often returns a versioned path and TCC
+/// treats every upgrade as a new binary, so the stable shims must win there.
+/// Linux distributions without an FHS (NixOS, Guix) install the only runnable
+/// build on PATH while stale npm or curl copies linger in the fixed dirs, so
+/// there PATH goes first.
+fn push_login_shell_candidates(candidates: &mut Vec<PathBuf>, names: &[&str]) {
+    let hits: Vec<PathBuf> = names
+        .iter()
+        .filter_map(|name| which_via_login_shell(name))
+        .collect();
+    if cfg!(target_os = "linux") {
+        for (index, hit) in hits.into_iter().enumerate() {
+            candidates.insert(index, hit);
+        }
+    } else {
+        candidates.extend(hits);
+    }
+}
+
+/// The dynamic loader an ELF asks for, or `None` when there is nothing to
+/// check: scripts, static binaries, and anything not 64-bit little-endian ELF.
+#[cfg(target_os = "linux")]
+fn elf_interpreter(path: &Path) -> Option<PathBuf> {
+    use std::io::{Read, Seek, SeekFrom};
+
+    const PT_INTERP: u32 = 3;
+    const PH_ENTRY: usize = 56;
+
+    let mut file = std::fs::File::open(path).ok()?;
+    let mut header = [0u8; 64];
+    file.read_exact(&mut header).ok()?;
+    if &header[..4] != b"\x7fELF" || header[4] != 2 || header[5] != 1 {
+        return None;
+    }
+
+    let phoff = u64::from_le_bytes(header[32..40].try_into().ok()?);
+    let phentsize = u16::from_le_bytes(header[54..56].try_into().ok()?) as usize;
+    let phnum = u16::from_le_bytes(header[56..58].try_into().ok()?) as usize;
+    if phentsize < PH_ENTRY || phnum == 0 || phnum > 128 {
+        return None;
+    }
+
+    file.seek(SeekFrom::Start(phoff)).ok()?;
+    let mut table = vec![0u8; phentsize.checked_mul(phnum)?];
+    file.read_exact(&mut table).ok()?;
+
+    for entry in table.chunks_exact(phentsize) {
+        if u32::from_le_bytes(entry[..4].try_into().ok()?) != PT_INTERP {
+            continue;
+        }
+        let offset = u64::from_le_bytes(entry[8..16].try_into().ok()?);
+        let size = u64::from_le_bytes(entry[32..40].try_into().ok()?);
+        if size == 0 || size > 4096 {
+            return None;
+        }
+        file.seek(SeekFrom::Start(offset)).ok()?;
+        let mut raw = vec![0u8; size as usize];
+        file.read_exact(&mut raw).ok()?;
+        let text = raw.split(|byte| *byte == 0).next()?;
+        if text.is_empty() {
+            return None;
+        }
+        return Some(PathBuf::from(String::from_utf8(text.to_vec()).ok()?));
+    }
+    None
+}
+
+/// True unless this machine plainly cannot start `path`.
+///
+/// NixOS ships no FHS loader - `/lib64/ld-linux-x86-64.so.2` is a stub that
+/// prints an error and exits 127. A CLI installed by npm or a curl script for
+/// generic Linux therefore keeps its executable bit while being unrunnable,
+/// and would otherwise shadow the working distro build further down the list.
+#[cfg(target_os = "linux")]
+fn is_runnable_here(path: &Path) -> bool {
+    let Some(interp) = elf_interpreter(path) else {
+        return true;
+    };
+    let Ok(loader) = std::fs::canonicalize(&interp) else {
+        return false;
+    };
+    !loader.to_string_lossy().contains("stub-ld")
+}
+
 fn existing_binary(path: PathBuf) -> Option<PathBuf> {
     #[cfg(windows)]
     if path.extension().is_none() {
@@ -1697,7 +1764,14 @@ fn existing_binary(path: PathBuf) -> Option<PathBuf> {
             }
         }
     }
-    is_executable_file(&path).then_some(path)
+    if !is_executable_file(&path) {
+        return None;
+    }
+    #[cfg(target_os = "linux")]
+    if !is_runnable_here(&path) {
+        return None;
+    }
+    Some(path)
 }
 
 #[cfg(all(test, windows))]
@@ -1942,15 +2016,26 @@ fn load_login_shell_env() -> HashMap<String, String> {
 /// version managers (nvm, fnm, mise, volta) all initialize from there. A
 /// login-but-not-interactive shell sees `.zshenv`/`.zprofile` only, so every
 /// nvm-managed CLI looks uninstalled.
+/// The shell to fall back on when `$SHELL` is unset.
+///
+/// macOS has shipped zsh at a fixed path for years. Elsewhere `/bin/bash` is
+/// the usual answer, but distributions without an FHS (NixOS, Guix) ship no
+/// `/bin/bash` at all - only `/bin/sh`, which `login_args` already knows how
+/// to start as a login shell.
+#[cfg(not(windows))]
+pub(crate) fn default_login_shell() -> String {
+    if cfg!(target_os = "macos") {
+        return "/bin/zsh".into();
+    }
+    if Path::new("/bin/bash").exists() {
+        return "/bin/bash".into();
+    }
+    "/bin/sh".into()
+}
+
 #[cfg(not(windows))]
 fn load_unix_login_shell_env() -> HashMap<String, String> {
-    let shell = std::env::var("SHELL").unwrap_or_else(|_| {
-        if cfg!(target_os = "macos") {
-            "/bin/zsh".into()
-        } else {
-            "/bin/bash".into()
-        }
-    });
+    let shell = std::env::var("SHELL").unwrap_or_else(|_| default_login_shell());
     let mut cmd = Command::new(&shell);
     cmd.args(["-lic", "printenv"])
         .stdin(Stdio::null())
@@ -2648,5 +2733,122 @@ mod reap_logic_tests {
         assert!(!is_legacy_orphaned_cursor_acp(
             "node /usr/local/bin/typescript-language-server --stdio"
         ));
+    }
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod linux_runnability_tests {
+    use super::{elf_interpreter, existing_binary, is_runnable_here, push_login_shell_candidates};
+    use std::io::Write;
+    use std::os::unix::fs::PermissionsExt;
+    use std::path::PathBuf;
+
+    /// Smallest ELF64 that still carries a PT_INTERP pointing at `interp`.
+    fn write_elf_with_interp(path: &std::path::Path, interp: &str) {
+        const PH_OFF: u64 = 64;
+        const PH_ENTRY: usize = 56;
+        let interp_off = PH_OFF + PH_ENTRY as u64;
+        let interp_bytes = {
+            let mut raw = interp.as_bytes().to_vec();
+            raw.push(0);
+            raw
+        };
+
+        let mut header = vec![0u8; 64];
+        header[..4].copy_from_slice(b"\x7fELF");
+        header[4] = 2; // 64-bit
+        header[5] = 1; // little-endian
+        header[32..40].copy_from_slice(&PH_OFF.to_le_bytes());
+        header[54..56].copy_from_slice(&(PH_ENTRY as u16).to_le_bytes());
+        header[56..58].copy_from_slice(&1u16.to_le_bytes());
+
+        let mut phdr = vec![0u8; PH_ENTRY];
+        phdr[..4].copy_from_slice(&3u32.to_le_bytes()); // PT_INTERP
+        phdr[8..16].copy_from_slice(&interp_off.to_le_bytes());
+        phdr[32..40].copy_from_slice(&(interp_bytes.len() as u64).to_le_bytes());
+
+        let mut file = std::fs::File::create(path).unwrap();
+        file.write_all(&header).unwrap();
+        file.write_all(&phdr).unwrap();
+        file.write_all(&interp_bytes).unwrap();
+        drop(file);
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+
+    fn scratch(tag: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("monocode-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn reads_the_interpreter_an_elf_asks_for() {
+        let dir = scratch("elf-interp");
+        let bin = dir.join("agent");
+        write_elf_with_interp(&bin, "/lib64/ld-linux-x86-64.so.2");
+        assert_eq!(
+            elf_interpreter(&bin),
+            Some(PathBuf::from("/lib64/ld-linux-x86-64.so.2"))
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn scripts_have_no_interpreter_to_vet_and_stay_runnable() {
+        let dir = scratch("elf-script");
+        let script = dir.join("agent");
+        std::fs::write(&script, b"#!/usr/bin/env bash\nexec true\n").unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        assert_eq!(elf_interpreter(&script), None);
+        assert!(is_runnable_here(&script));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The NixOS case: the loader the binary wants is simply not there.
+    #[test]
+    fn an_elf_whose_loader_is_missing_is_not_a_candidate() {
+        let dir = scratch("elf-missing-ld");
+        let bin = dir.join("claude");
+        write_elf_with_interp(&bin, "/nowhere/does/this/ld.so exist");
+        assert!(!is_runnable_here(&bin));
+        assert_eq!(existing_binary(bin), None);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn login_shell_hits_lead_on_linux_and_keep_their_order() {
+        let dir = scratch("login-order");
+        let mut candidates = vec![dir.join("fixed-a"), dir.join("fixed-b")];
+        // `which_via_login_shell` only ever yields real files, so stand in for
+        // it with names that resolve on any Linux box.
+        let hits: Vec<PathBuf> = vec!["/bin/sh".into(), "/bin/cat".into()];
+        let mut expected = hits.clone();
+        expected.extend(candidates.clone());
+
+        for (index, hit) in hits.into_iter().enumerate() {
+            candidates.insert(index, hit);
+        }
+        assert_eq!(candidates, expected);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Whatever this platform picks must be a shell that is actually there -
+    /// the NixOS failure was a fallback to a `/bin/bash` that does not exist.
+    #[test]
+    fn the_fallback_login_shell_exists_on_this_machine() {
+        let shell = super::default_login_shell();
+        assert!(
+            std::path::Path::new(&shell).exists(),
+            "fallback shell {shell} is missing"
+        );
+        assert!(super::is_executable_file(std::path::Path::new(&shell)));
+    }
+
+    #[test]
+    fn resolvers_route_through_the_shared_helper() {
+        let mut candidates: Vec<PathBuf> = vec![PathBuf::from("/fixed/claude")];
+        push_login_shell_candidates(&mut candidates, &[]);
+        assert_eq!(candidates, vec![PathBuf::from("/fixed/claude")]);
     }
 }
