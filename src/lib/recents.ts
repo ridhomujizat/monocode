@@ -1,4 +1,5 @@
 import { pathKey, prettyCwd, slash } from "./paths";
+import { IS_MAC } from "./platform";
 
 const KEY = "monocode.recentProjects";
 const RAIL_ORDER_KEY = "monocode.projectRailOrder";
@@ -321,8 +322,13 @@ export function looksLikeProject(path: string): boolean {
   const normalized = slash(path).replace(/\/+$/, "") || "/";
   if (/^[A-Za-z]:$/.test(normalized) || normalized === "/") return false;
   // Home itself arrives expanded (`/Users/me`), so the `~` check above misses
-  // it. Indexing it walks `~/Library`, which trips the OS consent prompt.
-  if (prettyCwd(path) === "~") return false;
-  if (path.includes(".app/") || path.includes(".app\\")) return false;
+  // it. On macOS, indexing it walks `~/Library`, which trips the OS consent
+  // prompt - elsewhere home is a fair project root, so only macOS opts out.
+  if (IS_MAC && prettyCwd(path) === "~") return false;
+  // Only macOS has app bundles. Elsewhere `.app` is an ordinary directory
+  // name, and this substring test would quietly swallow a real project.
+  if (IS_MAC && (path.includes(".app/") || path.includes(".app\\"))) {
+    return false;
+  }
   return true;
 }

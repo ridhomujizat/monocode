@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   archiveProject,
   forgetProject,
@@ -40,23 +40,45 @@ function mockLocalStorage() {
 }
 
 describe("looksLikeProject", () => {
-  it("rejects the home directory so it is never indexed", () => {
+  it("rejects the home directory on macOS so it is never indexed", async () => {
     // Home arrives expanded from `default_cwd`. Walking it reaches
     // ~/Library, which makes macOS prompt for access to other apps' data.
-    expect(looksLikeProject("/Users/me")).toBe(false);
-    expect(looksLikeProject("/Users/me/")).toBe(false);
-    expect(looksLikeProject("/home/me")).toBe(false);
-    expect(looksLikeProject("C:/Users/me")).toBe(false);
-    expect(looksLikeProject("C:\\Users\\me")).toBe(false);
-    expect(looksLikeProject("~")).toBe(false);
+    // Only macOS pays that cost, so only macOS refuses home.
+    vi.resetModules();
+    vi.stubGlobal("navigator", { platform: "MacIntel" });
+    const onMac = await import("./recents");
+    expect(onMac.looksLikeProject("/Users/me")).toBe(false);
+    expect(onMac.looksLikeProject("/Users/me/")).toBe(false);
+    expect(onMac.looksLikeProject("/home/me")).toBe(false);
+    expect(onMac.looksLikeProject("C:/Users/me")).toBe(false);
+    expect(onMac.looksLikeProject("C:\\Users\\me")).toBe(false);
+    expect(onMac.looksLikeProject("~")).toBe(false);
+    vi.unstubAllGlobals();
+    vi.resetModules();
   });
 
-  it("rejects system roots and app bundles", () => {
+  it("rejects system roots", () => {
     expect(looksLikeProject("/")).toBe(false);
     expect(looksLikeProject("")).toBe(false);
     expect(looksLikeProject("C:/")).toBe(false);
     expect(looksLikeProject("C:")).toBe(false);
-    expect(looksLikeProject("/Applications/Some.app/Contents")).toBe(false);
+  });
+
+  it("rejects app bundles on macOS", async () => {
+    vi.resetModules();
+    vi.stubGlobal("navigator", { platform: "MacIntel" });
+    const onMac = await import("./recents");
+    expect(onMac.looksLikeProject("/Applications/Some.app/Contents")).toBe(
+      false,
+    );
+    vi.unstubAllGlobals();
+    vi.resetModules();
+  });
+
+  it("keeps `.app` directories off macOS, where they are ordinary names", () => {
+    // A substring test, so any path segment ending in `.app` used to vanish.
+    expect(looksLikeProject("/home/me/project/myapp.app/src")).toBe(true);
+    expect(looksLikeProject("/home/me/code/fly.app/backend")).toBe(true);
   });
 
   it("accepts real projects, including ones directly under home", () => {
@@ -118,12 +140,37 @@ describe("projectRailSections", () => {
 });
 
 describe("projectRailItems", () => {
-  it("ignores home as a current folder", () => {
+  it("keeps home as a current folder off macOS", () => {
     expect(
       projectRailItems([{ path: "/tmp/app", openedAt: 1 }], "/Users/me").map(
         (item) => item.path,
       ),
-    ).toEqual(["/tmp/app"]);
+    ).toEqual(["/Users/me", "/tmp/app"]);
+  });
+});
+
+describe("looksLikeProject and home", () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    vi.resetModules();
+  });
+
+  it("accepts home off macOS, where there is no ~/Library consent prompt", () => {
+    expect(looksLikeProject("/home/me")).toBe(true);
+    expect(looksLikeProject("/Users/me")).toBe(true);
+  });
+
+  it("still refuses home on macOS", async () => {
+    vi.resetModules();
+    vi.stubGlobal("navigator", { platform: "MacIntel" });
+    const onMac = await import("./recents");
+    expect(onMac.looksLikeProject("/Users/me")).toBe(false);
+    expect(onMac.looksLikeProject("/Users/me/code")).toBe(true);
+  });
+
+  it("refuses the bare root and tilde on every platform", () => {
+    expect(looksLikeProject("/")).toBe(false);
+    expect(looksLikeProject("~")).toBe(false);
   });
 });
 
