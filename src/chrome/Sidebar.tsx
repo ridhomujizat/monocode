@@ -6,6 +6,7 @@ import {
   ChevronRight,
   CircleAlert,
   CircleDot,
+  Clock,
   Folder,
   GitBranch,
   GitPullRequest,
@@ -40,6 +41,7 @@ import {
 import { IS_MAC, MOD } from "../lib/platform";
 import { resolveModel } from "../lib/models";
 import { prettyParent, projectKey, projectName } from "../lib/paths";
+import type { OpenFileFn } from "../lib/search";
 import { sessionDisplayTitle } from "../lib/session";
 import { nextUnseenFinishedSessions } from "../lib/sessionDone";
 import {
@@ -64,17 +66,22 @@ import {
   folderAccent,
   folderContaining,
   folderShellFill,
+  loadPinnedSessionsCollapsed,
+  loadReminderSessionsCollapsed,
   loadSessionFolders,
   mergeFolderSessionSummaries,
   pruneSessionFolders,
   removeSessionFromFolder,
   renameFolder,
   reorderSessionFolders,
+  savePinnedSessionsCollapsed,
+  saveReminderSessionsCollapsed,
   saveSessionFolders,
   sessionListNavigationIds,
   setFolderCollapsed,
   setFolderColor,
   setFolderCustomColor,
+  subscribeSessionFolders,
   ungroupedSessions,
   type SessionFolder,
   type SessionListDropTarget,
@@ -107,7 +114,6 @@ import {
 } from "../lib/tabGroups";
 import { useDragResize } from "../hooks/useDragResize";
 import { useGitFileStatuses } from "../hooks/useGitFileStatuses";
-import { useInboxUnseen } from "../hooks/useInboxUnseen";
 import { useLockOverscroll } from "../hooks/useLockOverscroll";
 import { useProjectDiffStats } from "../hooks/useProjectDiffStats";
 import { useSortable } from "../hooks/useSortable";
@@ -131,6 +137,12 @@ import { ProjectLogoIcon } from "./ProjectLogoIcon";
 import { ProjectMascot } from "./ProjectMascot";
 import { Popover } from "./Popover";
 import { SessionFiltersMenu } from "./SessionFiltersMenu";
+import { sessionReminderPresets } from "./sessionReminderPresets";
+import {
+  formatReminderTime,
+  reminderTime,
+  type SessionReminder,
+} from "../lib/sessionReminders";
 import { SessionsEmpty } from "./SessionsEmpty";
 import { SidebarUpdateFooter } from "./SidebarUpdate";
 import { SourceControl } from "./SourceControl";
@@ -138,6 +150,7 @@ import { SourceControl } from "./SourceControl";
 const MIN_WIDTH = 260;
 const MAX_WIDTH = 560;
 const DEFAULT_WIDTH = 260;
+const REMINDERS_COLOR = "#f59e0b";
 
 let rememberedWidth = DEFAULT_WIDTH;
 
@@ -191,9 +204,12 @@ type Props = {
   ) => void;
   onPinSession?: (sessionId: string, pinned: boolean) => void;
   onPinSessions?: (sessionIds: readonly string[], pinned: boolean) => void;
+  reminders?: readonly SessionReminder[];
+  onSetReminders?: (sessionIds: readonly string[], dueAt: number) => void;
+  onCancelReminders?: (sessionIds: readonly string[]) => void;
   onDeleteSession?: (sessionId: string) => void;
   onDeleteSessions?: (sessionIds: readonly string[]) => void;
-  onOpenFile: (path: string) => void;
+  onOpenFile: OpenFileFn;
   onOpenTerminal?: (cwd: string) => void;
   onFileMoved?: (from: string, to: string) => void;
   onFileDeleted?: (path: string) => void;
@@ -238,6 +254,9 @@ type Props = {
   onToggleProjectRail?: () => void;
   projectRailOpen?: boolean;
   unseenFinishedIds?: Set<string>;
+  inboxUnseen?: boolean;
+  /** Linked GitHub work changed after the session last advanced. */
+  linkedSessionUpdateIds?: ReadonlySet<string>;
   settingsOpen?: boolean;
   settingsSection?: SettingsSectionId;
   onOpenSettings?: () => void;
@@ -268,6 +287,9 @@ function SidebarComponent({
   onArchiveSessions,
   onPinSession,
   onPinSessions,
+  reminders = [],
+  onSetReminders,
+  onCancelReminders,
   onDeleteSession,
   onDeleteSessions,
   onOpenFile,
@@ -314,6 +336,8 @@ function SidebarComponent({
   onToggleProjectRail,
   projectRailOpen = true,
   unseenFinishedIds: unseenFinishedIdsProp,
+  inboxUnseen = false,
+  linkedSessionUpdateIds = new Set(),
   settingsOpen = false,
   settingsSection = "general",
   onOpenSettings,
@@ -324,7 +348,6 @@ function SidebarComponent({
   onDismissUpdate,
 }: Props) {
   const gitRoot = gitCwd || cwd;
-  const inboxUnseen = useInboxUnseen(recents, cwd);
   const resize = useDragResize({
     min: MIN_WIDTH,
     max: () => Math.min(MAX_WIDTH, Math.floor(window.innerWidth * 0.5)),
@@ -358,6 +381,12 @@ function SidebarComponent({
   const [renamingFolderId, setRenamingFolderId] = useState<string | null>(null);
   const [sessionFolders, setSessionFolders] = useState<SessionFolder[]>(() =>
     loadSessionFolders(cwd),
+  );
+  const [pinnedSessionsCollapsed, setPinnedSessionsCollapsed] = useState(() =>
+    loadPinnedSessionsCollapsed(cwd),
+  );
+  const [reminderSessionsCollapsed, setReminderSessionsCollapsed] = useState(
+    () => loadReminderSessionsCollapsed(cwd),
   );
   const [sessionDrop, setSessionDrop] = useState<SessionListDropTarget | null>(
     null,
@@ -426,7 +455,17 @@ function SidebarComponent({
   // Summaries for the whole project stay in `sessions` so filters still work.
   // Folders sit above the ungrouped list. Only a page of ungrouped cards
   // mounts; the sentinel below asks for the next page.
-  const ungroupedVisible = ungroupedSessions(visibleSessions, sessionFolders);
+  const reminderIds = new Set(reminders.map((reminder) => reminder.sessionId));
+  const reminderGroup = {
+    sessionIds: [...reminders]
+      .sort((a, b) => a.dueAt - b.dueAt)
+      .map((reminder) => reminder.sessionId),
+    collapsed: reminderSessionsCollapsed,
+  };
+  const ungroupedVisible = ungroupedSessions(
+    visibleSessions,
+    sessionFolders,
+  ).filter((session) => !reminderIds.has(session.id));
   const activeUngroupedIndex = ungroupedVisible.findIndex(
     (session) => session.id === activeSessionId,
   );
@@ -440,11 +479,15 @@ function SidebarComponent({
     visibleSessions,
     sessionFolders,
     ungroupedVisible,
+    pinnedSessionsCollapsed,
+    reminderGroup,
   );
   const sessionListEntries = buildSessionList(
     visibleSessions,
     sessionFolders,
     shownUngrouped,
+    pinnedSessionsCollapsed,
+    reminderGroup,
   );
   const sessionNavigationIds = sessionListNavigationIds(
     fullSessionListEntries,
@@ -534,11 +577,21 @@ function SidebarComponent({
 
   useEffect(() => {
     setSessionFolders(loadSessionFolders(cwd));
+    setPinnedSessionsCollapsed(loadPinnedSessionsCollapsed(cwd));
+    setReminderSessionsCollapsed(loadReminderSessionsCollapsed(cwd));
     setRenamingFolderId(null);
     setFolderMenu(null);
     setSessionDrop(null);
     pendingFolderSessionIds.current.clear();
   }, [cwd]);
+
+  useEffect(
+    () =>
+      subscribeSessionFolders(cwd, () => {
+        setSessionFolders(loadSessionFolders(cwd));
+      }),
+    [cwd],
+  );
 
   useEffect(() => {
     if (pending || status === "error") return;
@@ -647,6 +700,13 @@ function SidebarComponent({
     return session ? [session] : [];
   });
   const multipleMenuSessions = menuSessionIds.length > 1;
+  const menuReminderTimes = [
+    ...new Set(
+      reminders
+        .filter((reminder) => menuSessionIds.includes(reminder.sessionId))
+        .map((reminder) => reminder.dueAt),
+    ),
+  ];
   const allMenuSessionsPinned =
     menuSessions.length > 0 && menuSessions.every((session) => session.pinned);
   const allMenuSessionsArchived =
@@ -671,6 +731,20 @@ function SidebarComponent({
     { kind: "item", id: "ungroup", label: "Ungroup" },
   ];
   const sessionMenuItems: ExplorerMenuItem[] = [
+    ...(onCancelReminders && menuReminderTimes.length > 0
+      ? [
+          {
+            kind: "item" as const,
+            id: "reminder:cancel",
+            label: "Cancel reminder",
+            description:
+              menuReminderTimes.length === 1
+                ? formatReminderTime(menuReminderTimes[0])
+                : "Multiple reminder times",
+          },
+          { kind: "sep" as const },
+        ]
+      : []),
     ...(onPinSession || onPinSessions
       ? [
           {
@@ -690,6 +764,13 @@ function SidebarComponent({
           },
         ]
       : []),
+    {
+      kind: "item",
+      id: "reminder",
+      label: "Remind me",
+      disabled: !onSetReminders,
+      submenu: sessionReminderPresets(),
+    },
     { kind: "sep" as const },
     { kind: "item" as const, id: "folder-new", label: "New folder" },
     ...(sessionFolders.length > 0 ? [{ kind: "sep" as const }] : []),
@@ -784,6 +865,19 @@ function SidebarComponent({
     const archived = allMenuSessionsArchived;
     const pinned = allMenuSessionsPinned;
     closeSessionMenu();
+    if (id === "reminder:cancel") {
+      onCancelReminders?.(sessionIds);
+      return;
+    }
+    if (id.startsWith("reminder:")) {
+      const dueAt = reminderTime(id);
+      if (dueAt != null) {
+        setReminderSessionsCollapsed(false);
+        saveReminderSessionsCollapsed(cwd, false);
+        onSetReminders?.(sessionIds, dueAt);
+      }
+      return;
+    }
     if (id === "pin") {
       if (sessionIds.length > 1 && onPinSessions) {
         onPinSessions(sessionIds, !pinned);
@@ -920,6 +1014,7 @@ function SidebarComponent({
         isSelected={selectedSessionIds.has(session.id)}
         busy={busySessionIds.has(session.id)}
         done={unseenFinishedIds.has(session.id)}
+        linkedUpdate={linkedSessionUpdateIds.has(session.id)}
         needsApproval={approvalSessionIds.has(session.id)}
         dropTarget={isSessionDrop("session", session.id)}
         compact={compact}
@@ -928,7 +1023,7 @@ function SidebarComponent({
         onOpenWorkItem={onOpenInboxItem}
         onPrefetch={onPrefetchSession}
         onPlaceOnPane={onPlaceSessionOnPane}
-        onListDrop={onSessionListDrop}
+        onListDrop={reminderIds.has(session.id) ? undefined : onSessionListDrop}
         onListDropTargetChange={setSessionDrop}
         onContextMenu={(e) => onSessionContextMenu(session.id, e)}
         onArchive={
@@ -1230,14 +1325,77 @@ function SidebarComponent({
               ) : (
                 <ul className="flex flex-col gap-0.5 p-1.5">
                   {sessionListEntries.map((entry, index) => {
-                    if (entry.kind === "divider") {
+                    if (entry.kind === "pinned" || entry.kind === "reminders") {
+                      const isReminders = entry.kind === "reminders";
+                      const expanded = searchNarrowed || !entry.collapsed;
+                      const beforeUngrouped =
+                        sessionListEntries[index + 1]?.kind === "session";
                       return (
                         <li
-                          key={`divider-${index}`}
-                          aria-hidden
-                          className="mx-1 my-1 list-none"
+                          key={`${entry.kind}-sessions`}
+                          data-pinned-sessions={isReminders ? undefined : ""}
+                          data-reminder-sessions={isReminders ? "" : undefined}
+                          className={`relative ${
+                            expanded || beforeUngrouped ? "mb-1.5" : ""
+                          }`}
                         >
-                          <div className="h-px bg-content/10" />
+                          <div className="overflow-hidden rounded-md bg-content/5">
+                            <FolderRow
+                              folder={
+                                isReminders
+                                  ? {
+                                      name: "Reminders",
+                                      customColor: REMINDERS_COLOR,
+                                    }
+                                  : { name: "Pinned" }
+                              }
+                              sessions={entry.sessions}
+                              expanded={expanded}
+                              dropTarget={false}
+                              busy={entry.sessions.some((session) =>
+                                busySessionIds.has(session.id),
+                              )}
+                              done={entry.sessions.some((session) =>
+                                unseenFinishedIds.has(session.id),
+                              )}
+                              needsApproval={entry.sessions.some((session) =>
+                                approvalSessionIds.has(session.id),
+                              )}
+                              groupIcon={
+                                isReminders ? (
+                                  <Clock
+                                    className="size-3.5"
+                                    strokeWidth={1.75}
+                                  />
+                                ) : (
+                                  <Pin
+                                    className="size-3.5 text-content"
+                                    strokeWidth={1.75}
+                                  />
+                                )
+                              }
+                              onToggle={() => {
+                                if (searchNarrowed) return;
+                                const collapsed = !entry.collapsed;
+                                if (isReminders) {
+                                  setReminderSessionsCollapsed(collapsed);
+                                  saveReminderSessionsCollapsed(cwd, collapsed);
+                                  return;
+                                }
+                                setPinnedSessionsCollapsed(collapsed);
+                                savePinnedSessionsCollapsed(cwd, collapsed);
+                              }}
+                            />
+                            {expanded ? (
+                              <ul className="flex flex-col gap-px p-1">
+                                {entry.sessions.map((session) => (
+                                  <li key={session.id}>
+                                    {renderSessionCard(session, true)}
+                                  </li>
+                                ))}
+                              </ul>
+                            ) : null}
+                          </div>
                         </li>
                       );
                     }
@@ -1419,7 +1577,10 @@ function SidebarComponent({
               selectedPath={selectedDiffPath}
               selectedKind={selectedDiffKind}
               selectedSha={selectedCommitSha}
-              onOpenFile={onOpenDiff ?? onOpenFile}
+              onOpenFile={
+                onOpenDiff ??
+                ((path) => onOpenFile(path, undefined, { exact: true }))
+              }
               onOpenAllChanges={onOpenAllChanges ?? (() => {})}
               onOpenCommit={onOpenCommit ?? (() => {})}
             />
@@ -1926,6 +2087,7 @@ function sessionListDropFromPoint(
 ): SessionListDropTarget | null {
   const el = document.elementFromPoint(x, y);
   if (!el) return null;
+  if (el.closest("[data-reminder-sessions]")) return null;
   const card = el.closest("[data-session-card]") as HTMLElement | null;
   const cardId = card?.dataset.sessionCard;
   if (cardId === draggedId) return null;
@@ -1948,12 +2110,13 @@ function FolderRow({
   busy,
   done,
   needsApproval,
+  groupIcon,
   onPointerDown,
   onToggle,
   onContextMenu,
   onRename,
 }: {
-  folder: SessionFolder;
+  folder: Pick<SessionFolder, "name" | "colorIndex" | "customColor">;
   sessions: SessionSummary[];
   expanded: boolean;
   dropTarget: boolean;
@@ -1961,10 +2124,11 @@ function FolderRow({
   busy: boolean;
   done: boolean;
   needsApproval: boolean;
+  groupIcon?: ReactNode;
   onPointerDown?: (event: ReactPointerEvent<HTMLButtonElement>) => void;
   onToggle: () => void;
-  onContextMenu: (event: ReactMouseEvent<HTMLButtonElement>) => void;
-  onRename: () => void;
+  onContextMenu?: (event: ReactMouseEvent<HTMLButtonElement>) => void;
+  onRename?: () => void;
 }) {
   const count = sessions.length;
   const accent = folderAccent(folder.colorIndex, folder.customColor);
@@ -1978,7 +2142,7 @@ function FolderRow({
       onClick={onToggle}
       onContextMenu={onContextMenu}
       onKeyDown={(event) => {
-        if (event.key === "F2") {
+        if (event.key === "F2" && onRename) {
           event.preventDefault();
           onRename();
         }
@@ -2003,13 +2167,26 @@ function FolderRow({
         style={accent ? { color: accent } : undefined}
       >
         {expanded ? (
-          <ChevronDown className="size-3.5 text-content" strokeWidth={1.75} />
+          groupIcon ? (
+            <>
+              <span className="group-hover:hidden group-focus-visible:hidden">
+                {groupIcon}
+              </span>
+              <ChevronDown
+                className="hidden size-3.5 text-content group-hover:block group-focus-visible:block"
+                strokeWidth={1.75}
+              />
+            </>
+          ) : (
+            <ChevronDown className="size-3.5 text-content" strokeWidth={1.75} />
+          )
         ) : (
           <>
-            <Folder
-              className={`size-3.5 group-hover:hidden group-focus-visible:hidden text-content`}
-              strokeWidth={1.75}
-            />
+            <span className="group-hover:hidden group-focus-visible:hidden">
+              {groupIcon ?? (
+                <Folder className="size-3.5 text-content" strokeWidth={1.75} />
+              )}
+            </span>
             <ChevronRight
               className="hidden size-3.5 group-hover:block group-focus-visible:block text-content"
               strokeWidth={1.75}
@@ -2117,6 +2294,7 @@ function SessionCard({
   isSelected,
   busy,
   done,
+  linkedUpdate,
   needsApproval,
   dropTarget,
   compact = false,
@@ -2137,6 +2315,7 @@ function SessionCard({
   isSelected: boolean;
   busy: boolean;
   done: boolean;
+  linkedUpdate: boolean;
   needsApproval: boolean;
   dropTarget?: boolean;
   compact?: boolean;
@@ -2193,6 +2372,13 @@ function SessionCard({
   );
 
   const linkedWorkItem = session.linkedWorkItem;
+  const linkedUpdateDot = linkedUpdate ? (
+    <span
+      title={`Linked ${linkedWorkItem?.kind === "pr" ? "PR" : "issue"} updated since this session`}
+      aria-label="Linked work item updated"
+      className="size-1.5 shrink-0 rounded-full bg-accent"
+    />
+  ) : null;
   const workItemBadge = linkedWorkItem ? (
     <button
       type="button"
@@ -2285,7 +2471,9 @@ function SessionCard({
         }
       }
       setListTarget(
-        sessionListDropFromPoint(ev.clientX, ev.clientY, session.id),
+        onListDrop
+          ? sessionListDropFromPoint(ev.clientX, ev.clientY, session.id)
+          : null,
       );
       if (!onPlaceOnPane) return;
       const over = paneDropFromPoint(ev.clientX, ev.clientY);
@@ -2328,7 +2516,9 @@ function SessionCard({
       if (!active) return;
       skipClickUntil.current = performance.now() + 400;
       if (!commit) return;
-      const listOver = sessionListDropFromPoint(lastX, lastY, session.id);
+      const listOver = onListDrop
+        ? sessionListDropFromPoint(lastX, lastY, session.id)
+        : null;
       if (listOver) {
         onListDrop?.(session.id, listOver);
         return;
@@ -2366,7 +2556,7 @@ function SessionCard({
         }}
         onContextMenu={onContextMenu}
         onKeyDown={onKeyDown}
-        className={`relative border flex w-full touch-none flex-col rounded-md px-2.5 text-left ${
+        className={`relative border flex w-full cursor-default select-none touch-none flex-col rounded-md px-2.5 text-left ${
           compact ? "py-1.5" : "py-2"
         } ${dragging ? "opacity-40" : ""} ${
           dropTarget
@@ -2395,6 +2585,7 @@ function SessionCard({
               </span>
             </span>
             <span className="flex shrink-0 items-center gap-1.5">
+              {linkedUpdateDot}
               {workItemBadge}
               {status}
             </span>
@@ -2416,6 +2607,7 @@ function SessionCard({
           </span>
           {compact ? (
             <span className="flex shrink-0 items-center gap-1.5">
+              {linkedUpdateDot}
               {workItemBadge}
               {status}
             </span>

@@ -7,6 +7,65 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Subagent rows show the child's model beside its step count when the provider reports it, and retain it in saved conversations.
+- Subagent trails now include OpenCode child sessions and Pi/omp progress, including separate rows for parallel and chained tasks. Cursor recovers child messages and tools from its local stores, names foreground tasks correctly, and restores expandable rows in saved conversations. Cursor, Grok Build, and fx also route child updates carrying a parent tool ID into the same trails. OpenCode pairs concurrent runs by session ID, and repeated progress updates merge into their existing steps.
+- Subagents now get a row each in the transcript, sitting under the agent's own work with an animated mascot, a shimmering name while the run is live, and a count of the steps it has taken. Clicking a row opens the subagent's trail inline, grouped into phases the same way the main transcript groups work, so a long run reads as what it said and the calls that followed rather than one flat dump. The rows keep their place while the work above them folds and re-folds. Claude and Codex both report their subagents' work; Codex spawns are named from their brief, stay running until the agent itself reports otherwise, and one spawned agent no longer shows up as several rows.
+- GitLab's **Needs attention** Inbox view now uses pending GitLab To-Dos to include assignments, mentions, and review requests from every accessible repository. Remote-only items support details, discussions, comments, and merge-request diffs without requiring a local checkout.
+
+## [0.1.44] - 2026-09-12
+
+### Added
+
+- Set a reminder from a session's menu using a preset or custom date and time. MonoCode persists scheduled reminders, delivers a notification when one is due, keeps reminder notices available in the session, and shows the scheduled time when cancelling one.
+- The model picker remembers the six most recently used models. Right-click the current model or press Command/Ctrl+Period to switch among them quickly.
+- Notes support normalized tags that can be edited and searched, and selected text from an agent transcript can be saved directly as a note.
+- File and terminal tab menus include **Close Others**, with confirmation before closing unsaved files or running terminals.
+
+### Changed
+
+- Model selection and model settings now share one searchable, keyboard-accessible picker with nested menus, provider tabs, favorites, and inline setting controls.
+- Returning to a project restores its last active session, editor, or terminal instead of choosing a different pane. In #144 by @kinsomicrote.
+- Failed tool activity stays concise by default and can be expanded directly from its transcript summary to inspect the error.
+- Transcripts preserve the provider and model used for each turn, including across reloads, handoffs, second opinions, and Claude model switches.
+
+### Fixed
+
+- Markdown file links distinguish document headings from local paths, handle bare and percent-encoded filenames, reject encoded network paths, and navigate to the requested source location reliably after reload. In #146 by @yankawai.
+- Codex transport retries and fallback diagnostics no longer appear as transcript events, while terminal errors and unrelated runtime warnings remain visible.
+- Background tabs preserve the composer's measured height, so returning to a tab no longer collapses a multi-line draft to one row. In #182 by @goujandev.
+- File attachments now reach Codex, Claude Code, Pi, and omp through a local-path fallback when they cannot be sent inline, including attachment-only messages and mid-turn follow-ups. ACP resource links and OpenCode file parts keep their native formats. Fixes #174.
+- Approvals and questions from nested Claude, Codex, and OpenCode sessions route to the correct active parent session, queue safely when several arrive, and surface reply failures instead of leaving the turn stuck.
+- Files selected from search, the file picker, or the filesystem open by their exact path instead of being redirected by fuzzy path matching.
+- Web links in agent messages now open in the system browser instead of relying on unavailable in-webview navigation. Fixes #175.
+
+## [0.1.43] - 2026-09-11
+
+### Added
+
+- Settings → Inbox now reports whether the GitHub CLI is installed and authenticated, alongside the existing GitLab and Linear connection controls. The Inbox shows only connected sources, falls back safely when one is disconnected, and offers an **Add connection** menu that opens the matching Settings card. In #166 by @goujandev.
+- Use `/add-to-folder` in the composer to place the current session in an existing sidebar folder or create a new folder without interrupting the prompt.
+- Ungrouped pinned sessions now appear in a dedicated **Pinned** sidebar section that can be collapsed independently for each project and expands automatically while searching.
+- Click an image attachment in the composer to inspect it in a full-screen preview; close it with Escape, the close button, or the backdrop, and focus returns to the attachment.
+- Right-click file links, inline file paths, and code-block paths in agent messages to open them in MonoCode or the default app, reveal them in the system file manager, or copy their absolute or project-relative path.
+- macOS releases now include separate signed packages for Apple Silicon and Intel Macs.
+
+### Changed
+
+- The session change-review card now appears after the latest completed reply instead of above the composer, stays hidden while a turn is running, summarizes total additions and deletions, and shows up to three changed files before offering to expand the list.
+- File mentions created from an editor selection use the concise `@file (line…)` form, and the line location is highlighted as part of the mention.
+- Inbox item identity, metadata, related threads, actions, and pull-request tabs remain pinned while descriptions, comments, and diffs scroll beneath them.
+- Navigation, menu, tab, and file labels use tighter, more consistent line heights.
+- Windows no longer shows a redundant centered title between the tab strip and native window controls.
+
+### Fixed
+
+- Codex Full Access approvals no longer block a turn, native Codex questions and supported MCP confirmations appear in the shared input UI, optional questions show their timeout and remain open after interaction, and access-mode changes made during a turn are applied to the next turn. Pending-input notifications also track concurrent requests individually and clear correctly when Codex resolves or cancels them. In #139 by @gettyeuro.
+- A failed provider connection is retired so the next prompt can reconnect cleanly. In-progress tools and approvals are settled as failed or cancelled, while failed subagents expand automatically and show the provider's error details instead of leaving a session looking stuck or successfully completed.
+- Truncated labels preserve letter descenders across tabs, navigation, menus, file views, and search results. In #119 by @ognjeeen.
+- The project logo picker opens in the selected project's directory instead of an unrelated location. In #163 by @ognjeeen.
+
 ## [0.1.42] - 2026-09-10
 
 ### Added
@@ -663,7 +722,9 @@ First public release. macOS (Apple Silicon) only.
 - Updater endpoint and minisign public key are injected at release time rather than committed, so forks do not inherit the maintainer's update channel.
 - macOS release builds sign with `APPLE_SIGNING_IDENTITY` via a config overlay; the committed default remains ad-hoc `-` for community builds.
 
-[Unreleased]: https://github.com/hardbeat920/monocode/compare/v0.1.42...HEAD
+[Unreleased]: https://github.com/hardbeat920/monocode/compare/v0.1.44...HEAD
+[0.1.44]: https://github.com/hardbeat920/monocode/compare/v0.1.43...v0.1.44
+[0.1.43]: https://github.com/hardbeat920/monocode/compare/v0.1.42...v0.1.43
 [0.1.42]: https://github.com/hardbeat920/monocode/compare/v0.1.41...v0.1.42
 [0.1.41]: https://github.com/hardbeat920/monocode/compare/v0.1.40...v0.1.41
 [0.1.40]: https://github.com/hardbeat920/monocode/compare/v0.1.39...v0.1.40

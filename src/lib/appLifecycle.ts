@@ -48,6 +48,7 @@ import {
   normalizeProjectPath,
   sameProjectPath,
 } from "./recents";
+import type { ProjectReturnMemory } from "./projectReturn";
 
 export type { ResumedWorkspace };
 export { hasInFlightSessions };
@@ -71,6 +72,7 @@ let liveWorkspace: {
   activeTabId: () => string;
   projectCwd: () => string;
   projectTerminals: () => ProjectTerminalDock[];
+  projectReturnMemory: () => ProjectReturnMemory;
   flush: () => void;
 } | null = null;
 
@@ -84,6 +86,7 @@ export function setQuitWorkspace(
   activeTabId: () => string,
   projectCwd: () => string,
   projectTerminals: () => ProjectTerminalDock[],
+  projectReturnMemory: () => ProjectReturnMemory,
   flush: () => void,
 ): () => void {
   liveWorkspace = {
@@ -92,6 +95,7 @@ export function setQuitWorkspace(
     activeTabId,
     projectCwd,
     projectTerminals,
+    projectReturnMemory,
     flush,
   };
   bootingResumed = null;
@@ -108,6 +112,7 @@ export async function handleQuitRequested(): Promise<void> {
       liveWorkspace.tabs(),
       liveWorkspace.activeTabId(),
       liveWorkspace.projectCwd(),
+      liveWorkspace.projectReturnMemory(),
       liveWorkspace.projectTerminals(),
     );
     return;
@@ -136,6 +141,7 @@ export async function closeBusyWindow(): Promise<void> {
     liveWorkspace.tabs(),
     liveWorkspace.activeTabId(),
     liveWorkspace.projectCwd(),
+    liveWorkspace.projectReturnMemory(),
     liveWorkspace.projectTerminals(),
     true,
   );
@@ -301,6 +307,7 @@ export async function persistQuitState(
   tabs: WorkspaceTab[],
   activeTabId: string,
   projectCwd: string,
+  memory: ProjectReturnMemory,
   mode: "quit" | "unload" = "quit",
   projectTerminals: ProjectTerminalDock[] = [],
 ): Promise<void> {
@@ -321,6 +328,7 @@ export async function persistQuitState(
       sessions,
       activeTabId,
       projectCwd,
+      memory,
       projectTerminals,
     ),
   ).catch(() => undefined);
@@ -345,6 +353,7 @@ async function persistBootingResume(
       workspace.sessions,
       workspace.activeTabId,
       workspace.projectCwd,
+      workspace.projectReturnMemory ?? new Map(),
       workspace.projectTerminals ?? [],
     ),
   ).catch(() => undefined);
@@ -361,6 +370,7 @@ async function confirmQuitAndExit(
   tabs: WorkspaceTab[],
   activeTabId: string,
   projectCwd: string,
+  memory: ProjectReturnMemory,
   projectTerminals: ProjectTerminalDock[] = [],
   closeWindow = false,
 ): Promise<void> {
@@ -388,6 +398,7 @@ async function confirmQuitAndExit(
         tabs,
         activeTabId,
         projectCwd,
+        memory,
         "quit",
         projectTerminals,
       );

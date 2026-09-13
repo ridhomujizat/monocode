@@ -1053,7 +1053,7 @@ export function ProjectRail({
             projectName(projectMenu.path),
           )}
           logoPath={resolveTabGroupLogo(projectMenu.projectKey, groupLogos)}
-          logoProject={projectMenu.projectKey}
+          logoProject={projectMenu.path}
           mascotName={resolveTabGroupMascot(
             projectMenu.projectKey,
             groupMascots,

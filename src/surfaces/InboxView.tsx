@@ -15,6 +15,7 @@ import {
   ListFilter,
   LoaderCircle,
   MessageMultiple,
+  Plus,
   RefreshCw,
   Search,
   type IconComponent,
@@ -30,6 +31,7 @@ import {
   InboxFiltersMenu,
   INBOX_FILTER_MENU_WIDTH,
 } from "../chrome/InboxFiltersMenu";
+import { InboxConnectMenu } from "../chrome/InboxConnectMenu";
 import { InboxProviderMark } from "../chrome/InboxProviderMark";
 import { ProjectLogoIcon } from "../chrome/ProjectLogoIcon";
 import { ProjectMascot } from "../chrome/ProjectMascot";
@@ -39,12 +41,14 @@ import { useDragResize } from "../hooks/useDragResize";
 import { useLockOverscroll } from "../hooks/useLockOverscroll";
 import { useTabGroupLogos } from "../hooks/useTabGroupLogos";
 import {
+  githubStatus,
   githubPrDiff,
   githubReviewDecisionLabel,
   githubWorkItem,
   githubWorkItemComment,
   githubWorkItemDetails,
   githubWorkItemThread,
+  gitlabAttentionLabel,
   inboxItemKey,
   inboxItemRef,
   inboxItemStatus,
@@ -67,14 +71,21 @@ import {
 } from "../lib/githubTasks";
 import {
   applyInboxFilters,
+  connectableInboxSources,
   hasActiveInboxFilters,
+  loadInboxConnections,
   linearProjectOptions,
   inboxFetchState,
   loadInboxFilters,
   loadInboxSource,
   pruneInboxFilters,
   saveInboxFilters,
+  resolveInboxSource,
+  saveInboxConnections,
   saveInboxSource,
+  visibleInboxSources,
+  INBOX_SOURCE_LABELS,
+  type ConnectableInboxSource,
   type InboxFilters,
   type InboxSource,
 } from "../lib/inboxFilters";
@@ -96,6 +107,7 @@ import {
 } from "../lib/inboxSeen";
 import {
   LINEAR_CHANGE_EVENT,
+  linearConnected,
   linearIssueComment,
   linearIssueDetails,
   linearIssueThread,
@@ -109,6 +121,7 @@ import {
 } from "../lib/linear";
 import {
   GITLAB_CHANGE_EVENT,
+  gitlabConnected,
   gitlabMrDiff,
   gitlabWorkItemComment,
   gitlabWorkItemDetails,
@@ -232,8 +245,7 @@ function InboxSourceTab({
   selected: boolean;
   onSelect: (source: InboxSource) => void;
 }) {
-  const label =
-    source === "linear" ? "Linear" : source === "gitlab" ? "GitLab" : "GitHub";
+  const label = INBOX_SOURCE_LABELS[source];
   return (
     <button
       type="button"
@@ -298,6 +310,8 @@ type Props = {
   onOpenSession?: (sessionId: string) => void | Promise<void>;
   /** Session-card destination to reveal after the Inbox list loads. */
   target?: LinkedWorkItem | null;
+  /** Opens Settings on the card where the given source is connected. */
+  onOpenIntegrations: (source: ConnectableInboxSource) => void;
 };
 
 export function InboxView({
@@ -313,10 +327,10 @@ export function InboxView({
   sessions = [],
   onOpenSession,
   target = null,
+  onOpenIntegrations,
 }: Props) {
   const [discussionOpen, setDiscussionOpen] = useState(false);
   const listLock = useLockOverscroll<HTMLDivElement>();
-  const detailLock = useLockOverscroll<HTMLDivElement>();
   const onCloseRef = useRef(onClose);
   onCloseRef.current = onClose;
   const logos = useTabGroupLogos();
@@ -342,7 +356,12 @@ export function InboxView({
   );
   const [targetItem, setTargetItem] = useState<InboxItem | null>(null);
   const [filters, setFilters] = useState(loadInboxFilters);
-  const [source, setSource] = useState(loadInboxSource);
+  const [connections, setConnections] = useState(loadInboxConnections);
+  const [source, setSource] = useState(() =>
+    resolveInboxSource(loadInboxSource(), connections),
+  );
+  const [connectMenuOpen, setConnectMenuOpen] = useState(false);
+  const connectButtonRef = useRef<HTMLButtonElement | null>(null);
   const [filterMenu, setFilterMenu] = useState<{ x: number; y: number } | null>(
     null,
   );
@@ -410,11 +429,15 @@ export function InboxView({
         setFilterMenu(null);
         return;
       }
+      if (connectMenuOpen) {
+        setConnectMenuOpen(false);
+        return;
+      }
       onCloseRef.current?.();
     };
     window.addEventListener("keydown", onKey, true);
     return () => window.removeEventListener("keydown", onKey, true);
-  }, [filterMenu]);
+  }, [connectMenuOpen, filterMenu]);
 
   useEffect(() => {
     const onChange = () => {
@@ -430,6 +453,72 @@ export function InboxView({
     window.addEventListener(GITLAB_CHANGE_EVENT, onChange);
     return () => window.removeEventListener(GITLAB_CHANGE_EVENT, onChange);
   }, []);
+
+  // The mount read does the real work: opening Settings unmounts this view, so
+  // a token set there lands on the way back in. Reads can also overlap, and
+  // only the newest may write, or a slow earlier answer restores a stale one.
+  useEffect(() => {
+    let cancelled = false;
+    let latest = 0;
+    const read = () => {
+      const generation = ++latest;
+      void Promise.allSettled([
+        githubStatus(),
+        linearConnected(),
+        gitlabConnected(),
+      ]).then(([github, linear, gitlab]) => {
+        if (cancelled || generation !== latest) return;
+        setConnections((prev) => ({
+          github:
+            github.status === "fulfilled"
+              ? github.value.connected
+              : prev.github,
+          linear:
+            linear.status === "fulfilled"
+              ? linear.value.connected
+              : prev.linear,
+          gitlab:
+            gitlab.status === "fulfilled"
+              ? gitlab.value.connected
+              : prev.gitlab,
+        }));
+      });
+    };
+    read();
+    window.addEventListener(LINEAR_CHANGE_EVENT, read);
+    window.addEventListener(GITLAB_CHANGE_EVENT, read);
+    return () => {
+      cancelled = true;
+      window.removeEventListener(LINEAR_CHANGE_EVENT, read);
+      window.removeEventListener(GITLAB_CHANGE_EVENT, read);
+    };
+  }, []);
+
+  useEffect(() => {
+    saveInboxConnections(connections);
+  }, [connections]);
+
+  // The initial source is resolved against cached status, so storage can still
+  // name a provider this view has already fallen back from.
+  useEffect(() => {
+    saveInboxSource(source);
+    // Mount only: the temporary switch to GitHub for a linked target must not
+    // be persisted.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // Disconnecting can pull the tab out from under the current selection.
+  useEffect(() => {
+    const next = resolveInboxSource(source, connections);
+    if (next === source) return;
+    setSource(next);
+    saveInboxSource(next);
+  }, [connections, source]);
+
+  const visibleSources = visibleInboxSources(connections);
+  const connectableSources = connectableInboxSources(connections);
+  const sourceAvailable = visibleSources.includes(source);
+  const noSourcesConnected = visibleSources.length === 0;
 
   // The roster has to come from Linear, not from the fetched issues: hiding a
   // team drops its issues, so a derived list could never offer it back.
@@ -521,6 +610,7 @@ export function InboxView({
   }, [cwd, items, target, targetSelectionKey]);
 
   const visibleItems = useMemo(() => {
+    if (!sourceAvailable) return [];
     const visible = applyInboxFilters(
       items,
       activeFilters,
@@ -536,18 +626,28 @@ export function InboxView({
         : null);
     if (!targeted || visible.includes(targeted)) return visible;
     return [targeted, ...visible];
-  }, [activeFilters, items, searchInput, source, target, targetItem]);
+  }, [
+    activeFilters,
+    items,
+    searchInput,
+    source,
+    sourceAvailable,
+    target,
+    targetItem,
+  ]);
 
   const inboxSeenTick = useInboxSeenTick();
   const sourceEntries = useMemo(
     () =>
-      items
-        .filter((item) => item.provider === source)
-        .map((item) => ({
-          key: inboxItemKey(item),
-          updatedAt: item.updatedAt,
-        })),
-    [items, source],
+      sourceAvailable
+        ? items
+            .filter((item) => item.provider === source)
+            .map((item) => ({
+              key: inboxItemKey(item),
+              updatedAt: item.updatedAt,
+            }))
+        : [],
+    [items, source, sourceAvailable],
   );
   const sourceHasUnseen = useMemo(
     () => sourceEntries.some(isInboxEntryUnseen),
@@ -615,84 +715,107 @@ export function InboxView({
       ref={resize.setPaneRef}
       className="relative flex h-full min-h-0 shrink-0 flex-col border-r border-content/10"
     >
-      <div
-        role="tablist"
-        aria-label="Inbox source"
-        className="flex h-9 shrink-0 items-center gap-px border-b border-content/10 px-2"
-      >
-        <InboxSourceTab
-          source="github"
-          selected={source === "github"}
-          onSelect={onSourceChange}
-        />
-        <InboxSourceTab
-          source="linear"
-          selected={source === "linear"}
-          onSelect={onSourceChange}
-        />
-        <InboxSourceTab
-          source="gitlab"
-          selected={source === "gitlab"}
-          onSelect={onSourceChange}
-        />
+      <div className="flex h-9 shrink-0 items-center gap-px border-b border-content/10 px-2">
+        {visibleSources.length > 0 ? (
+          <div
+            role="tablist"
+            aria-label="Inbox source"
+            className="flex min-w-0 basis-0 items-center gap-px"
+            style={{ flexGrow: visibleSources.length }}
+          >
+            {visibleSources.map((option) => (
+              <InboxSourceTab
+                key={option}
+                source={option}
+                selected={source === option}
+                onSelect={onSourceChange}
+              />
+            ))}
+          </div>
+        ) : null}
+        {connectableSources.length > 0 ? (
+          <button
+            ref={connectButtonRef}
+            type="button"
+            aria-label="Connect an inbox source"
+            aria-haspopup="menu"
+            aria-expanded={connectMenuOpen}
+            title="Connect an inbox source"
+            onClick={() => setConnectMenuOpen((open) => !open)}
+            className={`flex h-6 min-w-0 flex-1 items-center justify-center gap-1.5 rounded-md px-2 text-[12px] leading-none ${
+              connectMenuOpen
+                ? "bg-content/10 text-content"
+                : "text-content/40 hover:bg-content/5 hover:text-content"
+            }`}
+          >
+            <Plus className="size-3.5 shrink-0" strokeWidth={1.75} />
+            <span className="min-w-0 truncate">Add connection</span>
+          </button>
+        ) : null}
       </div>
-      <div className="flex h-9 shrink-0 items-center gap-1 border-b border-content/10 px-2">
-        <div className="relative flex h-7 min-w-0 flex-1 items-center">
-          <Search className="pointer-events-none absolute left-2 size-3 shrink-0 opacity-50" />
-          <input
-            value={searchInput}
-            onChange={(event) => setSearchInput(event.target.value)}
-            placeholder="Filter inbox"
-            aria-label="Filter inbox"
-            spellCheck={false}
-            autoComplete="off"
-            className="h-7 w-full rounded-md bg-transparent pl-7 pr-2 text-[12px] text-content outline-none placeholder:text-content/40"
-          />
-        </div>
-        <button
-          type="button"
-          title="Filter inbox"
-          aria-label="Filter inbox"
-          aria-expanded={!!filterMenu}
-          aria-haspopup="menu"
-          onClick={onFilterButtonClick}
-          className={`grid size-6 shrink-0 place-items-center rounded-md text-content/45 hover:bg-content/10 hover:text-content ${
-            filterMenu || filtersActive ? "bg-content/10 text-content" : ""
-          }`}
-        >
-          <ListFilter className="size-3" strokeWidth={1.75} />
-        </button>
-        <button
-          type="button"
-          title="Mark all as read"
-          aria-label="Mark all as read"
-          disabled={!sourceHasUnseen}
-          onClick={() => markInboxItemsSeen(sourceEntries)}
-          className="grid size-6 shrink-0 place-items-center rounded-md text-content/45 hover:bg-content/10 hover:text-content disabled:cursor-default disabled:opacity-30 disabled:hover:bg-transparent disabled:hover:text-content/45"
-        >
-          <CheckCheck className="size-3.5" strokeWidth={1.75} />
-        </button>
-        <button
-          type="button"
-          aria-label="Refresh"
-          onClick={() => setRefresh((value) => value + 1)}
-          className="grid size-6 shrink-0 place-items-center rounded-md text-content/45 hover:bg-content/10 hover:text-content"
-        >
-          {loading || revalidating ? (
-            <LoaderCircle
-              className="size-3.5 animate-spin"
-              strokeWidth={1.75}
+      {noSourcesConnected ? null : (
+        <div className="flex h-9 shrink-0 items-center gap-1 border-b border-content/10 px-2">
+          <div className="relative flex h-7 min-w-0 flex-1 items-center">
+            <Search className="pointer-events-none absolute left-2 size-3 shrink-0 opacity-50" />
+            <input
+              value={searchInput}
+              onChange={(event) => setSearchInput(event.target.value)}
+              placeholder="Filter inbox"
+              aria-label="Filter inbox"
+              spellCheck={false}
+              autoComplete="off"
+              className="h-7 w-full rounded-md bg-transparent pl-7 pr-2 text-[12px] text-content outline-none placeholder:text-content/40"
             />
-          ) : (
-            <RefreshCw className="size-3.5" strokeWidth={1.75} />
-          )}
-        </button>
-      </div>
+          </div>
+          <button
+            type="button"
+            title="Filter inbox"
+            aria-label="Filter inbox"
+            aria-expanded={!!filterMenu}
+            aria-haspopup="menu"
+            onClick={onFilterButtonClick}
+            className={`grid size-6 shrink-0 place-items-center rounded-md text-content/45 hover:bg-content/10 hover:text-content ${
+              filterMenu || filtersActive ? "bg-content/10 text-content" : ""
+            }`}
+          >
+            <ListFilter className="size-3" strokeWidth={1.75} />
+          </button>
+          <button
+            type="button"
+            title="Mark all as read"
+            aria-label="Mark all as read"
+            disabled={!sourceHasUnseen}
+            onClick={() => markInboxItemsSeen(sourceEntries)}
+            className="grid size-6 shrink-0 place-items-center rounded-md text-content/45 hover:bg-content/10 hover:text-content disabled:cursor-default disabled:opacity-30 disabled:hover:bg-transparent disabled:hover:text-content/45"
+          >
+            <CheckCheck className="size-3.5" strokeWidth={1.75} />
+          </button>
+          <button
+            type="button"
+            aria-label="Refresh"
+            onClick={() => setRefresh((value) => value + 1)}
+            className="grid size-6 shrink-0 place-items-center rounded-md text-content/45 hover:bg-content/10 hover:text-content"
+          >
+            {loading || revalidating ? (
+              <LoaderCircle
+                className="size-3.5 animate-spin"
+                strokeWidth={1.75}
+              />
+            ) : (
+              <RefreshCw className="size-3.5" strokeWidth={1.75} />
+            )}
+          </button>
+        </div>
+      )}
       <div
         ref={listLock}
         className="min-h-0 flex-1 overflow-y-auto overscroll-none"
       >
-        {sourceError && visibleItems.length === 0 ? (
+        {noSourcesConnected ? (
+          <p className="px-3 py-3 text-[12px] text-content/50">
+            Add a connection to start using the Inbox.
+          </p>
+        ) : sourceError && visibleItems.length === 0 ? (
           <p className="px-3 py-2 text-[12px] text-content/50">{sourceError}</p>
         ) : loading && items.length === 0 ? (
           <div className="flex justify-center py-10 text-content/40">
@@ -710,7 +833,9 @@ export function InboxView({
                 : source === "linear"
                   ? "No Linear issues match these filters"
                   : source === "gitlab"
-                    ? "No GitLab items match these filters"
+                    ? activeFilters.assignedToMe
+                      ? "Nothing needs your attention"
+                      : "No GitLab items match these filters"
                     : "No issues or pull requests match these filters"
               : source === "linear"
                 ? "No Linear issues"
@@ -788,6 +913,16 @@ export function InboxView({
     />
   ) : null;
 
+  const connectPortal =
+    connectMenuOpen && connectableSources.length > 0 ? (
+      <InboxConnectMenu
+        anchor={connectButtonRef}
+        sources={connectableSources}
+        onConnect={onOpenIntegrations}
+        onClose={() => setConnectMenuOpen(false)}
+      />
+    ) : null;
+
   return (
     <div
       role="region"
@@ -816,10 +951,7 @@ export function InboxView({
       <div className="flex min-h-0 min-w-0 flex-1">
         {list}
         <div className="relative flex min-h-0 min-w-0 flex-1">
-          <div
-            ref={detailLock}
-            className="min-h-0 min-w-0 flex-1 overflow-y-auto overscroll-none"
-          >
+          <div className="min-h-0 min-w-0 flex-1">
             <InboxDetailBody
               item={selected}
               cwd={cwd}
@@ -846,6 +978,7 @@ export function InboxView({
         </div>
       </div>
       {filtersPortal}
+      {connectPortal}
     </div>
   );
 }
@@ -873,9 +1006,7 @@ function InboxDetailBody({
     return (
       <div className="flex h-full flex-col items-center justify-center px-6 text-center">
         <Inbox className="mb-3 size-6 text-content/30" strokeWidth={1.75} />
-        <p className="text-[13px] text-content/45">
-          Select an inbox item
-        </p>
+        <p className="text-[13px] text-content/45">Select an inbox item</p>
       </div>
     );
   }
@@ -957,6 +1088,10 @@ function InboxCard({
   const name = projectName(item.projectPath);
   const linear = item.provider === "linear";
   const source = linear ? item.teamName || item.repo : item.repo || name;
+  const attentionLabel =
+    item.provider === "gitlab"
+      ? gitlabAttentionLabel(item.attentionReason ?? "")
+      : "";
   const unseen = isInboxEntryUnseen({
     key: inboxItemKey(item),
     updatedAt: item.updatedAt,
@@ -969,7 +1104,7 @@ function InboxCard({
       aria-current={active ? "true" : undefined}
       aria-label={`${status.label} ${kindLabel.toLowerCase()} ${inboxItemRef(
         item,
-      )}: ${item.title}${unseen ? ", new" : ""}${relatedSessionCount > 0 ? `, ${relatedSessionCount} related ${relatedSessionCount === 1 ? "thread" : "threads"}` : ""}`}
+      )}: ${item.title}${attentionLabel ? `, ${attentionLabel}` : ""}${unseen ? ", new" : ""}${relatedSessionCount > 0 ? `, ${relatedSessionCount} related ${relatedSessionCount === 1 ? "thread" : "threads"}` : ""}`}
       onClick={onSelect}
       className={`flex w-full flex-col rounded-md border px-2.5 py-2 text-left ${
         active
@@ -989,6 +1124,7 @@ function InboxCard({
           />
           <span className="min-w-0 truncate text-[11px] text-content/50">
             {kindLabel} · {inboxItemRef(item)}
+            {attentionLabel ? ` · ${attentionLabel}` : ""}
           </span>
         </span>
         {relatedSessionCount > 0 || time || unseen ? (
@@ -1018,7 +1154,7 @@ function InboxCard({
       </span>
       <span className="mt-1 flex min-w-0 items-center gap-2">
         <span className="flex min-w-0 flex-1 items-center gap-1.5 text-[11px] text-content/45">
-          {linear ? null : logoPath ? (
+          {linear || !item.projectPath ? null : logoPath ? (
             <ProjectLogoIcon
               path={logoPath}
               className="size-3.5 shrink-0 rounded-sm"
@@ -1046,7 +1182,7 @@ function InboxCard({
   );
 }
 
-function InboxDetail({
+export function InboxDetail({
   item,
   cwd,
   projects,
@@ -1065,6 +1201,7 @@ function InboxDetail({
   onStart?: (item: InboxItem, body?: string) => void | Promise<void>;
   onOpenSession?: (sessionId: string) => void | Promise<void>;
 }) {
+  const detailLock = useLockOverscroll<HTMLDivElement>();
   const linear = item.provider === "linear";
   const gitlab = item.provider === "gitlab";
   const isPr = !linear && item.kind === "pr";
@@ -1077,19 +1214,19 @@ function InboxDetail({
   const cached = linear
     ? peekLinearIssueDetails(item.id ?? "")
     : gitlabKind
-      ? peekGitlabWorkItemDetails(item.projectPath, gitlabKind, item.number)
+      ? peekGitlabWorkItemDetails(item.repo, gitlabKind, item.number)
       : githubKind
         ? peekGithubWorkItemDetails(item.projectPath, githubKind, item.number)
         : null;
   const cachedDiff = isPr
     ? gitlab
-      ? peekGitlabMrDiff(item.projectPath, item.number)
+      ? peekGitlabMrDiff(item.repo, item.number)
       : peekGithubPrDiff(item.projectPath, item.number)
     : null;
   const cachedThread = linear
     ? peekLinearIssueThread(item.id ?? "")
     : gitlabKind
-      ? peekGitlabWorkItemThread(item.projectPath, gitlabKind, item.number)
+      ? peekGitlabWorkItemThread(item.repo, gitlabKind, item.number)
       : githubKind
         ? peekGithubWorkItemThread(item.projectPath, githubKind, item.number)
         : null;
@@ -1115,6 +1252,7 @@ function InboxDetail({
   const [startProject, setStartProject] = useState(defaultProject);
   const [starting, setStarting] = useState(false);
   const [startError, setStartError] = useState<string | null>(null);
+  const chooseStartProject = linear || (gitlab && !item.projectPath);
   const status = linear
     ? item.state || inboxItemStatus(item)
     : inboxItemStatus(item);
@@ -1123,7 +1261,12 @@ function InboxDetail({
   const source = linear
     ? item.teamName || item.repo
     : item.repo || projectName(item.projectPath);
-  const markdownCwd = linear ? startProject || cwd : item.projectPath || cwd;
+  const attentionLabel = gitlab
+    ? gitlabAttentionLabel(item.attentionReason ?? "")
+    : "";
+  const markdownCwd = chooseStartProject
+    ? startProject || cwd
+    : item.projectPath || cwd;
   const authorName = details?.author?.trim() ?? "";
   const extraAssignees = item.assignees.filter(
     (person) =>
@@ -1151,7 +1294,7 @@ function InboxDetail({
     const cachedDetails = linear
       ? peekLinearIssueDetails(item.id ?? "")
       : gitlabKind
-        ? peekGitlabWorkItemDetails(item.projectPath, gitlabKind, item.number)
+        ? peekGitlabWorkItemDetails(item.repo, gitlabKind, item.number)
         : githubKind
           ? peekGithubWorkItemDetails(item.projectPath, githubKind, item.number)
           : null;
@@ -1169,7 +1312,7 @@ function InboxDetail({
         ? linearIssueDetails(item.id)
         : Promise.reject(new Error("Missing Linear issue"))
       : gitlabKind
-        ? gitlabWorkItemDetails(item.projectPath, gitlabKind, item.number)
+        ? gitlabWorkItemDetails(item.repo, gitlabKind, item.number)
         : githubKind
           ? githubWorkItemDetails(item.projectPath, githubKind, item.number)
           : Promise.reject(new Error("Unknown inbox item"));
@@ -1196,6 +1339,7 @@ function InboxDetail({
     item.id,
     item.number,
     item.projectPath,
+    item.repo,
     linear,
     revision,
   ]);
@@ -1234,7 +1378,7 @@ function InboxDetail({
     }
     if (gitlabKind) {
       const cachedThread = peekGitlabWorkItemThread(
-        item.projectPath,
+        item.repo,
         gitlabKind,
         item.number,
       );
@@ -1247,7 +1391,7 @@ function InboxDetail({
         setThreadError(null);
         setThread(null);
       }
-      void gitlabWorkItemThread(item.projectPath, gitlabKind, item.number)
+      void gitlabWorkItemThread(item.repo, gitlabKind, item.number)
         .then((next) => {
           if (cancelled) return;
           setThread(next);
@@ -1303,6 +1447,7 @@ function InboxDetail({
     item.id,
     item.number,
     item.projectPath,
+    item.repo,
     linear,
     revision,
   ]);
@@ -1311,7 +1456,7 @@ function InboxDetail({
     if (!isPr || tab !== "code") return;
     let cancelled = false;
     const cachedDiff = gitlab
-      ? peekGitlabMrDiff(item.projectPath, item.number)
+      ? peekGitlabMrDiff(item.repo, item.number)
       : peekGithubPrDiff(item.projectPath, item.number);
     if (cachedDiff) {
       setPrDiff(cachedDiff);
@@ -1323,7 +1468,7 @@ function InboxDetail({
       setPrDiff(null);
     }
     const pending = gitlab
-      ? gitlabMrDiff(item.projectPath, item.number)
+      ? gitlabMrDiff(item.repo, item.number)
       : githubPrDiff(item.projectPath, item.number);
     void pending
       .then((next) => {
@@ -1342,7 +1487,7 @@ function InboxDetail({
     return () => {
       cancelled = true;
     };
-  }, [gitlab, isPr, item.number, item.projectPath, revision, tab]);
+  }, [gitlab, isPr, item.number, item.projectPath, item.repo, revision, tab]);
 
   const postComment = async (body: string) => {
     setPosting(true);
@@ -1360,21 +1505,13 @@ function InboxDetail({
         return;
       }
       if (gitlabKind) {
-        await gitlabWorkItemComment(
-          item.projectPath,
-          gitlabKind,
-          item.number,
-          body,
-        );
+        await gitlabWorkItemComment(item.repo, gitlabKind, item.number, body);
         setReplyTo(null);
         try {
           setThread(
-            await gitlabWorkItemThread(
-              item.projectPath,
-              gitlabKind,
-              item.number,
-              { force: true },
-            ),
+            await gitlabWorkItemThread(item.repo, gitlabKind, item.number, {
+              force: true,
+            }),
           );
         } catch (err: unknown) {
           setPostError(err instanceof Error ? err.message : String(err));
@@ -1413,265 +1550,313 @@ function InboxDetail({
   };
 
   return (
-    <div className={`mx-auto flex w-full flex-col gap-5 px-8 py-8 max-w-5xl`}>
-      <header className="flex flex-col gap-3">
-        <div className="flex items-center gap-2 text-[12px] text-content/50">
-          <InboxProviderMark provider={item.provider} className="size-3.5" />
-          <span>
-            {item.kind === "pr"
-              ? gitlab
-                ? "Merge request"
-                : "Pull request"
-              : "Issue"}
-          </span>
-          <span className="tabular-nums">{inboxItemRef(item)}</span>
-          <span className={`flex items-center gap-1 ${statusMark.className}`}>
-            <statusMark.Icon className="size-3.5" strokeWidth={1.75} />
-            {status}
-          </span>
-          {source ? <span className="truncate">{source}</span> : null}
-        </div>
-        <h1 className="text-[20px] font-semibold leading-tight text-content">
-          {item.title}
-        </h1>
-        <div className="flex flex-wrap items-center gap-2 text-[12px] text-content/50">
-          {authorName ? (
-            <InboxPerson
-              name={authorName}
-              avatarUrl={inboxPersonAvatarUrl(
-                item.provider,
-                authorName,
-                details?.authorAvatarUrl,
-              )}
-              size={16}
-            />
-          ) : null}
-          {showAssignment ? (
-            <>
-              {authorName ? <span aria-hidden>·</span> : null}
-              {extraAssignees.length > 0 ? (
-                <span className="flex min-w-0 flex-wrap items-center gap-2">
-                  {extraAssignees.map((person) => (
-                    <InboxPerson
-                      key={person.login}
-                      name={person.login}
-                      avatarUrl={inboxPersonAvatarUrl(
-                        item.provider,
-                        person.login,
-                        person.avatarUrl,
-                      )}
-                      size={16}
-                    />
-                  ))}
-                </span>
-              ) : (
-                <span>Unassigned</span>
-              )}
-            </>
-          ) : null}
-          {linear ? null : (
-            <>
-              <span aria-hidden>·</span>
-              <span>{projectName(item.projectPath)}</span>
-            </>
-          )}
-          {formatRelativeTime(item.updatedAt) ? (
-            <>
-              <span aria-hidden>·</span>
-              <span>Updated {formatRelativeTime(item.updatedAt)}</span>
-            </>
-          ) : null}
-          {baseRef && headRef ? (
-            <>
-              <span aria-hidden>·</span>
-              <span className="inline-flex min-w-0 items-center gap-1">
-                <GitCompare className="size-3 shrink-0" strokeWidth={1.75} />
-                <span className="min-w-0 truncate">
-                  {baseRef} ← {headRef}
-                </span>
+    <div className="flex h-full min-h-0 min-w-0 flex-col">
+      <div
+        data-inbox-detail-header
+        className="relative z-10 shrink-0 border-b border-content/10"
+      >
+        <div
+          className={`mx-auto flex w-full max-w-5xl flex-col gap-2.5 px-8 pt-5 ${
+            isPr ? "" : "pb-5"
+          }`}
+        >
+          <header className="flex flex-col gap-2.5">
+            <div className="flex min-w-0 items-center gap-2 text-[12px] text-content/50">
+              <InboxProviderMark
+                provider={item.provider}
+                className="size-3.5 shrink-0"
+              />
+              <span className="shrink-0">
+                {item.kind === "pr"
+                  ? gitlab
+                    ? "Merge request"
+                    : "Pull request"
+                  : "Issue"}
               </span>
-            </>
-          ) : null}
-          {reviewLabel ? (
-            <>
-              <span aria-hidden>·</span>
-              <span className={reviewClass}>{reviewLabel}</span>
-            </>
-          ) : null}
-        </div>
-        {item.labels.length > 0 ? (
-          <div className="flex flex-wrap gap-1">
-            {item.labels.map((label) => (
-              <InboxLabel key={label.name} label={label} />
-            ))}
-          </div>
-        ) : null}
-        {relatedSessions.length > 0 ? (
-          <div className="flex flex-wrap items-center gap-1.5">
-            <span className="mr-0.5 inline-flex items-center gap-1 text-[11px] text-content/45">
-              <MessageMultiple className="size-3.5" strokeWidth={1.75} />
-              Related {relatedSessions.length === 1 ? "thread" : "threads"}
-            </span>
-            {relatedSessions.map((session) => {
-              const title = sessionDisplayTitle(session.title, session.harness);
-              return (
-                <button
-                  key={session.id}
-                  type="button"
-                  title={`Open thread: ${title}`}
-                  onClick={() => void onOpenSession?.(session.id)}
-                  className="inline-flex max-w-64 items-center gap-1 rounded-md bg-content/5 px-2 py-1 text-[11px] text-content/70 hover:bg-content/10 hover:text-content"
-                >
-                  <span className="truncate">{title}</span>
-                  {session.archived ? (
-                    <span className="shrink-0 text-content/40">Archived</span>
-                  ) : null}
-                </button>
-              );
-            })}
-          </div>
-        ) : null}
-        <div className="flex flex-wrap items-center gap-2 pt-1">
-          {onStart && item.kind !== "pr" ? (
-            <>
-              <button
-                type="button"
-                disabled={
-                  starting || (linear && (!startProject || loading || !!error))
-                }
-                onClick={() => {
-                  if (starting) return;
-                  setStarting(true);
-                  setStartError(null);
-                  const next = linear
-                    ? { ...item, projectPath: startProject }
-                    : item;
-                  void Promise.resolve(
-                    onStart(next, linear ? (details?.body ?? "") : undefined),
-                  )
-                    .catch((err: unknown) => {
-                      setStartError(
-                        err instanceof Error ? err.message : String(err),
-                      );
-                    })
-                    .finally(() => setStarting(false));
-                }}
-                className={`${ACTION_FILLED} disabled:cursor-default disabled:opacity-40`}
+              <span className="shrink-0 tabular-nums">
+                {inboxItemRef(item)}
+              </span>
+              <span
+                className={`flex shrink-0 items-center gap-1 ${statusMark.className}`}
               >
-                {starting ? "Sending..." : "Send to agent"}
-              </button>
-              {linear ? (
-                <InboxProjectPicker
-                  projects={projects}
-                  value={startProject}
-                  onChange={setStartProject}
+                <statusMark.Icon className="size-3.5" strokeWidth={1.75} />
+                {status}
+              </span>
+              {attentionLabel ? (
+                <span className="shrink-0 text-accent">{attentionLabel}</span>
+              ) : null}
+              {source ? (
+                <span className="min-w-0 truncate">{source}</span>
+              ) : null}
+            </div>
+            <h1
+              title={item.title}
+              className="line-clamp-2 text-[20px] font-semibold leading-tight text-content"
+            >
+              {item.title}
+            </h1>
+            <div className="flex min-w-0 items-center gap-2 overflow-hidden whitespace-nowrap text-[12px] text-content/50">
+              {authorName ? (
+                <InboxPerson
+                  name={authorName}
+                  avatarUrl={inboxPersonAvatarUrl(
+                    item.provider,
+                    authorName,
+                    details?.authorAvatarUrl,
+                  )}
+                  size={16}
                 />
               ) : null}
-            </>
+              {showAssignment ? (
+                <>
+                  {authorName ? <span aria-hidden>·</span> : null}
+                  {extraAssignees.length > 0 ? (
+                    <span className="flex min-w-0 items-center gap-2 overflow-hidden">
+                      {extraAssignees.map((person) => (
+                        <InboxPerson
+                          key={person.login}
+                          name={person.login}
+                          avatarUrl={inboxPersonAvatarUrl(
+                            item.provider,
+                            person.login,
+                            person.avatarUrl,
+                          )}
+                          size={16}
+                        />
+                      ))}
+                    </span>
+                  ) : (
+                    <span>Unassigned</span>
+                  )}
+                </>
+              ) : null}
+              {formatRelativeTime(item.updatedAt) ? (
+                <>
+                  <span aria-hidden>·</span>
+                  <span>Updated {formatRelativeTime(item.updatedAt)}</span>
+                </>
+              ) : null}
+              {baseRef && headRef ? (
+                <>
+                  <span aria-hidden>·</span>
+                  <span className="inline-flex min-w-0 items-center gap-1">
+                    <GitCompare
+                      className="size-3 shrink-0"
+                      strokeWidth={1.75}
+                    />
+                    <span className="min-w-0 truncate">
+                      {baseRef} ← {headRef}
+                    </span>
+                  </span>
+                </>
+              ) : null}
+              {reviewLabel ? (
+                <>
+                  <span aria-hidden>·</span>
+                  <span className={reviewClass}>{reviewLabel}</span>
+                </>
+              ) : null}
+            </div>
+            {relatedSessions.length > 0 ? (
+              <div className="flex min-w-0 items-center gap-1.5 overflow-hidden">
+                <span className="mr-0.5 inline-flex shrink-0 items-center gap-1 text-[11px] text-content/45">
+                  <MessageMultiple className="size-3.5" strokeWidth={1.75} />
+                  Related {relatedSessions.length === 1 ? "thread" : "threads"}
+                </span>
+                {relatedSessions.map((session) => {
+                  const title = sessionDisplayTitle(
+                    session.title,
+                    session.harness,
+                  );
+                  return (
+                    <button
+                      key={session.id}
+                      type="button"
+                      title={`Open thread: ${title}`}
+                      onClick={() => void onOpenSession?.(session.id)}
+                      className="inline-flex min-w-0 max-w-64 items-center gap-1 rounded-md bg-content/5 px-2 py-1 text-[11px] text-content/70 hover:bg-content/10 hover:text-content"
+                    >
+                      <span className="truncate">{title}</span>
+                      {session.archived ? (
+                        <span className="shrink-0 text-content/40">
+                          Archived
+                        </span>
+                      ) : null}
+                    </button>
+                  );
+                })}
+              </div>
+            ) : null}
+            <div className="flex flex-wrap items-center gap-2 pt-0.5">
+              {onStart && item.kind !== "pr" ? (
+                <>
+                  <button
+                    type="button"
+                    disabled={
+                      starting ||
+                      (chooseStartProject &&
+                        (projects.length === 0 ||
+                          !startProject ||
+                          loading ||
+                          !!error))
+                    }
+                    onClick={() => {
+                      if (starting) return;
+                      setStarting(true);
+                      setStartError(null);
+                      const next = chooseStartProject
+                        ? { ...item, projectPath: startProject }
+                        : item;
+                      void Promise.resolve(
+                        onStart(
+                          next,
+                          linear ? (details?.body ?? "") : undefined,
+                        ),
+                      )
+                        .catch((err: unknown) => {
+                          setStartError(
+                            err instanceof Error ? err.message : String(err),
+                          );
+                        })
+                        .finally(() => setStarting(false));
+                    }}
+                    className={`${ACTION_FILLED} disabled:cursor-default disabled:opacity-40`}
+                  >
+                    {starting ? "Sending..." : "Send to agent"}
+                  </button>
+                  {chooseStartProject ? (
+                    <InboxProjectPicker
+                      projects={projects}
+                      value={startProject}
+                      onChange={setStartProject}
+                    />
+                  ) : null}
+                </>
+              ) : null}
+              <button
+                type="button"
+                onClick={onDiscuss}
+                className={item.kind === "pr" ? ACTION_FILLED : ACTION_OUTLINE}
+              >
+                <MessageSquare className="size-3.5" strokeWidth={1.75} /> Ask
+              </button>
+              <button
+                type="button"
+                onClick={() => void openUrl(item.url)}
+                className={ACTION_GHOST}
+              >
+                <ExternalLink className="size-3.5" strokeWidth={1.75} />
+                {item.kind === "pr"
+                  ? gitlab
+                    ? "Review on GitLab"
+                    : "Review on GitHub"
+                  : linear
+                    ? "Open in Linear"
+                    : gitlab
+                      ? "Open on GitLab"
+                      : "Open on GitHub"}
+              </button>
+            </div>
+            {startError ? (
+              <p className="text-[12px] text-red-400/90">{startError}</p>
+            ) : null}
+          </header>
+          {isPr ? (
+            <div
+              role="tablist"
+              aria-label={
+                gitlab ? "Merge request sections" : "Pull request sections"
+              }
+              className="flex h-9 items-stretch gap-4"
+            >
+              <InboxDetailTab
+                label="Summary"
+                selected={tab === "summary"}
+                onSelect={() => setTab("summary")}
+              />
+              <InboxDetailTab
+                label="Code"
+                selected={tab === "code"}
+                onSelect={() => setTab("code")}
+              />
+            </div>
           ) : null}
-          <button
-            type="button"
-            onClick={onDiscuss}
-            className={item.kind === "pr" ? ACTION_FILLED : ACTION_OUTLINE}
-          >
-            <MessageSquare className="size-3.5" strokeWidth={1.75} /> Ask
-          </button>
-          <button
-            type="button"
-            onClick={() => void openUrl(item.url)}
-            className={ACTION_GHOST}
-          >
-            <ExternalLink className="size-3.5" strokeWidth={1.75} />
-            {item.kind === "pr"
-              ? gitlab
-                ? "Review on GitLab"
-                : "Review on GitHub"
-              : linear
-                ? "Open in Linear"
-                : gitlab
-                  ? "Open on GitLab"
-                  : "Open on GitHub"}
-          </button>
         </div>
-        {startError ? (
-          <p className="text-[12px] text-red-400/90">{startError}</p>
-        ) : null}
-      </header>
-      {isPr ? (
-        <div
-          role="tablist"
-          aria-label={
-            gitlab ? "Merge request sections" : "Pull request sections"
-          }
-          className="flex h-9 gap-4 items-stretch border-b border-content/10"
-        >
-          <InboxDetailTab
-            label="Summary"
-            selected={tab === "summary"}
-            onSelect={() => setTab("summary")}
-          />
-          <InboxDetailTab
-            label="Code"
-            selected={tab === "code"}
-            onSelect={() => setTab("code")}
-          />
-        </div>
-      ) : (
-        <div className="border-t border-content/10" />
-      )}
-      {isPr && tab === "code" ? (
-        diffLoading ? (
-          <div className="flex justify-center py-10 text-content/40">
-            <LoaderCircle className="size-4 animate-spin" strokeWidth={1.75} />
-          </div>
-        ) : diffError ? (
-          <p className="text-[13px] text-content/50">{diffError}</p>
-        ) : prDiff ? (
-          <InboxPrDiff
-            key={`${item.projectPath}:${item.number}:${revision}`}
-            diff={prDiff}
-          />
-        ) : (
-          <p className="text-[13px] text-content/45">No file changes</p>
-        )
-      ) : loading ? (
-        <div className="flex justify-center py-10 text-content/40">
-          <LoaderCircle className="size-4 animate-spin" strokeWidth={1.75} />
-        </div>
-      ) : error ? (
-        <p className="text-[13px] text-content/50">{error}</p>
-      ) : (
-        <>
-          {details?.body.trim() ? (
-            <AgentMarkdown
-              text={details.body}
-              cwd={markdownCwd}
-              allowRemoteMedia
-            />
+      </div>
+      <div
+        ref={detailLock}
+        data-inbox-detail-scroll
+        className="min-h-0 min-w-0 flex-1 overflow-y-auto overscroll-none"
+      >
+        <div className="mx-auto flex w-full max-w-5xl flex-col gap-5 px-8 py-5">
+          {item.labels.length > 0 ? (
+            <div className="flex flex-wrap gap-1">
+              {item.labels.map((label) => (
+                <InboxLabel key={label.name} label={label} />
+              ))}
+            </div>
+          ) : null}
+          {isPr && tab === "code" ? (
+            diffLoading ? (
+              <div className="flex justify-center py-10 text-content/40">
+                <LoaderCircle
+                  className="size-4 animate-spin"
+                  strokeWidth={1.75}
+                />
+              </div>
+            ) : diffError ? (
+              <p className="text-[13px] text-content/50">{diffError}</p>
+            ) : prDiff ? (
+              <InboxPrDiff
+                key={`${item.projectPath}:${item.number}:${revision}`}
+                diff={prDiff}
+              />
+            ) : (
+              <p className="text-[13px] text-content/45">No file changes</p>
+            )
+          ) : loading ? (
+            <div className="flex justify-center py-10 text-content/40">
+              <LoaderCircle
+                className="size-4 animate-spin"
+                strokeWidth={1.75}
+              />
+            </div>
+          ) : error ? (
+            <p className="text-[13px] text-content/50">{error}</p>
           ) : (
-            <p className="text-[13px] text-content/45">No description</p>
+            <>
+              {details?.body.trim() ? (
+                <AgentMarkdown
+                  text={details.body}
+                  cwd={markdownCwd}
+                  allowRemoteMedia
+                />
+              ) : (
+                <p className="text-[13px] text-content/45">No description</p>
+              )}
+              <InboxComments
+                thread={thread}
+                loading={threadLoading}
+                error={threadError}
+                cwd={markdownCwd}
+                provider={item.provider}
+                replyMode={linear ? "parent" : gitlab ? undefined : "thread"}
+                onReply={setReplyTo}
+              />
+              <InboxCommentForm
+                replyTo={replyTo}
+                posting={posting}
+                error={postError}
+                onCancelReply={() => {
+                  setReplyTo(null);
+                  setPostError(null);
+                }}
+                onSubmit={postComment}
+              />
+            </>
           )}
-          <InboxComments
-            thread={thread}
-            loading={threadLoading}
-            error={threadError}
-            cwd={markdownCwd}
-            provider={item.provider}
-            replyMode={linear ? "parent" : gitlab ? undefined : "thread"}
-            onReply={setReplyTo}
-          />
-          <InboxCommentForm
-            replyTo={replyTo}
-            posting={posting}
-            error={postError}
-            onCancelReply={() => {
-              setReplyTo(null);
-              setPostError(null);
-            }}
-            onSubmit={postComment}
-          />
-        </>
-      )}
+        </div>
+      </div>
     </div>
   );
 }

@@ -1,8 +1,11 @@
 import { invoke } from "@tauri-apps/api/core";
+import { recoverCursorSubagents } from "./harness/cursorSubagents";
 import { persistableAttachment } from "./attachments";
 import type { ContextUsage } from "./contextUsage";
 import { normalizeProjectPath } from "./recents";
 import type {
+  AgentRunMeta,
+  AgentStep,
   Block,
   HarnessId,
   HandoffMeta,
@@ -13,6 +16,7 @@ import type {
   Session,
   TaskListMeta,
   PlanBlockMeta,
+  TurnModel,
 } from "./session";
 import { HARNESSES, RUNTIME_MODES } from "./session";
 
@@ -273,7 +277,7 @@ export async function getSession(sessionId: string): Promise<Session | null> {
     sessionId,
   });
   if (!record) return null;
-  return recordToSession(record);
+  return recoverCursorSubagents(recordToSession(record));
 }
 
 export async function deleteSession(sessionId: string): Promise<void> {
@@ -377,6 +381,8 @@ function sanitizeBlock(block: Block): Block | null {
   }
   if (block.startedAt != null) next.startedAt = block.startedAt;
   if (block.durationMs != null) next.durationMs = block.durationMs;
+  const turnModel = sanitizeTurnModel(block.turnModel);
+  if (block.role === "user" && turnModel) next.turnModel = turnModel;
   if (block.tool) next.tool = block.tool;
   if (block.approval?.decided) {
     next.approval = {
@@ -387,6 +393,8 @@ function sanitizeBlock(block: Block): Block | null {
     // Drop stale live approval prompts; request ids don't survive restarts.
     if (block.role === "approval") return null;
   }
+  const agentRun = sanitizeAgentRun(block.agentRun);
+  if (agentRun) next.agentRun = agentRun;
   const taskList = sanitizeTaskList(block.taskList);
   if (taskList) next.taskList = taskList;
   else if (block.role === "tasks") return null;
@@ -403,6 +411,25 @@ function sanitizeBlock(block: Block): Block | null {
   const noteCard = sanitizeNoteCard(block.noteCard);
   if (noteCard) next.noteCard = noteCard;
   return next;
+}
+
+function sanitizeTurnModel(value: unknown): TurnModel | undefined {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return undefined;
+  }
+  const record = value as Record<string, unknown>;
+  const harness = record.harness;
+  const id = typeof record.id === "string" ? record.id.trim() : "";
+  const name = typeof record.name === "string" ? record.name.trim() : "";
+  if (
+    typeof harness !== "string" ||
+    !HARNESSES.includes(harness as HarnessId) ||
+    !id ||
+    !name
+  ) {
+    return undefined;
+  }
+  return { harness: harness as HarnessId, id, name };
 }
 
 function sanitizePlan(value: unknown, text: string): PlanBlockMeta | null {
@@ -429,6 +456,56 @@ function sanitizePlan(value: unknown, text: string): PlanBlockMeta | null {
     ...(originalText ? { originalText } : {}),
     ...(approvedText ? { approvedText } : {}),
     ...(record.edited === true ? { edited: true } : {}),
+  };
+}
+
+/**
+ * How much of a delegated run's trail a saved session keeps. Reopening a
+ * session is for reading what the subagent concluded, not for replaying every
+ * call it made, and a long run would otherwise dominate the snapshot.
+ */
+const PERSISTED_AGENT_STEPS = 100;
+
+function sanitizeAgentRun(value: unknown): AgentRunMeta | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const record = value as Record<string, unknown>;
+  if (!Array.isArray(record.steps)) return null;
+  const steps = record.steps.flatMap((entry): AgentStep[] => {
+    if (!entry || typeof entry !== "object" || Array.isArray(entry)) return [];
+    const row = entry as Record<string, unknown>;
+    const id = typeof row.id === "string" ? row.id : "";
+    const kind = row.kind;
+    if (
+      !id ||
+      (kind !== "tool" && kind !== "message" && kind !== "reasoning")
+    ) {
+      return [];
+    }
+    const text = typeof row.text === "string" ? row.text : "";
+    return [
+      {
+        id,
+        kind,
+        text,
+        ...(typeof row.toolKind === "string" ? { toolKind: row.toolKind } : {}),
+        ...(typeof row.status === "string" ? { status: row.status } : {}),
+        ...(row.preview && typeof row.preview === "object"
+          ? { preview: row.preview as AgentStep["preview"] }
+          : {}),
+      },
+    ];
+  });
+  const name = typeof record.name === "string" ? record.name.trim() : "";
+  if (!name && steps.length === 0) return null;
+  return {
+    name: name || "Subagent",
+    ...(typeof record.model === "string" && record.model.trim()
+      ? { model: record.model.trim() }
+      : {}),
+    ...(typeof record.agentType === "string" && record.agentType.trim()
+      ? { agentType: record.agentType.trim() }
+      : {}),
+    steps: steps.slice(-PERSISTED_AGENT_STEPS),
   };
 }
 

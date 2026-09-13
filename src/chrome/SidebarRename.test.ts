@@ -3,10 +3,10 @@ import { act, createElement, type ComponentProps } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { formatSessionTitle } from "../lib/session";
+import { formatReminderTime } from "../lib/sessionReminders";
 import { Sidebar } from "./Sidebar";
 
 // Keep native services out of these menu/input interaction tests.
-vi.mock("../hooks/useInboxUnseen", () => ({ useInboxUnseen: () => false }));
 vi.mock("../hooks/useProjectDiffStats", () => ({
   useProjectDiffStats: () => null,
 }));
@@ -222,5 +222,171 @@ describe("sidebar session rename", () => {
       "session-1",
       "My draft title",
     );
+  });
+});
+
+describe("sidebar pinned sessions", () => {
+  it("renders them as a collapsible folder-style group without a divider", () => {
+    props.sessions = [
+      { ...props.sessions[0], pinned: true },
+      {
+        ...props.sessions[0],
+        id: "session-2",
+        title: formatSessionTitle("codex", "Unpinned conversation"),
+        updatedAt: props.sessions[0].updatedAt - 1,
+      },
+    ];
+    act(() => render());
+
+    const group = container.querySelector<HTMLElement>(
+      "[data-pinned-sessions]",
+    )!;
+    const toggle = group.querySelector<HTMLButtonElement>(
+      'button[title="Pinned"]',
+    )!;
+    expect(toggle.getAttribute("aria-expanded")).toBe("true");
+    expect(
+      group.querySelector('[data-session-card="session-1"]'),
+    ).not.toBeNull();
+    expect(container.querySelector("li[aria-hidden]")).toBeNull();
+
+    act(() => toggle.click());
+    expect(toggle.getAttribute("aria-expanded")).toBe("false");
+    expect(group.querySelector('[data-session-card="session-1"]')).toBeNull();
+    expect(
+      JSON.parse(
+        localStorage.getItem("monocode.pinnedSessionsCollapsed") ?? "{}",
+      ),
+    ).toEqual({ "/workspace/project": true });
+  });
+});
+
+describe("sidebar linked work item updates", () => {
+  it("renders an unread dot without changing session order", () => {
+    props.busySessionIds = new Set();
+    props.activeSessionId = undefined;
+    props.sessions = [
+      {
+        ...props.sessions[0],
+        id: "session-2",
+        title: formatSessionTitle("codex", "Newer conversation"),
+        updatedAt: 200,
+      },
+      {
+        ...props.sessions[0],
+        id: "session-1",
+        title: formatSessionTitle("codex", "Updated PR conversation"),
+        updatedAt: 100,
+        linkedWorkItem: {
+          kind: "pr",
+          repo: "acme/app",
+          number: 42,
+          url: "https://github.com/acme/app/pull/42",
+        },
+      },
+    ];
+    props.linkedSessionUpdateIds = new Set(["session-1"]);
+    act(() => render());
+
+    expect(
+      Array.from(
+        container.querySelectorAll<HTMLElement>("[data-session-card]"),
+      ).map((row) => row.dataset.sessionCard),
+    ).toEqual(["session-2", "session-1"]);
+    expect(
+      card().querySelector('[aria-label="Linked work item updated"]'),
+    ).not.toBeNull();
+  });
+});
+
+describe("sidebar session reminders", () => {
+  function openReminderMenu() {
+    act(() =>
+      card().dispatchEvent(
+        new MouseEvent("contextmenu", { bubbles: true, cancelable: true }),
+      ),
+    );
+    const trigger = Array.from(
+      document.querySelectorAll<HTMLButtonElement>('[role="menuitem"]'),
+    ).find((item) => item.textContent === "Remind me")!;
+    act(() =>
+      trigger.dispatchEvent(new MouseEvent("mouseover", { bubbles: true })),
+    );
+    return document.querySelector<HTMLElement>(
+      '[role="menu"][aria-label="Remind me"]',
+    )!;
+  }
+
+  it("schedules the selected session from the hover submenu", () => {
+    props.onSetReminders = vi.fn();
+    act(() => render());
+    const submenu = openReminderMenu();
+    const preset = Array.from(
+      submenu.querySelectorAll<HTMLButtonElement>("button"),
+    ).find((item) => item.textContent?.startsWith("In 3 hours"))!;
+    const before = Date.now();
+    act(() => preset.click());
+    const [ids, dueAt] = vi.mocked(props.onSetReminders).mock.calls[0];
+    expect(ids).toEqual(["session-1"]);
+    expect(dueAt).toBeGreaterThanOrEqual(before + 3 * 60 * 60 * 1000);
+    expect(dueAt).toBeLessThanOrEqual(Date.now() + 3 * 60 * 60 * 1000);
+    expect(document.querySelector('[role="menu"]')).toBeNull();
+  });
+
+  it("groups reminders first without a card clock and offers cancellation first", () => {
+    props.onSetReminders = vi.fn();
+    props.onCancelReminders = vi.fn();
+    props.reminders = [
+      {
+        sessionId: "session-1",
+        dueAt: Date.now() + 3600_000,
+        firedAt: null,
+        title: "Original conversation",
+        harness: "codex",
+        cwd: props.cwd,
+      },
+    ];
+    props.sessions = [
+      { ...props.sessions[0], pinned: true },
+      { ...props.sessions[0], id: "session-2", pinned: true },
+    ];
+    act(() => render());
+    const group = container.querySelector<HTMLElement>(
+      "[data-reminder-sessions]",
+    )!;
+    expect(group.parentElement!.firstElementChild).toBe(group);
+    expect(group.querySelector('[data-session-card="session-1"]')).toBe(card());
+    expect(
+      container.querySelectorAll('[data-session-card="session-1"]'),
+    ).toHaveLength(1);
+    expect(group.hasAttribute("data-session-folder")).toBe(false);
+    expect(
+      group.querySelector('button[title="Reminders"]')!.className,
+    ).not.toContain("cursor-grab");
+    expect(card().querySelector('[aria-label^="Reminder:"]')).toBeNull();
+    act(() =>
+      card().dispatchEvent(
+        new MouseEvent("contextmenu", { bubbles: true, cancelable: true }),
+      ),
+    );
+    const cancel = document.querySelector<HTMLButtonElement>(
+      '[aria-label="Session actions"] [role="menuitem"]',
+    )!;
+    expect(cancel.textContent).toBe(
+      `Cancel reminder${formatReminderTime(props.reminders[0].dueAt)}`,
+    );
+    act(() => cancel.click());
+    expect(props.onCancelReminders).toHaveBeenCalledExactlyOnceWith([
+      "session-1",
+    ]);
+    expect(props.onSetReminders).not.toHaveBeenCalled();
+    props.reminders = [];
+    act(() => render());
+    expect(container.querySelector("[data-reminder-sessions]")).toBeNull();
+    expect(
+      container.querySelector(
+        '[data-pinned-sessions] [data-session-card="session-1"]',
+      ),
+    ).toBe(card());
   });
 });

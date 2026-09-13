@@ -1,4 +1,5 @@
 import type { Attachment, RuntimeMode, ToolPreview } from "../session";
+import { attachmentPath } from "../attachments";
 import { isTaskListToolName } from "../taskList";
 import { extractToolPreview } from "./preview";
 import type { HarnessEvent } from "./types";
@@ -164,12 +165,10 @@ export function toOpenCodeFileParts(
     url: string;
   }> = [];
   for (const attachment of attachments ?? []) {
-    const url = attachment.path
-      ? toFileUrl(attachment.path)
-      : attachment.data
+    const url =
+      !attachment.path && attachment.data
         ? `data:${attachment.mimeType};base64,${attachment.data}`
-        : null;
-    if (!url) continue;
+        : toFileUrl(attachmentPath(attachment));
     parts.push({
       type: "file",
       mime: attachment.mimeType,
@@ -303,7 +302,16 @@ export function detailFromToolPart(part: OpenCodePart): string | undefined {
   const state = part.state ?? {};
   const status = typeof state.status === "string" ? state.status : "";
   if (status === "completed" && typeof state.output === "string") return state.output;
-  if (status === "error" && typeof state.error === "string") return state.error;
+  if (status === "error") {
+    if (typeof state.error === "string") return state.error;
+    const error = asRecord(state.error);
+    const data = asRecord(error?.data);
+    return (
+      stringField(data, "message") ??
+      stringField(error, "message") ??
+      stringField(asRecord(error?.error), "message")
+    );
+  }
   if (status === "running" && typeof state.title === "string") return state.title;
   return undefined;
 }
@@ -358,13 +366,42 @@ export function contextUsedFromMessageInfo(
   return used > 0 ? used : undefined;
 }
 
+/**
+ * The session a `task` tool spawned, when OpenCode names it on the call. A
+ * subagent runs as its own session, so this is what ties the child's stream
+ * back to the row that started it.
+ */
+export function openCodeChildSessionId(
+  part: OpenCodePart,
+): string | undefined {
+  const state = part.state ?? {};
+  const metadata = asRecord(state.metadata);
+  const input = asRecord(state.input);
+  for (const source of [metadata, state, input]) {
+    const id =
+      stringField(source, "sessionID") ??
+      stringField(source, "sessionId") ??
+      stringField(source, "session_id") ??
+      stringField(source, "childSessionID") ??
+      stringField(source, "subSessionID");
+    if (id) return id;
+  }
+  return undefined;
+}
+
 export function eventSessionId(event: Record<string, unknown>): string | undefined {
   const properties = asRecord(event.properties);
   if (!properties) return undefined;
   const sessionID = stringField(properties, "sessionID");
   if (sessionID) return sessionID;
   const info = asRecord(properties.info);
-  return stringField(info, "id");
+  return (
+    stringField(info, "sessionID") ??
+    stringField(asRecord(properties.part), "sessionID") ??
+    (typeof event.type === "string" && event.type.startsWith("session.")
+      ? stringField(info, "id")
+      : undefined)
+  );
 }
 
 export function textDeltaEvent(

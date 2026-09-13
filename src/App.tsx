@@ -19,6 +19,7 @@ import { MenuBar } from "./chrome/MenuBar";
 import { FilePicker } from "./chrome/FilePicker";
 import { UsageFooter } from "./chrome/UsageFooter";
 import { useProjectBranches } from "./hooks/useProjectBranches";
+import { useInboxActivity } from "./hooks/useInboxUnseen";
 import {
   loadProjectRailOpen,
   loadSidebarTabOrder,
@@ -49,6 +50,7 @@ import {
   invalidateProjectFiles,
   prefetchProjectFiles,
   rememberOpenedFile,
+  resolveFileOpenRequest,
   resolveOpenablePath,
 } from "./lib/fileIndex";
 import {
@@ -143,9 +145,11 @@ import {
   promoteLastAssistantToPlan,
   respondHarnessApproval,
   respondHarnessQuestion,
+  keepHarnessQuestionOpen,
   sendHarnessTurn,
   steerHarnessTurn,
   startHarnessBridge,
+  stopHarnessSession,
   stopStreaming,
   pickTextHarness,
   type ApprovalDecision,
@@ -189,6 +193,7 @@ import {
   preferredModelSettings,
   resolveModel,
   saveLastModelSettings,
+  saveRecentModelChoice,
 } from "./lib/models";
 import {
   buildPlanPrompt,
@@ -218,9 +223,9 @@ import {
 import {
   applyPlaceSessionOnPane,
   filterTabsForProject,
-  findTabForProject,
   planWorkspaceTabClose,
   workspaceTabCwd,
+  focusedWorkspaceTabCwd,
 } from "./lib/workspaceTabGroups";
 import { runSessionRemoval } from "./lib/sessionRemoval";
 import {
@@ -269,6 +274,9 @@ import {
 import { syncDockBadge } from "./lib/dockBadge";
 import { liveAgentsFromSessions } from "./lib/liveAgents";
 import { hiddenApprovalNotices } from "./lib/approvalToast";
+import { useSessionReminders } from "./hooks/useSessionReminders";
+import { ReminderNotices } from "./chrome/ReminderNotices";
+import { LinkedWorkItemUpdateNotice } from "./chrome/LinkedWorkItemUpdateNotice";
 import { nextUnseenFinishedSessions } from "./lib/sessionDone";
 import {
   loadNotificationsEnabled,
@@ -277,6 +285,7 @@ import {
   probeNotificationPermission,
   setWindowFocused,
 } from "./lib/notifications";
+import { useInputNotifications } from "./hooks/useInputNotifications";
 import { playCue } from "./lib/sounds";
 import { archiveFocusedSession } from "./lib/archiveShortcut";
 import {
@@ -301,6 +310,12 @@ import { preparePrompt } from "./lib/promptPreparation";
 import { warmNativeSkills, isNativeCommandPrompt } from "./lib/skills";
 import { nativeSkillContextForSession } from "./lib/sessionSkills";
 import {
+  loadSessionFolders,
+  placeSessionInFolder,
+  saveSessionFolders,
+  type SessionFolderTarget,
+} from "./lib/sessionFolders";
+import {
   ADD_NOTE_TO_CHAT_EVENT,
   composeNoteMessage,
   noteCardMeta,
@@ -320,19 +335,33 @@ import { SessionPane } from "./surfaces/SessionPane";
 import { SessionSurface } from "./surfaces/SessionSurface";
 import { ProjectTerminalDock } from "./surfaces/ProjectTerminalDock";
 import { SearchView } from "./surfaces/SearchView";
-import { SettingsView } from "./surfaces/SettingsView";
+import { SettingsView, type SettingsAnchor } from "./surfaces/SettingsView";
+import type { ConnectableInboxSource } from "./lib/inboxFilters";
 import { InboxView } from "./surfaces/InboxView";
 import type { InboxSessionPortal } from "./surfaces/InboxDiscussionPanel";
 import { inboxAskKey, inboxAskPrompt } from "./lib/inboxAsk";
+import { requestAddToChat } from "./lib/quoteDraft";
 import { NotesView } from "./surfaces/NotesView";
 import { PluginSurface } from "./surfaces/PluginSurface";
 import { usePlugins } from "./plugins/registry";
 import { setPluginProjectCwd } from "./plugins/process";
-import { inboxComposerCard, type InboxItem } from "./lib/githubTasks";
+import {
+  githubWorkItemThread,
+  inboxComposerCard,
+  type InboxItem,
+} from "./lib/githubTasks";
 import {
   linkedWorkItemFromInboxItem,
   resolveLinkedWorkItem,
 } from "./lib/sessionWorkItem";
+import {
+  completeLinkedWorkItemUpdateCard,
+  failLinkedWorkItemUpdateCard,
+  pendingLinkedWorkItemUpdateCard,
+  type LinkedWorkItemUpdateCard,
+} from "./lib/linkedWorkItemActivity";
+import type { LinkedSessionUpdate } from "./lib/linkedSessionUpdates";
+import { markLinkedSessionUpdateSeen } from "./lib/linkedSessionSeen";
 import { linearIssueDetails, peekLinearIssueDetails } from "./lib/linear";
 import { gitlabWorkItemDetails, peekGitlabWorkItemDetails } from "./lib/gitlab";
 import {
@@ -366,6 +395,12 @@ import {
   inFlightSnapshotKey,
   shouldWriteInFlightSnapshot,
 } from "./lib/inFlight";
+import {
+  isBlankSession,
+  planProjectReturn,
+  reconcileProjectReturn,
+  type ProjectReturnMemory,
+} from "./lib/projectReturn";
 import {
   collectWorkspaceSnapshot,
   workspaceSnapshotKey,
@@ -650,6 +685,9 @@ export default function App({
   const [whatsNewVersion, setWhatsNewVersion] = useState<string | null>(null);
   const [settingsSection, setSettingsSection] =
     useState<SettingsSectionId>(loadSettingsSection);
+  const [settingsAnchor, setSettingsAnchor] = useState<SettingsAnchor | null>(
+    null,
+  );
   const [editorNavigation, setEditorNavigation] =
     useState<EditorNavigationTarget | null>(null);
   const editorNavigationToken = useRef(0);
@@ -684,6 +722,10 @@ export default function App({
 
   const sessionsRef = useRef(sessions);
   sessionsRef.current = sessions;
+  const linkedSessionUpdatesRef = useRef<
+    ReadonlyMap<string, LinkedSessionUpdate>
+  >(new Map());
+  const linkedWorkItemActivityFetches = useRef(new Map<string, number>());
   const queueDispatchingRef = useRef(new Set<string>());
   const tabsRef = useRef(tabs);
   tabsRef.current = tabs;
@@ -714,6 +756,22 @@ export default function App({
   useEffect(() => {
     if (!notesEnabled) setNotesViewOpen(false);
   }, [notesEnabled]);
+
+  const projectReturnRef = useRef<ProjectReturnMemory>(
+    resumed?.projectReturnMemory ?? new Map(),
+  );
+  const readProjectReturnMemory = useCallback(() => {
+    projectReturnRef.current = reconcileProjectReturn({
+      memory: projectReturnRef.current,
+      tabs: tabsRef.current,
+      sessions: sessionsRef.current,
+      activeTabId: activeTabIdRef.current,
+    });
+    return projectReturnRef.current;
+  }, []);
+  useEffect(() => {
+    readProjectReturnMemory();
+  }, [activeTabId, tabs, sessions, readProjectReturnMemory]);
 
   const tabVisitRef = useRef(emptyTabVisitHistory(activeTabId));
   const tabVisitFromHistoryRef = useRef(false);
@@ -842,6 +900,7 @@ export default function App({
         tabsRef.current,
         activeTabIdRef.current,
         projectCwdRef.current,
+        readProjectReturnMemory(),
         "unload",
         projectTerminalsRef.current,
       ).finally(() => {
@@ -861,7 +920,7 @@ export default function App({
       cancelScheduledFlush(harnessFlush.current);
       harnessFlush.current = null;
     };
-  }, [resumed]);
+  }, [resumed, readProjectReturnMemory]);
 
   useEffect(() => {
     void probeHarnessAvailability();
@@ -997,22 +1056,7 @@ export default function App({
   const activeSessionIdRef = useRef(activeSessionId);
   activeSessionIdRef.current = activeSessionId;
 
-  const notifiedApprovalIdsRef = useRef<ReadonlySet<string>>(new Set());
-  useEffect(() => {
-    const previous = notifiedApprovalIdsRef.current;
-    notifiedApprovalIdsRef.current = approvalSessionIds;
-    for (const id of approvalSessionIds) {
-      if (previous.has(id)) continue;
-      const session = sessionsRef.current.find((s) => s.id === id);
-      if (session) {
-        void notifySession(
-          session,
-          "needsInput",
-          id === activeSessionIdRef.current,
-        );
-      }
-    }
-  }, [approvalSessionIds]);
+  useInputNotifications(sessions, activeSessionId);
 
   // Cache the OS decision so a turn ending later can skip a denied banner.
   useEffect(() => {
@@ -1048,6 +1092,9 @@ export default function App({
     () => hiddenApprovalNotices(sessions, activeTabId, tabs, composerFocused),
     [sessions, activeTabId, tabs, composerFocused],
   );
+  const [reminderNoticesHeight, setReminderNoticesHeight] = useState(0);
+  const [linkedActivityNoticeHeight, setLinkedActivityNoticeHeight] =
+    useState(0);
 
   useEffect(() => {
     syncDockBadge(sessions);
@@ -1087,6 +1134,7 @@ export default function App({
       () => activeTabIdRef.current,
       () => projectCwdRef.current,
       () => projectTerminalsRef.current,
+      readProjectReturnMemory,
       flushHarnessEvents,
     );
     void getCurrentWindow()
@@ -1109,6 +1157,7 @@ export default function App({
           tabsRef.current,
           activeTabIdRef.current,
           projectCwdRef.current,
+          readProjectReturnMemory(),
           "unload",
           projectTerminalsRef.current,
         ).finally(() => {
@@ -1122,7 +1171,7 @@ export default function App({
       releaseQuit();
       unlistenClose?.();
     };
-  }, [flushHarnessEvents]);
+  }, [flushHarnessEvents, readProjectReturnMemory]);
 
   const refreshHistory = useCallback(async (cwd: string) => {
     if (!cwd || cwd === "~") return;
@@ -1280,6 +1329,12 @@ export default function App({
       sessions,
       activeTabId,
       projectCwd,
+      reconcileProjectReturn({
+        memory: projectReturnRef.current,
+        tabs,
+        sessions,
+        activeTabId,
+      }),
       projectTerminals,
     );
     const key = workspaceSnapshotKey(snapshot);
@@ -1360,11 +1415,32 @@ export default function App({
     );
   }, [sessions, tabs, persistSession, liveAgentsEnabled]);
 
-  const activateTab = useCallback((id: string) => {
-    setActiveTabId(id);
+  const activateTab = useCallback((id: string, paneId?: string) => {
     const tab = tabsRef.current.find((entry) => entry.id === id);
+    const nextFocusedId =
+      tab && paneId &&
+      (leafIds(tab.layout).includes(paneId) ||
+        tab.editorPanes.some((entry) => entry.id === paneId) ||
+        (tab.terminalPanes ?? []).some((entry) => entry.id === paneId))
+        ? paneId
+        : tab?.focusedId;
+
+    setActiveTabId(id);
+    if (tab && nextFocusedId && nextFocusedId !== tab.focusedId) {
+      setTabs((prev) =>
+        prev.map((entry) =>
+          entry.id === id
+            ? { ...entry, focusedId: nextFocusedId, diffFocused: false }
+            : entry,
+        ),
+      );
+    }
+
     if (tab) {
-      const cwd = workspaceTabCwd(tab, sessionsRef.current);
+      const focusedTab = nextFocusedId
+        ? { ...tab, focusedId: nextFocusedId }
+        : tab;
+      const cwd = focusedWorkspaceTabCwd(focusedTab, sessionsRef.current);
       if (cwd && looksLikeProject(cwd)) {
         const normalized = normalizeProjectPath(cwd);
         if (!sameProjectPath(normalized, projectCwdRef.current)) {
@@ -1374,8 +1450,8 @@ export default function App({
       }
     }
     setComposerFocused(
-      !!tab &&
-        sessionsRef.current.some((session) => session.id === tab.focusedId),
+      !!nextFocusedId &&
+        sessionsRef.current.some((session) => session.id === nextFocusedId),
     );
   }, []);
 
@@ -1565,6 +1641,35 @@ export default function App({
       ),
     );
   }, []);
+
+  const setLinkedWorkItemUpdateCard = useCallback(
+    (
+      sessionId: string,
+      update: (
+        card: LinkedWorkItemUpdateCard | undefined,
+      ) => LinkedWorkItemUpdateCard | undefined,
+    ) => {
+      const previous = sessionsRef.current;
+      const next = previous.map((session) => {
+        if (session.id !== sessionId) return session;
+        const card = update(session.linkedWorkItemUpdateCard);
+        return card === session.linkedWorkItemUpdateCard
+          ? session
+          : { ...session, linkedWorkItemUpdateCard: card };
+      });
+      if (!next.some((session, index) => session !== previous[index])) return;
+      sessionsRef.current = next;
+      setSessions(next);
+    },
+    [],
+  );
+
+  const onLinkedWorkItemUpdateCardDismiss = useCallback(
+    (sessionId: string) => {
+      setLinkedWorkItemUpdateCard(sessionId, () => undefined);
+    },
+    [setLinkedWorkItemUpdateCard],
+  );
 
   const onNoteCardDismiss = useCallback((sessionId: string) => {
     setSessions((prev) =>
@@ -1798,6 +1903,34 @@ export default function App({
       );
     };
     void confirmCloseTerminal(file).then((ok) => ok && finishClose());
+  }, []);
+
+  const onCloseOtherProjectTerminals = useCallback((fileId: string) => {
+    const projectPath = projectCwdRef.current;
+    const dock = findProjectTerminal(projectTerminalsRef.current, projectPath);
+    if (!dock?.pane.files.some((file) => file.id === fileId)) return;
+    const closingFiles = dock.pane.files.filter((file) => file.id !== fileId);
+    if (closingFiles.length === 0) return;
+    const closingIds = new Set(closingFiles.map((file) => file.id));
+
+    const finishClose = () => {
+      setProjectTerminals((prev) =>
+        mapProjectTerminal(prev, projectPath, (entry) => {
+          if (!entry.pane.files.some((file) => file.id === fileId)) {
+            return entry;
+          }
+          const files = entry.pane.files.filter(
+            (file) => !closingIds.has(file.id),
+          );
+          return {
+            ...entry,
+            pane: { ...entry.pane, files, activeFileId: fileId },
+          };
+        }),
+      );
+    };
+
+    void confirmCloseTerminals(closingFiles).then((ok) => ok && finishClose());
   }, []);
 
   const onTerminalMetaChange = useCallback(
@@ -2136,6 +2269,66 @@ export default function App({
     },
     [activeTabId, onCloseTab, projectCwd, tabCloseScope],
   );
+
+  const onCloseOtherFiles = useCallback((paneId: string, fileId: string) => {
+    const tab = tabsRef.current.find((entry) => findSurfacePane(entry, paneId));
+    if (!tab) return;
+    const found = findSurfacePane(tab, paneId);
+    if (!found?.pane.files.some((file) => file.id === fileId)) return;
+    const closingFiles = found.pane.files.filter((file) => file.id !== fileId);
+    if (closingFiles.length === 0) return;
+    const closingIds = new Set(closingFiles.map((file) => file.id));
+    const unsaved = closingFiles.filter(
+      (file) => isFilesystemTab(file) && dirtyFilesRef.current.has(file.id),
+    );
+    const terminals = closingFiles.filter((file) => file.terminal);
+
+    const finishClose = () => {
+      setTabs((prev) =>
+        prev.map((entry) => {
+          if (entry.id !== tab.id) return entry;
+          const current = findSurfacePane(entry, paneId);
+          if (!current?.pane.files.some((file) => file.id === fileId)) {
+            return entry;
+          }
+          return withSurfacePanes(
+            { ...entry, focusedId: paneId },
+            current.kind,
+            surfacePanes(entry, current.kind).map((pane) =>
+              pane.id === paneId
+                ? {
+                    ...pane,
+                    files: pane.files.filter(
+                      (file) => !closingIds.has(file.id),
+                    ),
+                    activeFileId: fileId,
+                  }
+                : pane,
+            ),
+          );
+        }),
+      );
+      setDirtyFiles((prev) => {
+        const next = new Set(prev);
+        for (const id of closingIds) next.delete(id);
+        return next;
+      });
+    };
+
+    void (async () => {
+      if (unsaved.length > 0) {
+        const ok = await confirmDiscardUnsaved(
+          "Close other tabs with unsaved files?",
+        );
+        if (!ok) return;
+      }
+      if (terminals.length > 0) {
+        const ok = await confirmCloseTerminals(terminals);
+        if (!ok) return;
+      }
+      finishClose();
+    })();
+  }, []);
 
   const onClearTabSession = useCallback(
     (id: string) => {
@@ -2598,6 +2791,82 @@ export default function App({
     [refreshHistory, sidebarCwd],
   );
 
+  const revealLinkedSessionUpdate = useCallback(
+    (sessionId: string, update: LinkedSessionUpdate) => {
+      const session = sessionsRef.current.find(
+        (entry) => entry.id === sessionId,
+      );
+      if (!session?.linkedWorkItem) return;
+      if (
+        session.linkedWorkItemUpdateCard?.updatedAt === update.updatedAt &&
+        session.linkedWorkItemUpdateCard.status !== "error"
+      ) {
+        return;
+      }
+      if (
+        linkedWorkItemActivityFetches.current.get(sessionId) ===
+        update.updatedAt
+      ) {
+        return;
+      }
+      const pending = pendingLinkedWorkItemUpdateCard(update);
+      linkedWorkItemActivityFetches.current.set(sessionId, update.updatedAt);
+      // A stale/error card should not remain visible while fresh details load.
+      // The session itself is already open; this request stays fully detached
+      // from the navigation path.
+      setLinkedWorkItemUpdateCard(sessionId, (current) =>
+        current?.updatedAt === update.updatedAt && current.status === "ready"
+          ? current
+          : undefined,
+      );
+
+      void githubWorkItemThread(
+        session.cwd,
+        session.linkedWorkItem.kind,
+        session.linkedWorkItem.number,
+        { force: true },
+      ).then(
+        (thread) => {
+          if (
+            linkedWorkItemActivityFetches.current.get(sessionId) !==
+            pending.updatedAt
+          ) {
+            return;
+          }
+          linkedWorkItemActivityFetches.current.delete(sessionId);
+          if (
+            linkedSessionUpdatesRef.current.get(sessionId)?.updatedAt !==
+            pending.updatedAt
+          ) {
+            return;
+          }
+          setLinkedWorkItemUpdateCard(sessionId, () =>
+            completeLinkedWorkItemUpdateCard(pending, thread),
+          );
+        },
+        () => {
+          if (
+            linkedWorkItemActivityFetches.current.get(sessionId) !==
+            pending.updatedAt
+          ) {
+            return;
+          }
+          linkedWorkItemActivityFetches.current.delete(sessionId);
+          if (
+            linkedSessionUpdatesRef.current.get(sessionId)?.updatedAt !==
+            pending.updatedAt
+          ) {
+            return;
+          }
+          setLinkedWorkItemUpdateCard(sessionId, () =>
+            failLinkedWorkItemUpdateCard(pending),
+          );
+        },
+      );
+    },
+    [setLinkedWorkItemUpdateCard],
+  );
+
   const onAskInboxItem = useCallback(
     (item: InboxItem): Promise<string> => {
       const key = inboxAskKey(item);
@@ -2623,12 +2892,12 @@ export default function App({
                   (item.kind === "issue" || item.kind === "pr")
                 ? (
                     peekGitlabWorkItemDetails(
-                      item.projectPath,
+                      item.repo,
                       item.kind,
                       item.number,
                     ) ??
                     (await gitlabWorkItemDetails(
-                      item.projectPath,
+                      item.repo,
                       item.kind,
                       item.number,
                     ))
@@ -2708,21 +2977,70 @@ export default function App({
 
   const onSelectHistorySession = useCallback(
     async (sessionId: string) => {
-      if (focusOpenSession(sessionId)) return;
+      const linkedUpdate = linkedSessionUpdatesRef.current.get(sessionId);
+      if (focusOpenSession(sessionId)) {
+        if (linkedUpdate) revealLinkedSessionUpdate(sessionId, linkedUpdate);
+        return;
+      }
       const session = await ensureOpenSession(sessionId);
       if (!session || session.inboxAsk) return;
-      if (replaceBlankPaneWithSession(session)) return;
+      if (replaceBlankPaneWithSession(session)) {
+        if (linkedUpdate) revealLinkedSessionUpdate(sessionId, linkedUpdate);
+        return;
+      }
       const tab = newTab(session.id);
       appendTab(tab, session.cwd);
       setActiveTabId(tab.id);
       setComposerFocused(true);
+      if (linkedUpdate) revealLinkedSessionUpdate(sessionId, linkedUpdate);
     },
     [
       appendTab,
       ensureOpenSession,
       focusOpenSession,
       replaceBlankPaneWithSession,
+      revealLinkedSessionUpdate,
     ],
+  );
+
+  const openReminderSession = useCallback(
+    async (sessionId: string) => {
+      const session = await ensureOpenSession(sessionId);
+      if (!session)
+        throw new Error("This conversation is no longer available.");
+      setSearchViewOpen(false);
+      setInboxViewOpen(false);
+      setNotesViewOpen(false);
+      setSettingsOpen(false);
+      setFilePickerOpen(false);
+      setSidebarTab("sessions");
+      setProjectCwd(session.cwd);
+      setRecents(rememberProject(session.cwd));
+      await onSelectHistorySession(sessionId);
+    },
+    [ensureOpenSession, onSelectHistorySession],
+  );
+
+  const ensureReminderSessionsSaved = useCallback(
+    async (ids: readonly string[]) => {
+      for (const id of ids) {
+        const session = sessionsRef.current.find(
+          (session) => session.id === id,
+        );
+        if (session && !(await upsertSession(session))) {
+          throw new Error(
+            "Send a message in this conversation before setting a reminder.",
+          );
+        }
+      }
+    },
+    [],
+  );
+
+  const sessionReminders = useSessionReminders(
+    openReminderSession,
+    ensureReminderSessionsSaved,
+    sessions.filter((session) => !session.inboxAsk).map((session) => session.id),
   );
 
   const onPlaceSessionOnPane = useCallback(
@@ -3222,26 +3540,32 @@ export default function App({
             (session) => session.id === activeWorkspace.focusedId,
           )
         : undefined;
-      const currentCwd =
-        current?.cwd ??
-        (activeWorkspace ? focusedFileTab(activeWorkspace)?.cwd : undefined);
-      if (currentCwd && sameProjectPath(currentCwd, normalized)) return;
-
-      if (current && isBlankSession(current)) {
-        onCwdChange(current.id, normalized);
-        return;
-      }
-
-      const match = findTabForProject(
-        tabsRef.current,
-        sessionsRef.current,
-        normalized,
-      );
-      if (match) {
-        setProjectCwd(normalized);
-        setRecents(rememberProject(normalized));
-        activateTab(match.id);
-        return;
+      const decision = planProjectReturn({
+        memory: readProjectReturnMemory(),
+        tabs: tabsRef.current,
+        sessions: sessionsRef.current,
+        activeTabId: activeTabIdRef.current,
+        projectPath: normalized,
+      });
+      switch (decision.action) {
+        case "keep":
+          setProjectCwd(normalized);
+          setRecents(rememberProject(normalized));
+          return;
+        case "reuse-blank":
+          onCwdChange(decision.sessionId, normalized);
+          return;
+        case "activate":
+          setProjectCwd(normalized);
+          setRecents(rememberProject(normalized));
+          activateTab(decision.tabId, decision.paneId);
+          return;
+        case "create":
+          break;
+        default: {
+          const exhaustive: never = decision;
+          return exhaustive;
+        }
       }
 
       const seed = current ?? sessionsRef.current[0];
@@ -3260,13 +3584,34 @@ export default function App({
       setActiveTabId(tab.id);
       setComposerFocused(true);
     },
-    [activateTab, appendTab, onCwdChange],
+    [activateTab, appendTab, onCwdChange, readProjectReturnMemory],
   );
 
   const pickProject = useCallback(async () => {
     const path = await pickFolder();
     if (path) onSelectProject(path);
   }, [onSelectProject]);
+
+  const onPlaceSessionInFolder = useCallback(
+    (sessionId: string, target: SessionFolderTarget) => {
+      const source = sessionsRef.current.find(
+        (session) => session.id === sessionId,
+      );
+      if (!source || !looksLikeProject(source.cwd)) return;
+      const folders = loadSessionFolders(source.cwd);
+      if (
+        target.kind === "existing" &&
+        !folders.some((folder) => folder.id === target.folderId)
+      ) {
+        return;
+      }
+      saveSessionFolders(
+        source.cwd,
+        placeSessionInFolder(folders, sessionId, target),
+      );
+    },
+    [],
+  );
 
   const onRemoveProject = useCallback(
     (path: string, options: { purgeData: boolean }) => {
@@ -3426,10 +3771,13 @@ export default function App({
   }, []);
 
   const onOpenFile = useCallback<OpenFileFn>(
-    (path, navigation) => {
+    (path, navigation, options) => {
       void (async () => {
-        const resolved =
-          (await resolveOpenablePath(gitCwdRef.current, path)) ?? path;
+        const resolved = await resolveFileOpenRequest(
+          gitCwdRef.current,
+          path,
+          options,
+        );
         rememberOpenedFile(sidebarCwdRef.current, resolved);
         const tab = tabsRef.current.find((entry) => entry.id === activeTabId);
         if (!tab) return;
@@ -3524,6 +3872,7 @@ export default function App({
       if (!current) return;
       if (isPreparingHandoff(current)) return;
       const resolved = resolveModel(harness, model);
+      saveRecentModelChoice(resolved.harness, resolved.id);
       if (current.modelSettings) {
         saveLastModelSettings(current.modelSettings, "fill");
       }
@@ -3637,6 +3986,7 @@ export default function App({
         return;
       }
       if (isPreparingHandoff(current)) return;
+      saveRecentModelChoice(current.harness, current.model);
       const workCwd = sessionWorkCwd(current);
       const submittedText = intent === "build" ? "Build approved plan" : text;
       const rawCommand = isNativeCommandPrompt(submittedText, current.harness);
@@ -4043,13 +4393,24 @@ export default function App({
             error instanceof Error
               ? error.message
               : `${current.harness} adapter failed`;
-          enqueueHarnessEvent(sessionId, {
-            type: "session.error",
-            message,
-          });
+          if (!providerFailureSeen) {
+            enqueueHarnessEvent(sessionId, {
+              type: "session.error",
+              message,
+            });
+          }
+          providerFailureSeen = true;
         } finally {
           if (turnGen.current.get(sessionId) !== gen) return;
           flushHarnessEvents();
+          // A failed provider can leave its process alive with a dead event
+          // stream or poisoned turn state. Park it now; the next prompt will
+          // reconnect and resume through a fresh transport.
+          if (providerFailureSeen) {
+            await stopHarnessSession(current.harness, sessionId).catch(
+              () => undefined,
+            );
+          }
           await flushSessionCheckpoint(sessionId);
           setSessions((prev) =>
             prev.map((s) => {
@@ -4619,6 +4980,14 @@ export default function App({
     [],
   );
 
+  const onQuestionInteraction = useCallback(
+    (sessionId: string, requestId: number) => {
+      const session = sessionsRef.current.find((s) => s.id === sessionId);
+      if (session) keepHarnessQuestionOpen(session.harness, sessionId, requestId);
+    },
+    [],
+  );
+
   const onOpenApprovalSession = useCallback(
     (sessionId: string) => {
       if (!focusOpenSession(sessionId)) {
@@ -4670,6 +5039,12 @@ export default function App({
       }),
     [history, projectBranches, sessions, sidebarCwd],
   );
+  const {
+    unseen: inboxUnseen,
+    linkedSessionUpdateIds,
+    linkedSessionUpdates,
+  } = useInboxActivity(recents, sidebarCwd, sidebarHistory);
+  linkedSessionUpdatesRef.current = linkedSessionUpdates;
   const inboxRelatedSessions = useMemo(() => {
     const byId = new Map<string, SessionSummary>();
     for (const session of storedLinkedSessions) byId.set(session.id, session);
@@ -4826,20 +5201,29 @@ export default function App({
     setPluginId(id);
   }, []);
 
-  const openSettings = useCallback((section?: SettingsSectionId) => {
-    setFilePickerOpen(false);
-    setSearchViewOpen(false);
-    setInboxViewOpen(false);
-    setNotesViewOpen(false);
-    setPluginId(null);
-    if (section) {
-      setSettingsSection(section);
-      saveSettingsSection(section);
-    }
-    setSettingsOpen(true);
-  }, []);
+  const openSettings = useCallback(
+    (section?: SettingsSectionId, anchor?: SettingsAnchor) => {
+      setFilePickerOpen(false);
+      setSearchViewOpen(false);
+      setInboxViewOpen(false);
+      setNotesViewOpen(false);
+      setPluginId(null);
+      if (section) {
+        setSettingsSection(section);
+        saveSettingsSection(section);
+      }
+      setSettingsAnchor(anchor ?? null);
+      setSettingsOpen(true);
+    },
+    [],
+  );
 
   const onOpenSettings = useCallback(() => openSettings(), [openSettings]);
+
+  const onOpenInboxIntegrations = useCallback(
+    (source: ConnectableInboxSource) => openSettings("inbox", source),
+    [openSettings],
+  );
 
   const onCloseSettings = useCallback(() => {
     setSettingsOpen(false);
@@ -5318,6 +5702,7 @@ export default function App({
     onSubmit,
     onStop,
     onCompactContext,
+    onPlaceSessionInFolder,
     onDeleteQueuedMessage,
     onEditQueuedMessage,
     onQueuedMessageEditingChange,
@@ -5328,6 +5713,7 @@ export default function App({
     onHandoffCardDismiss,
     onApproval,
     onQuestionReply,
+    onQuestionInteraction,
     onOpenFile,
     onOpenDiff,
     onOpenPlan,
@@ -5367,6 +5753,9 @@ export default function App({
         onArchiveSessions={onArchiveHistorySessions}
         onPinSession={onPinHistorySession}
         onPinSessions={onPinHistorySessions}
+        reminders={sessionReminders.reminders}
+        onSetReminders={sessionReminders.schedule}
+        onCancelReminders={sessionReminders.cancel}
         onDeleteSession={onDeleteHistorySession}
         onDeleteSessions={onDeleteHistorySessions}
         onOpenFile={onOpenFile}
@@ -5419,6 +5808,8 @@ export default function App({
         projectRailOpen={projectRailOpen}
         onToggleProjectRail={onToggleProjectRail}
         unseenFinishedIds={unseenFinishedIds}
+        inboxUnseen={inboxUnseen}
+        linkedSessionUpdateIds={linkedSessionUpdateIds}
         settingsOpen={settingsOpen}
         settingsSection={settingsSection}
         onOpenSettings={onOpenSettings}
@@ -5524,6 +5915,7 @@ export default function App({
                       }
                       onSelectTerminal={onSelectProjectTerminal}
                       onCloseTerminal={onCloseProjectTerminal}
+                      onCloseOtherTerminals={onCloseOtherProjectTerminals}
                       onReorderTerminals={onReorderProjectTerminals}
                       onTerminalMetaChange={onTerminalMetaChange}
                     />
@@ -5573,6 +5965,7 @@ export default function App({
                           }
                           onSelectFile={onSelectFileSurface}
                           onCloseFile={onCloseFile}
+                          onCloseOtherFiles={onCloseOtherFiles}
                           onReorderFiles={onReorderFiles}
                           onFileDirtyChange={onFileDirtyChange}
                           onFileErrorCountChange={onFileErrorCountChange}
@@ -5645,6 +6038,7 @@ export default function App({
             sessions={inboxRelatedSessions}
             onOpenSession={onOpenInboxSession}
             target={inboxTarget}
+            onOpenIntegrations={onOpenInboxIntegrations}
           />
         ) : null}
         {notesViewOpen ? (
@@ -5667,6 +6061,7 @@ export default function App({
         {settingsOpen ? (
           <SettingsView
             section={settingsSection}
+            anchor={settingsAnchor}
             cwd={sidebarCwd}
             sessions={sidebarHistory}
             besideRail
@@ -5704,8 +6099,71 @@ export default function App({
 
       <ApprovalToasts
         notices={hiddenApprovalToasts}
+        topOffset={
+          12 +
+          (reminderNoticesHeight ? reminderNoticesHeight + 8 : 0) +
+          (linkedActivityNoticeHeight ? linkedActivityNoticeHeight + 8 : 0)
+        }
         onFocusSession={onOpenApprovalSession}
         onApproval={onApproval}
+      />
+      <LinkedWorkItemUpdateNotice
+        card={
+          searchViewOpen || inboxViewOpen || notesViewOpen || settingsOpen
+            ? undefined
+            : sessions.find((session) => session.id === activeTab?.focusedId)
+                ?.linkedWorkItemUpdateCard
+        }
+        topOffset={12 + (reminderNoticesHeight ? reminderNoticesHeight + 8 : 0)}
+        onAcknowledge={() => {
+          const session = sessions.find(
+            (entry) => entry.id === activeTab?.focusedId,
+          );
+          const updatedAt = session?.linkedWorkItemUpdateCard?.updatedAt;
+          if (session && updatedAt != null) {
+            markLinkedSessionUpdateSeen(session.id, updatedAt);
+          }
+        }}
+        onDismiss={() => {
+          if (activeTab?.focusedId) {
+            onLinkedWorkItemUpdateCardDismiss(activeTab.focusedId);
+          }
+        }}
+        onOpenDiscussion={() => {
+          const session = sessions.find(
+            (entry) => entry.id === activeTab?.focusedId,
+          );
+          if (session?.linkedWorkItem) {
+            onOpenLinkedWorkItem(session.linkedWorkItem);
+          }
+        }}
+        onAddToChat={(text) => {
+          requestAddToChat(text, "plain");
+          setComposerFocused(true);
+        }}
+        onArchiveSession={() => {
+          const sessionId = activeTab?.focusedId;
+          return sessionId
+            ? onArchiveHistorySession(sessionId, true)
+            : Promise.resolve(false);
+        }}
+        onDeleteSession={() => {
+          const sessionId = activeTab?.focusedId;
+          return sessionId
+            ? onDeleteHistorySession(sessionId)
+            : Promise.resolve(false);
+        }}
+        onHeightChange={setLinkedActivityNoticeHeight}
+      />
+      <ReminderNotices
+        reminders={sessionReminders.due}
+        error={sessionReminders.error}
+        onOpen={sessionReminders.open}
+        onSnooze={sessionReminders.schedule}
+        onDismiss={sessionReminders.cancel}
+        onRetry={sessionReminders.refresh}
+        onOpenSettings={() => openSettings()}
+        onHeightChange={setReminderNoticesHeight}
       />
       {whatsNewVersion ? (
         <WhatsNewDialog
@@ -5727,11 +6185,6 @@ function lastUserBlockId(session: Session): string | undefined {
     if (session.blocks[i]?.role === "user") return session.blocks[i]?.id;
   }
   return undefined;
-}
-
-function isBlankSession(session: Session | undefined): boolean {
-  if (!session || session.busy) return false;
-  return !session.blocks.some((block) => block.role === "user");
 }
 
 function selectedChangePath(
