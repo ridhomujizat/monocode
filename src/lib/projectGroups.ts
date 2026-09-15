@@ -159,6 +159,25 @@ export function removeProjectFromGroup(
   return changed ? next : groups;
 }
 
+/**
+ * Moves one membership into another group. Dragging a card relocates it; only
+ * the context menu adds a second copy of the same project.
+ */
+export function moveMembershipToGroup(
+  groups: ProjectGroup[],
+  memberId: string,
+  groupId: string,
+): ProjectGroup[] {
+  const source = groups.find((group) =>
+    group.members.some((member) => member.id === memberId),
+  );
+  if (!source || source.id === groupId) return groups;
+  if (!groups.some((group) => group.id === groupId)) return groups;
+  const path = source.members.find((member) => member.id === memberId)?.path;
+  if (!path) return groups;
+  return addProjectToGroup(removeMembership(groups, memberId), groupId, path);
+}
+
 /** Removes a single membership by id (dragging a card out of its group). */
 export function removeMembership(
   groups: ProjectGroup[],
@@ -256,7 +275,9 @@ export function setGroupCustomColor(
   if (hex == null) return groups;
   if (group.customColor === hex && group.colorIndex == null) return groups;
   return groups.map((entry) =>
-    entry.id === groupId ? { ...withoutColors(entry), customColor: hex } : entry,
+    entry.id === groupId
+      ? { ...withoutColors(entry), customColor: hex }
+      : entry,
   );
 }
 
@@ -304,7 +325,9 @@ export function reorderGroupContainers(
     return groups;
   }
   let next = 0;
-  return groups.map((group) => (idSet.has(group.id) ? ordered[next++]! : group));
+  return groups.map((group) =>
+    idSet.has(group.id) ? ordered[next++]! : group,
+  );
 }
 
 /**

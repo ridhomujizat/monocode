@@ -15,12 +15,14 @@ import {
   ListFilter,
   LoaderCircle,
   MessageMultiple,
+  PanelRight,
   Plus,
   RefreshCw,
   Search,
   type IconComponent,
 } from "../chrome/icons";
 import {
+  useCallback,
   useEffect,
   useMemo,
   useRef,
@@ -35,7 +37,7 @@ import { InboxConnectMenu } from "../chrome/InboxConnectMenu";
 import { InboxProviderMark } from "../chrome/InboxProviderMark";
 import { ProjectLogoIcon } from "../chrome/ProjectLogoIcon";
 import { ProjectMascot } from "../chrome/ProjectMascot";
-import { OverlayNav } from "../chrome/TitleBar";
+import { IconButton, OverlayNav } from "../chrome/TitleBar";
 import { WindowControls } from "../chrome/WindowControls";
 import { useDragResize } from "../hooks/useDragResize";
 import { useLockOverscroll } from "../hooks/useLockOverscroll";
@@ -105,6 +107,7 @@ import {
   markInboxItemsSeen,
   useInboxSeenTick,
 } from "../lib/inboxSeen";
+import { LIST_PAGE_SIZE, listWindowSize } from "../lib/listWindow";
 import {
   LINEAR_CHANGE_EVENT,
   linearConnected,
@@ -160,10 +163,14 @@ const MAX_WIDTH = 420;
 const ACTION = "inline-flex items-center gap-1.5 rounded-md px-3 text-[12px]";
 const ACTION_FILLED = `${ACTION} h-6.5 bg-content text-background-base hover:bg-content/80`;
 const ACTION_OUTLINE = `${ACTION} h-7 border border-content/15 text-content/80 hover:bg-content/5`;
+const ACTION_BACKED = `${ACTION} h-7 bg-content/10 text-content hover:bg-content/15`;
 const ACTION_GHOST = `${ACTION} h-7 text-content/70 hover:bg-content/10 hover:text-content`;
 const DEFAULT_WIDTH = 280;
+const LINKED_PANEL_MIN_WIDTH = 360;
+const LINKED_PANEL_DEFAULT_WIDTH = 520;
 
 let rememberedWidth = DEFAULT_WIDTH;
+let rememberedLinkedPanelWidth = LINKED_PANEL_DEFAULT_WIDTH;
 
 type InboxProjectOption = {
   path: string;
@@ -331,6 +338,16 @@ export function InboxView({
 }: Props) {
   const [discussionOpen, setDiscussionOpen] = useState(false);
   const listLock = useLockOverscroll<HTMLDivElement>();
+  const listScrollRef = useRef<HTMLDivElement>(null);
+  const loadMoreRef = useRef<HTMLLIElement>(null);
+  const [listLimit, setListLimit] = useState(LIST_PAGE_SIZE);
+  const setListScrollRef = useCallback(
+    (element: HTMLDivElement | null) => {
+      listLock(element);
+      listScrollRef.current = element;
+    },
+    [listLock],
+  );
   const onCloseRef = useRef(onClose);
   onCloseRef.current = onClose;
   const logos = useTabGroupLogos();
@@ -665,6 +682,31 @@ export function InboxView({
     !!targetSelectionKey && selectedKey === targetSelectionKey;
   const selected =
     selectedByKey ?? (waitingForTarget ? null : visibleItems[0]) ?? null;
+  const shownItemCount = listWindowSize(visibleItems.length, listLimit);
+  const shownItems = visibleItems.slice(0, shownItemCount);
+  const hasMoreItems = shownItemCount < visibleItems.length;
+
+  useEffect(() => {
+    setListLimit(LIST_PAGE_SIZE);
+    const scroller = listScrollRef.current;
+    if (scroller) scroller.scrollTop = 0;
+  }, [activeFilters, linearHiddenTeamIds, searchInput, source]);
+
+  useEffect(() => {
+    if (!hasMoreItems) return;
+    const sentinel = loadMoreRef.current;
+    const root = listScrollRef.current;
+    if (!sentinel || !root) return;
+    const observer = new IntersectionObserver(
+      ([entry]) => {
+        if (!entry?.isIntersecting) return;
+        setListLimit((current) => current + LIST_PAGE_SIZE);
+      },
+      { root, rootMargin: "240px" },
+    );
+    observer.observe(sentinel);
+    return () => observer.disconnect();
+  }, [hasMoreItems, shownItemCount]);
 
   useEffect(() => {
     if (!selected) {
@@ -808,7 +850,7 @@ export function InboxView({
         </div>
       )}
       <div
-        ref={listLock}
+        ref={setListScrollRef}
         className="min-h-0 flex-1 overflow-y-auto overscroll-none"
       >
         {noSourcesConnected ? (
@@ -849,7 +891,7 @@ export function InboxView({
           </p>
         ) : (
           <ul className="flex flex-col gap-0.5 p-1.5">
-            {visibleItems.map((item) => {
+            {shownItems.map((item) => {
               const key = inboxItemKey(item);
               const projectId = projectKey(item.projectPath);
               const relatedSessions = relatedSessionsForInboxItem(
@@ -881,6 +923,9 @@ export function InboxView({
                 </li>
               );
             })}
+            {hasMoreItems ? (
+              <li ref={loadMoreRef} aria-hidden className="h-px list-none" />
+            ) : null}
           </ul>
         )}
       </div>
@@ -980,6 +1025,148 @@ export function InboxView({
       {filtersPortal}
       {connectPortal}
     </div>
+  );
+}
+
+export function LinkedWorkItemPanel({
+  target,
+  cwd,
+  recents,
+  onClose,
+}: {
+  target: LinkedWorkItem;
+  cwd: string;
+  recents: RecentProject[];
+  onClose: () => void;
+}) {
+  const onCloseRef = useRef(onClose);
+  onCloseRef.current = onClose;
+  const logos = useTabGroupLogos();
+  const projects = useMemo(
+    () => inboxProjectsForRail(recents, cwd),
+    [cwd, recents],
+  );
+  const projectOptions = useMemo(
+    () => inboxProjectOptions(projects, logos),
+    [logos, projects],
+  );
+  const [item, setItem] = useState<InboxItem | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [loading, setLoading] = useState(true);
+  const resize = useDragResize({
+    min: LINKED_PANEL_MIN_WIDTH,
+    max: () =>
+      Math.max(
+        LINKED_PANEL_MIN_WIDTH,
+        Math.round(
+          (typeof window === "undefined"
+            ? LINKED_PANEL_DEFAULT_WIDTH / 0.65
+            : window.innerWidth) * 0.65,
+        ),
+      ),
+    defaultWidth: LINKED_PANEL_DEFAULT_WIDTH,
+    initial: rememberedLinkedPanelWidth,
+    direction: "left",
+    onCommit: (width) => {
+      rememberedLinkedPanelWidth = width;
+    },
+  });
+
+  useEffect(() => {
+    let cancelled = false;
+    setItem(null);
+    setError(null);
+    setLoading(true);
+    void githubWorkItem(cwd, target.repo, target.kind, target.number, {
+      force: true,
+    })
+      .then((next) => {
+        if (cancelled) return;
+        setItem({ ...next, projectPath: cwd, provider: "github" });
+      })
+      .catch((reason: unknown) => {
+        if (cancelled) return;
+        setError(reason instanceof Error ? reason.message : String(reason));
+      })
+      .finally(() => {
+        if (!cancelled) setLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [cwd, target.kind, target.number, target.repo]);
+
+  useEffect(() => {
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key !== "Escape") return;
+      event.preventDefault();
+      event.stopPropagation();
+      onCloseRef.current();
+    };
+    window.addEventListener("keydown", onKey, true);
+    return () => window.removeEventListener("keydown", onKey, true);
+  }, []);
+
+  const kindLabel = target.kind === "pr" ? "Pull request" : "Issue";
+  return (
+    <aside
+      ref={resize.setPaneRef}
+      aria-label={`Linked ${kindLabel.toLowerCase()} #${target.number}`}
+      aria-busy={loading}
+      data-linked-work-item-panel
+      className="relative flex min-h-0 max-w-full shrink-0 flex-col border-l border-content/10 text-content max-[950px]:absolute max-[950px]:inset-y-0 max-[950px]:right-0 max-[950px]:z-30 max-[950px]:shadow-2xl"
+    >
+      <div
+        role="separator"
+        aria-label={`Resize linked ${kindLabel.toLowerCase()} panel`}
+        aria-orientation="vertical"
+        onPointerDown={resize.onPointerDown}
+        onDoubleClick={resize.onDoubleClick}
+        className={`absolute inset-y-0 -left-1 z-20 w-2 cursor-col-resize touch-none ${
+          resize.dragging ? "bg-content/15" : "hover:bg-content/10"
+        }`}
+      />
+      <div className="absolute top-2 right-2 z-30">
+        <IconButton
+          label={`Close ${kindLabel.toLowerCase()} panel`}
+          onClick={onClose}
+        >
+          <PanelRight className="size-3.5" strokeWidth={1.75} />
+        </IconButton>
+      </div>
+      <div className="min-h-0 min-w-0 flex-1">
+        {item ? (
+          <InboxDetail
+            key={inboxItemKey(item)}
+            item={item}
+            cwd={cwd}
+            projects={projectOptions}
+            revision={0}
+            relatedSessions={[]}
+            mode="panel"
+          />
+        ) : error ? (
+          <div className="flex h-full flex-col items-center justify-center gap-3 px-8 text-center">
+            <CircleX className="size-5 text-rose-400/90" strokeWidth={1.75} />
+            <p role="alert" className="max-w-sm text-[12px] text-content/55">
+              {error}
+            </p>
+            <button
+              type="button"
+              onClick={() => void openUrl(target.url)}
+              className={ACTION_OUTLINE}
+            >
+              <ExternalLink className="size-3.5" strokeWidth={1.75} />
+              Open on GitHub
+            </button>
+          </div>
+        ) : (
+          <div className="flex h-full items-center justify-center text-content/40">
+            <LoaderCircle className="size-4 animate-spin" strokeWidth={1.75} />
+          </div>
+        )}
+      </div>
+    </aside>
   );
 }
 
@@ -1182,12 +1369,17 @@ function InboxCard({
   );
 }
 
+export function inboxShowsFullFileDiff(item: InboxItem): boolean {
+  return item.provider === "github" && item.kind === "pr";
+}
+
 export function InboxDetail({
   item,
   cwd,
   projects,
   revision,
   relatedSessions,
+  mode = "inbox",
   onDiscuss,
   onStart,
   onOpenSession,
@@ -1197,11 +1389,13 @@ export function InboxDetail({
   projects: InboxProjectOption[];
   revision: number;
   relatedSessions: readonly SessionSummary[];
+  mode?: "inbox" | "panel";
   onDiscuss?: () => void;
   onStart?: (item: InboxItem, body?: string) => void | Promise<void>;
   onOpenSession?: (sessionId: string) => void | Promise<void>;
 }) {
   const detailLock = useLockOverscroll<HTMLDivElement>();
+  const panel = mode === "panel";
   const linear = item.provider === "linear";
   const gitlab = item.provider === "gitlab";
   const isPr = !linear && item.kind === "pr";
@@ -1234,6 +1428,8 @@ export function InboxDetail({
   const [loading, setLoading] = useState(cached == null);
   const [error, setError] = useState<string | null>(null);
   const [tab, setTab] = useState<"summary" | "code">("summary");
+  const [diffMode, setDiffMode] = useState<"hunks" | "full">("hunks");
+  const fullFile = inboxShowsFullFileDiff(item) && diffMode === "full";
   const [prDiff, setPrDiff] = useState<GithubPrDiff | null>(cachedDiff);
   const [diffLoading, setDiffLoading] = useState(isPr && cachedDiff == null);
   const [diffError, setDiffError] = useState<string | null>(null);
@@ -1457,7 +1653,7 @@ export function InboxDetail({
     let cancelled = false;
     const cachedDiff = gitlab
       ? peekGitlabMrDiff(item.repo, item.number)
-      : peekGithubPrDiff(item.projectPath, item.number);
+      : peekGithubPrDiff(item.projectPath, item.number, fullFile);
     if (cachedDiff) {
       setPrDiff(cachedDiff);
       setDiffLoading(false);
@@ -1469,7 +1665,7 @@ export function InboxDetail({
     }
     const pending = gitlab
       ? gitlabMrDiff(item.repo, item.number)
-      : githubPrDiff(item.projectPath, item.number);
+      : githubPrDiff(item.projectPath, item.number, { fullContext: fullFile });
     void pending
       .then((next) => {
         if (cancelled) return;
@@ -1487,7 +1683,16 @@ export function InboxDetail({
     return () => {
       cancelled = true;
     };
-  }, [gitlab, isPr, item.number, item.projectPath, item.repo, revision, tab]);
+  }, [
+    fullFile,
+    gitlab,
+    isPr,
+    item.number,
+    item.projectPath,
+    item.repo,
+    revision,
+    tab,
+  ]);
 
   const postComment = async (body: string) => {
     setPosting(true);
@@ -1550,18 +1755,32 @@ export function InboxDetail({
   };
 
   return (
-    <div className="flex h-full min-h-0 min-w-0 flex-col">
+    <div
+      ref={panel ? detailLock : undefined}
+      data-inbox-detail-scroll={panel ? "" : undefined}
+      className={
+        panel
+          ? "h-full min-h-0 min-w-0 overflow-y-auto overscroll-none"
+          : "flex h-full min-h-0 min-w-0 flex-col"
+      }
+    >
       <div
         data-inbox-detail-header
-        className="relative z-10 shrink-0 border-b border-content/10"
+        className={`relative border-b border-content/10 ${
+          panel ? "" : "z-10 shrink-0"
+        }`}
       >
         <div
-          className={`mx-auto flex w-full max-w-5xl flex-col gap-2.5 px-8 pt-5 ${
-            isPr ? "" : "pb-5"
-          }`}
+          className={`mx-auto flex w-full max-w-5xl flex-col ${
+            panel ? "gap-2 px-5 pt-4" : "gap-2.5 px-8 pt-5"
+          } ${isPr ? "" : panel ? "pb-4" : "pb-5"}`}
         >
-          <header className="flex flex-col gap-2.5">
-            <div className="flex min-w-0 items-center gap-2 text-[12px] text-content/50">
+          <header className={`flex flex-col ${panel ? "gap-2" : "gap-2.5"}`}>
+            <div
+              className={`flex min-w-0 items-center gap-2 text-[12px] text-content/50 ${
+                panel ? "pr-8" : ""
+              }`}
+            >
               <InboxProviderMark
                 provider={item.provider}
                 className="size-3.5 shrink-0"
@@ -1591,7 +1810,9 @@ export function InboxDetail({
             </div>
             <h1
               title={item.title}
-              className="line-clamp-2 text-[20px] font-semibold leading-tight text-content"
+              className={`line-clamp-2 font-semibold leading-tight text-content ${
+                panel ? "text-[18px]" : "text-[20px]"
+              }`}
             >
               {item.title}
             </h1>
@@ -1630,6 +1851,17 @@ export function InboxDetail({
                   )}
                 </>
               ) : null}
+              {item.createdAt && formatRelativeTime(item.createdAt) ? (
+                <>
+                  <span aria-hidden>·</span>
+                  <time
+                    dateTime={item.createdAt}
+                    title={new Date(item.createdAt).toLocaleString()}
+                  >
+                    Created {formatRelativeTime(item.createdAt)}
+                  </time>
+                </>
+              ) : null}
               {formatRelativeTime(item.updatedAt) ? (
                 <>
                   <span aria-hidden>·</span>
@@ -1657,7 +1889,7 @@ export function InboxDetail({
                 </>
               ) : null}
             </div>
-            {relatedSessions.length > 0 ? (
+            {!panel && relatedSessions.length > 0 ? (
               <div className="flex min-w-0 items-center gap-1.5 overflow-hidden">
                 <span className="mr-0.5 inline-flex shrink-0 items-center gap-1 text-[11px] text-content/45">
                   <MessageMultiple className="size-3.5" strokeWidth={1.75} />
@@ -1733,17 +1965,21 @@ export function InboxDetail({
                   ) : null}
                 </>
               ) : null}
-              <button
-                type="button"
-                onClick={onDiscuss}
-                className={item.kind === "pr" ? ACTION_FILLED : ACTION_OUTLINE}
-              >
-                <MessageSquare className="size-3.5" strokeWidth={1.75} /> Ask
-              </button>
+              {onDiscuss ? (
+                <button
+                  type="button"
+                  onClick={onDiscuss}
+                  className={
+                    item.kind === "pr" ? ACTION_FILLED : ACTION_OUTLINE
+                  }
+                >
+                  <MessageSquare className="size-3.5" strokeWidth={1.75} /> Ask
+                </button>
+              ) : null}
               <button
                 type="button"
                 onClick={() => void openUrl(item.url)}
-                className={ACTION_GHOST}
+                className={panel ? ACTION_BACKED : ACTION_GHOST}
               >
                 <ExternalLink className="size-3.5" strokeWidth={1.75} />
                 {item.kind === "pr"
@@ -1762,33 +1998,75 @@ export function InboxDetail({
             ) : null}
           </header>
           {isPr ? (
-            <div
-              role="tablist"
-              aria-label={
-                gitlab ? "Merge request sections" : "Pull request sections"
-              }
-              className="flex h-9 items-stretch gap-4"
-            >
-              <InboxDetailTab
-                label="Summary"
-                selected={tab === "summary"}
-                onSelect={() => setTab("summary")}
-              />
-              <InboxDetailTab
-                label="Code"
-                selected={tab === "code"}
-                onSelect={() => setTab("code")}
-              />
+            <div className="flex h-9 items-stretch gap-4">
+              <div
+                role="tablist"
+                aria-label={
+                  gitlab ? "Merge request sections" : "Pull request sections"
+                }
+                className="flex items-stretch gap-4"
+              >
+                <InboxDetailTab
+                  label="Summary"
+                  selected={tab === "summary"}
+                  onSelect={() => setTab("summary")}
+                />
+                <InboxDetailTab
+                  label="Code"
+                  selected={tab === "code"}
+                  onSelect={() => setTab("code")}
+                />
+              </div>
+              {tab === "code" && inboxShowsFullFileDiff(item) ? (
+                <div
+                  role="group"
+                  aria-label="Diff context"
+                  className="ml-auto flex items-center self-center rounded-md border border-content/10 bg-content/[0.03] p-0.5"
+                >
+                  <button
+                    type="button"
+                    aria-pressed={diffMode === "hunks"}
+                    onClick={() => setDiffMode("hunks")}
+                    className={`rounded px-2.5 py-1 text-[11px] leading-none ${
+                      diffMode === "hunks"
+                        ? "bg-content/10 text-content"
+                        : "text-content/45 hover:text-content/70"
+                    }`}
+                  >
+                    Hunks
+                  </button>
+                  <button
+                    type="button"
+                    aria-pressed={diffMode === "full"}
+                    onClick={() => setDiffMode("full")}
+                    className={`rounded px-2.5 py-1 text-[11px] leading-none ${
+                      diffMode === "full"
+                        ? "bg-content/10 text-content"
+                        : "text-content/45 hover:text-content/70"
+                    }`}
+                  >
+                    Full file
+                  </button>
+                </div>
+              ) : null}
             </div>
           ) : null}
         </div>
       </div>
       <div
-        ref={detailLock}
-        data-inbox-detail-scroll
-        className="min-h-0 min-w-0 flex-1 overflow-y-auto overscroll-none"
+        ref={panel ? undefined : detailLock}
+        data-inbox-detail-scroll={panel ? undefined : ""}
+        className={
+          panel
+            ? "min-w-0"
+            : "min-h-0 min-w-0 flex-1 overflow-y-auto overscroll-none"
+        }
       >
-        <div className="mx-auto flex w-full max-w-5xl flex-col gap-5 px-8 py-5">
+        <div
+          className={`mx-auto flex w-full max-w-5xl flex-col ${
+            panel ? "gap-4 px-5 py-4" : "gap-5 px-8 py-5"
+          }`}
+        >
           {item.labels.length > 0 ? (
             <div className="flex flex-wrap gap-1">
               {item.labels.map((label) => (
@@ -1808,8 +2086,9 @@ export function InboxDetail({
               <p className="text-[13px] text-content/50">{diffError}</p>
             ) : prDiff ? (
               <InboxPrDiff
-                key={`${item.projectPath}:${item.number}:${revision}`}
+                key={`${item.projectPath}:${item.number}:${revision}:${diffMode}`}
                 diff={prDiff}
+                fullFile={fullFile}
               />
             ) : (
               <p className="text-[13px] text-content/45">No file changes</p>

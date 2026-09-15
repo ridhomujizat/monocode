@@ -1,14 +1,10 @@
 import {
   Archive,
-  Check,
   ChevronDown,
-  ChevronUp,
-  CircleAlert,
   Folder,
   FolderOpen,
   FolderPlus,
   ImagePlus,
-
   Inbox,
   MoreHorizontal,
   Pin,
@@ -67,6 +63,7 @@ import {
   groupsContaining,
   loadArchivedGroups,
   loadProjectGroups,
+  moveMembershipToGroup,
   pruneProjectGroups,
   removeMembership,
   removeProjectFromGroup,
@@ -102,10 +99,10 @@ import {
   saveTabGroupLabel,
   saveTabGroupMascot,
 } from "../lib/tabGroups";
-import { formatLiveElapsed, type LiveAgent } from "../lib/liveAgents";
+import type { LiveAgent } from "../lib/liveAgents";
+import { LiveAgentsPreview } from "./LiveAgentsPreview";
 import { ExplorerMenu, type ExplorerMenuItem } from "./ExplorerMenu";
 import { FolderColorSwatches } from "./FolderColorSwatches";
-import { HarnessIcon } from "./HarnessIcon";
 import { ProjectLogoIcon } from "./ProjectLogoIcon";
 import { ProjectBackgroundDialog } from "./ProjectBackgroundDialog";
 import { ProjectMascot } from "./ProjectMascot";
@@ -117,7 +114,6 @@ import type { InstalledUpdate } from "../lib/updateNotice";
 import { SettingsNav } from "./SettingsRail";
 import { Shimmer } from "../surfaces/Shimmer";
 import { TabGroupMenu, type TabGroupMenuExtraItem } from "./TabGroupMenu";
-import { TerminalSpinner } from "./TerminalSpinner";
 import type { SettingsSectionId } from "../lib/settings";
 import { usePlugins } from "../plugins/registry";
 import { PluginCards } from "./PluginCards";
@@ -262,6 +258,8 @@ export function ProjectRail({
     y: number;
     path: string;
     projectKey: string;
+    /** Set when the menu opened on a card inside a group. */
+    memberId?: string;
   } | null>(null);
   const [addAction, setAddAction] = useState<{ x: number; y: number } | null>(
     null,
@@ -371,22 +369,29 @@ export function ProjectRail({
     saveProjectGroups(next);
   };
 
-  const openProjectMenu = (path: string, x: number, y: number) => {
+  const openProjectMenu = (
+    path: string,
+    x: number,
+    y: number,
+    dragId?: string,
+  ) => {
     setProjectMenu({
       x,
       y,
       path,
       projectKey: projectKey(path),
+      memberId: dragId ? membershipId(dragId) : undefined,
     });
   };
 
   const onProjectContextMenu = (
     path: string,
     event: MouseEvent<HTMLElement>,
+    dragId?: string,
   ) => {
     event.preventDefault();
     event.stopPropagation();
-    openProjectMenu(path, event.clientX, event.clientY);
+    openProjectMenu(path, event.clientX, event.clientY, dragId);
   };
 
   const onProjectRename = (projectKey: string, label: string) => {
@@ -518,7 +523,12 @@ export function ProjectRail({
 
   const onProjectMenuPick = (action: string) => {
     if (!projectMenu) return;
-    const { path, projectKey } = projectMenu;
+    const { path, projectKey, memberId } = projectMenu;
+    // One project can hold a card in several groups. Removing a duplicate card
+    // takes that card only: the project, and its history, stay for the others.
+    const duplicate =
+      memberId !== undefined &&
+      groupsContaining(projectGroups, path).length > 1;
     if (action === "pin" || action === "unpin") onTogglePin(path);
     else if (action === "background") {
       setBackgroundProject({
@@ -527,8 +537,14 @@ export function ProjectRail({
       });
     } else if (action === "reveal") void revealPath(path);
     else if (action === "archive") {
-      onRemoveProject?.(path, { purgeData: false });
+      if (duplicate)
+        commitProjectGroups(removeMembership(projectGroups, memberId));
+      else onRemoveProject?.(path, { purgeData: false });
     } else if (action === "delete") {
+      if (duplicate) {
+        commitProjectGroups(removeMembership(projectGroups, memberId));
+        return;
+      }
       setRemoving({
         name: resolveTabGroupLabel(projectKey, groupLabels, basename(path)),
         paths: [path],
@@ -550,7 +566,12 @@ export function ProjectRail({
       );
       unpinProject(path);
     } else if (action === "group-remove") {
-      commitProjectGroups(removeProjectFromGroup(projectGroups, path));
+      // A path can sit in several groups; drop only the card that was clicked.
+      commitProjectGroups(
+        memberId
+          ? removeMembership(projectGroups, memberId)
+          : removeProjectFromGroup(projectGroups, path),
+      );
     }
   };
 
@@ -623,6 +644,14 @@ export function ProjectRail({
     projectGroups
       .flatMap((group) => group.members)
       .find((member) => member.id === id)?.path ?? id;
+
+  /** A drag id is a membership id inside a group, or a bare project path. */
+  const membershipId = (id: string) => (groupOfMembership(id) ? id : undefined);
+
+  const groupOfMembership = (id: string) =>
+    projectGroups.find((group) =>
+      group.members.some((member) => member.id === id),
+    );
 
   const onArchivedPick = (id: string) => {
     setArchivedMenu(null);
@@ -703,12 +732,15 @@ export function ProjectRail({
 
   const onConfirmDelete = () => {
     if (!removing) return;
+    const next = removing.groupId
+      ? dissolveGroup(projectGroups, removing.groupId)
+      : projectGroups;
     for (const path of removing.paths) {
+      // Another group still lists it: that copy keeps the project and history.
+      if (groupsContaining(next, path).length > 0) continue;
       onRemoveProject?.(path, { purgeData: true });
     }
-    if (removing.groupId) {
-      commitProjectGroups(dissolveGroup(projectGroups, removing.groupId));
-    }
+    if (next !== projectGroups) commitProjectGroups(next);
     setRemoving(null);
   };
 
@@ -737,13 +769,12 @@ export function ProjectRail({
     onActivate: (id) => onSelectProject(resolveDraggedPath(id)),
     onDropOnGroup: (draggedId, groupId) => {
       const draggedPath = resolveDraggedPath(draggedId);
-      commitProjectGroups(
-        setGroupCollapsed(
-          addProjectToGroup(projectGroups, groupId, draggedPath),
-          groupId,
-          false,
-        ),
-      );
+      // A card already in a group moves; only the menu adds a second copy.
+      const next = groupOfMembership(draggedId)
+        ? moveMembershipToGroup(projectGroups, draggedId, groupId)
+        : addProjectToGroup(projectGroups, groupId, draggedPath);
+      if (next === projectGroups) return;
+      commitProjectGroups(setGroupCollapsed(next, groupId, false));
       unpinProject(draggedPath);
     },
   });
@@ -1188,204 +1219,6 @@ export function ProjectRail({
 type SortableHandle = ReturnType<typeof useSortable>;
 type GroupEntry = Extract<ProjectGroupEntry, { kind: "group" }>;
 
-const LIVE_AGENT_MIN = 2;
-const LIVE_AGENT_CAP = 4;
-
-function LiveAgentsPreview({
-  agents,
-  activeSessionId,
-  onSelect,
-  groupLabels,
-  groupColors,
-  groupCustomColors,
-  groupMascots,
-}: {
-  agents: LiveAgent[];
-  activeSessionId?: string;
-  onSelect?: (sessionId: string) => void;
-  groupLabels: Record<string, string>;
-  groupColors: Record<string, number>;
-  groupCustomColors: Record<string, string>;
-  groupMascots: Record<string, string>;
-}) {
-  const [expanded, setExpanded] = useState(false);
-  const [now, setNow] = useState(() => Date.now());
-  const lockList = useLockOverscroll<HTMLDivElement>();
-  const ticking =
-    agents.length >= LIVE_AGENT_MIN &&
-    agents.some((agent) => !agent.done && agent.startedAt != null);
-
-  useEffect(() => {
-    if (!ticking) return;
-    const id = window.setInterval(() => setNow(Date.now()), 1000);
-    return () => window.clearInterval(id);
-  }, [ticking]);
-
-  if (agents.length < LIVE_AGENT_MIN) return null;
-
-  const extra = agents.length - LIVE_AGENT_CAP;
-  const visible =
-    expanded || extra <= 0 ? agents : agents.slice(0, LIVE_AGENT_CAP);
-
-  return (
-    <div className="shrink-0 px-2">
-      <div
-        role="status"
-        aria-label="Working agents"
-        className="overflow-hidden rounded-lg bg-content/5"
-      >
-        <div className="flex items-center gap-2 px-3.5 py-1.5">
-          <span
-            aria-hidden
-            className="size-1.5 shrink-0 rounded-full bg-accent shadow-[0_0_8px_var(--color-accent)] animate-pulse"
-          />
-          <span className="min-w-0 flex-1 truncate text-xs text-content/50">
-            Working
-          </span>
-          <span className="text-[11px] tabular-nums text-content/40">
-            {agents.length}
-          </span>
-        </div>
-        <div
-          ref={expanded ? lockList : undefined}
-          className={`flex flex-col gap-px px-1 ${
-            extra > 0 ? "" : "pb-1"
-          } ${expanded ? "max-h-[45vh] overflow-y-auto overscroll-none" : ""}`}
-        >
-          {visible.map((agent) => (
-            <LiveAgentCard
-              key={agent.id}
-              agent={agent}
-              now={now}
-              selected={agent.id === activeSessionId}
-              onSelect={onSelect}
-              groupLabels={groupLabels}
-              groupColors={groupColors}
-              groupCustomColors={groupCustomColors}
-              groupMascots={groupMascots}
-            />
-          ))}
-        </div>
-        {extra > 0 ? (
-          <button
-            type="button"
-            aria-expanded={expanded}
-            onClick={() => setExpanded((open) => !open)}
-            className="flex w-full items-center justify-center gap-1 px-2 py-1.5 text-[11px] text-content/50 hover:bg-content/8 hover:text-content"
-          >
-            {expanded ? (
-              <ChevronUp className="size-3" strokeWidth={1.75} />
-            ) : (
-              <ChevronDown className="size-3" strokeWidth={1.75} />
-            )}
-            {expanded ? "Show less" : `${extra} more`}
-          </button>
-        ) : null}
-      </div>
-    </div>
-  );
-}
-
-function LiveAgentCard({
-  agent,
-  now,
-  selected,
-  onSelect,
-  groupLabels,
-  groupColors,
-  groupCustomColors,
-  groupMascots,
-}: {
-  agent: LiveAgent;
-  now: number;
-  selected: boolean;
-  onSelect?: (sessionId: string) => void;
-  groupLabels: Record<string, string>;
-  groupColors: Record<string, number>;
-  groupCustomColors: Record<string, string>;
-  groupMascots: Record<string, string>;
-}) {
-  const seed = projectName(agent.cwd);
-  const key = projectKey(agent.cwd);
-  const project = resolveTabGroupLabel(key, groupLabels, seed);
-  const color = resolveTabGroupColor(key, groupColors, groupCustomColors, seed);
-  const elapsed = agent.done
-    ? agent.durationMs != null
-      ? formatLiveElapsed(0, agent.durationMs)
-      : ""
-    : agent.startedAt != null
-      ? formatLiveElapsed(agent.startedAt, now)
-      : "";
-  const activity = agent.needsApproval
-    ? "Need approval"
-    : agent.done
-      ? "Done"
-      : agent.activity;
-  const live = !agent.needsApproval && !agent.done;
-  const title = [agent.title, project, activity, elapsed]
-    .filter(Boolean)
-    .join("\n");
-
-  return (
-    <button
-      type="button"
-      title={title}
-      aria-label={[agent.title, project, activity, elapsed]
-        .filter(Boolean)
-        .join(", ")}
-      aria-current={selected ? "true" : undefined}
-      onClick={() => onSelect?.(agent.id)}
-      className={`relative flex w-full flex-col rounded-md px-2 py-1.5 text-left ${
-        selected ? "bg-content/10" : "hover:bg-content/8"
-      }`}
-    >
-      <span className="flex min-w-0 items-center gap-2">
-        <ProjectMascot
-          project={seed}
-          color={color}
-          name={resolveTabGroupMascot(key, groupMascots)}
-          className="size-2 shrink-0"
-          active={live}
-        />
-        {live ? (
-          <p className="min-w-0 flex-1 truncate text-[13px] font-semibold leading-snug">
-            {agent.title}
-          </p>
-        ) : (
-          <span className="min-w-0 flex-1 truncate text-[13px] font-semibold leading-snug">
-            {agent.title}
-          </span>
-        )}
-      </span>
-      <span
-        className={`mt-1 flex min-w-0 items-center gap-1.5 pl-4 text-[11px] leading-tight ${
-          agent.needsApproval
-            ? "text-amber-400"
-            : agent.done
-              ? "text-emerald-400"
-              : "text-content/50"
-        }`}
-      >
-        {agent.needsApproval ? (
-          <CircleAlert className="size-3 shrink-0" strokeWidth={1.75} />
-        ) : agent.done ? (
-          <Check className="size-3 shrink-0" strokeWidth={2.25} />
-        ) : (
-          <TerminalSpinner className="inline-block w-3 select-none text-center text-[11px] leading-none" />
-        )}
-        <span className="min-w-0 truncate">{activity}</span>
-      </span>
-      <span className="mt-1 flex min-w-0 items-center gap-1.5 pl-4 text-[11px] leading-tight text-content/45">
-        <HarnessIcon harness={agent.harness} className="size-3 shrink-0" />
-        <span className="min-w-0 flex-1 truncate">{project}</span>
-        {elapsed ? (
-          <span className="shrink-0 tabular-nums">{elapsed}</span>
-        ) : null}
-      </span>
-    </button>
-  );
-}
-
 function ProjectGroupRow({
   group,
   count,
@@ -1618,8 +1451,12 @@ function ProjectSection({
   searchActive: boolean;
   onSelect: (path: string) => void;
   onTogglePin: (path: string) => void;
-  onContextMenu: (path: string, event: MouseEvent<HTMLElement>) => void;
-  onOpenMenu: (path: string, x: number, y: number) => void;
+  onContextMenu: (
+    path: string,
+    event: MouseEvent<HTMLElement>,
+    dragId?: string,
+  ) => void;
+  onOpenMenu: (path: string, x: number, y: number, dragId?: string) => void;
   groupLabels: Record<string, string>;
   groupColors: Record<string, number>;
   groupCustomColors: Record<string, string>;
@@ -1711,8 +1548,12 @@ function ProjectCard({
   sortIndex: number;
   onSelect: (path: string) => void;
   onTogglePin: (path: string) => void;
-  onContextMenu: (path: string, event: MouseEvent<HTMLElement>) => void;
-  onOpenMenu: (path: string, x: number, y: number) => void;
+  onContextMenu: (
+    path: string,
+    event: MouseEvent<HTMLElement>,
+    dragId?: string,
+  ) => void;
+  onOpenMenu: (path: string, x: number, y: number, dragId?: string) => void;
   groupLabels: Record<string, string>;
   groupColors: Record<string, number>;
   groupCustomColors: Record<string, string>;
@@ -1748,6 +1589,7 @@ function ProjectCard({
   return (
     <div
       ref={(el) => sortable.setItemRef(dragId, el)}
+      data-selected={selected || undefined}
       className={`group relative flex touch-none items-stretch rounded-md px-2 h-8 ${
         selected
           ? "bg-content/12 text-content"
@@ -1767,7 +1609,7 @@ function ProjectCard({
         if (sortable.consumeClick()) return;
         onSelect(item.path);
       }}
-      onContextMenu={(event) => onContextMenu(item.path, event)}
+      onContextMenu={(event) => onContextMenu(item.path, event, dragId)}
     >
       {showStart ? (
         <div className="pointer-events-none absolute inset-x-2 top-0 z-20 h-0.5 rounded-full bg-accent" />
@@ -1783,7 +1625,7 @@ function ProjectCard({
         className="flex min-w-0 flex-1 cursor-default items-center gap-2 text-left group-hover:pr-6"
       >
         <div
-          className={`grid size-4 shrink-0 place-items-center ${
+          className={`project-card-logo grid size-4 shrink-0 place-items-center ${
             pinnable ? "transition-opacity group-hover:opacity-0" : ""
           }`}
         >
@@ -1811,7 +1653,7 @@ function ProjectCard({
           <span className={nameClassName}>{name}</span>
         )}
         {hasChanges ? (
-          <span className="shrink-0 group-hover:hidden">
+          <span className="project-card-stats shrink-0 group-hover:hidden">
             <ProjectDiffStat additions={additions} deletions={deletions} />
           </span>
         ) : null}
@@ -1825,7 +1667,7 @@ function ProjectCard({
         onPointerDown={(event) => event.stopPropagation()}
         onClick={(event) => {
           event.stopPropagation();
-          onOpenMenu(item.path, event.clientX, event.clientY);
+          onOpenMenu(item.path, event.clientX, event.clientY, dragId);
         }}
         className="absolute right-1 top-1/2 hidden size-6 -translate-y-1/2 place-items-center rounded-md text-content/55 hover:bg-content/8 hover:text-content group-hover:grid"
       >

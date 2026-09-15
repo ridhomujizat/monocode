@@ -8,6 +8,7 @@ import {
   groupContaining,
   groupsContaining,
   loadProjectGroups,
+  moveMembershipToGroup,
   pruneProjectGroups,
   removeMembership,
   removeProjectFromGroup,
@@ -201,6 +202,47 @@ describe("removeMembership", () => {
   });
 });
 
+describe("moveMembershipToGroup", () => {
+  it("relocates the card instead of leaving a copy behind", () => {
+    const start = [group("g1", ["/p/a", "/p/b"]), group("g2", ["/p/c"])];
+    const next = moveMembershipToGroup(start, "g1#0", "g2");
+    expect(next.map((entry) => entry.members.map((m) => m.path))).toEqual([
+      ["/p/b"],
+      ["/p/c", "/p/a"],
+    ]);
+  });
+
+  it("keeps the other memberships of the same project", () => {
+    const start = [
+      group("g1", ["/p/a"]),
+      group("g2", ["/p/a"]),
+      group("g3", []),
+    ];
+    const next = moveMembershipToGroup(start, "g1#0", "g3");
+    expect(next.map((entry) => entry.members.map((m) => m.path))).toEqual([
+      [],
+      ["/p/a"],
+      ["/p/a"],
+    ]);
+  });
+
+  it("returns the same reference for its own group, an unknown membership, or an unknown target", () => {
+    const start = [group("g1", ["/p/a"]), group("g2", ["/p/b"])];
+    expect(moveMembershipToGroup(start, "g1#0", "g1")).toBe(start);
+    expect(moveMembershipToGroup(start, "nope", "g2")).toBe(start);
+    expect(moveMembershipToGroup(start, "g1#0", "nope")).toBe(start);
+  });
+
+  it("drops the move when the target already holds the project", () => {
+    const start = [group("g1", ["/p/a"]), group("g2", ["/p/a"])];
+    const next = moveMembershipToGroup(start, "g1#0", "g2");
+    expect(next.map((entry) => entry.members.map((m) => m.path))).toEqual([
+      [],
+      ["/p/a"],
+    ]);
+  });
+});
+
 describe("setGroupProjects", () => {
   it("replaces member order with normalized deduped paths, keeping ids", () => {
     const start = [group("g", ["/p/a", "/p/b"])];
@@ -268,9 +310,9 @@ describe("setGroupCollapsed / setGroupPinned", () => {
     const start = [group("g", ["/p/a"])];
     expect(setGroupCollapsed(start, "g", true)[0]?.collapsed).toBe(true);
     expect(setGroupCollapsed(start, "g", false)).toBe(start);
-    expect(setGroupPinned(start, "g", true)).toEqual(
-      [group("g", ["/p/a"], { pinned: true })],
-    );
+    expect(setGroupPinned(start, "g", true)).toEqual([
+      group("g", ["/p/a"], { pinned: true }),
+    ]);
     const pinned = setGroupPinned(start, "g", true);
     expect(setGroupPinned(pinned, "g", true)).toBe(pinned);
     expect(setGroupPinned(start, "nope", true)).toBe(start);
