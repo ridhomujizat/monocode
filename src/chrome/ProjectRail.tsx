@@ -274,6 +274,8 @@ export function ProjectRail({
     name: string;
     paths: string[];
     groupId?: string;
+    /** The card that asked for the delete; it goes with the project. */
+    memberId?: string;
   } | null>(null);
   const [projectGroups, setProjectGroups] = useState(loadProjectGroups);
   const [groupMenu, setGroupMenu] = useState<{
@@ -548,6 +550,7 @@ export function ProjectRail({
       setRemoving({
         name: resolveTabGroupLabel(projectKey, groupLabels, basename(path)),
         paths: [path],
+        memberId,
       });
     } else if (action === "group-new") {
       const { groups, id } = createGroupWithProjects(projectGroups, [path]);
@@ -732,11 +735,13 @@ export function ProjectRail({
 
   const onConfirmDelete = () => {
     if (!removing) return;
-    const next = removing.groupId
+    // Drop what is being deleted first, so only the cards that survive it can
+    // hold a project back: another group still listing it keeps its history.
+    let next = removing.groupId
       ? dissolveGroup(projectGroups, removing.groupId)
       : projectGroups;
+    if (removing.memberId) next = removeMembership(next, removing.memberId);
     for (const path of removing.paths) {
-      // Another group still lists it: that copy keeps the project and history.
       if (groupsContaining(next, path).length > 0) continue;
       onRemoveProject?.(path, { purgeData: true });
     }
