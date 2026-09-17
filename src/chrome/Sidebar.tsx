@@ -1,3 +1,4 @@
+import { OrchestrationSidebarAgents } from "./OrchestrationSidebarAgents";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import {
   Archive,
@@ -6,6 +7,7 @@ import {
   ChevronRight,
   CircleAlert,
   CircleDot,
+  Clock,
   Folder,
   GitBranch,
   GitPullRequest,
@@ -14,12 +16,14 @@ import {
   Pin,
   Plus,
   Search,
+  Share,
   Settings,
   StickyNote,
 } from "./icons";
 import {
   memo,
   useEffect,
+  useId,
   useRef,
   useState,
   type KeyboardEvent as ReactKeyboardEvent,
@@ -32,16 +36,13 @@ import {
   saveSidebarTabOrder,
   type SidebarTabId,
 } from "../lib/appearance";
-import {
-  basename,
-  type GitFileDiffKind,
-  type GitHistoryCommit,
-} from "../lib/fs";
+import { type GitFileDiffKind, type GitHistoryCommit } from "../lib/fs";
 import { IS_MAC, MOD } from "../lib/platform";
 import { resolveModel } from "../lib/models";
-import { prettyParent, projectKey, projectName } from "../lib/paths";
+import type { OpenFileFn } from "../lib/search";
 import { sessionDisplayTitle } from "../lib/session";
 import { nextUnseenFinishedSessions } from "../lib/sessionDone";
+import { orchestrationTaskLabel } from "../lib/orchestrationSummary";
 import {
   orderedSessionActionIds,
   pruneSessionSelection,
@@ -64,22 +65,27 @@ import {
   folderAccent,
   folderContaining,
   folderShellFill,
+  loadPinnedSessionsCollapsed,
+  loadReminderSessionsCollapsed,
   loadSessionFolders,
   mergeFolderSessionSummaries,
   pruneSessionFolders,
   removeSessionFromFolder,
   renameFolder,
   reorderSessionFolders,
+  savePinnedSessionsCollapsed,
+  saveReminderSessionsCollapsed,
   saveSessionFolders,
   sessionListNavigationIds,
   setFolderCollapsed,
   setFolderColor,
   setFolderCustomColor,
+  subscribeSessionFolders,
   ungroupedSessions,
   type SessionFolder,
   type SessionListDropTarget,
 } from "../lib/sessionFolders";
-import { SESSION_LIST_PAGE, sessionListWindow } from "../lib/sessionListWindow";
+import { LIST_PAGE_SIZE, listWindowSize } from "../lib/listWindow";
 import {
   filterSessionsByHarness,
   filterSessionsByStatus,
@@ -95,26 +101,15 @@ import type { LiveAgent } from "../lib/liveAgents";
 import type { SessionSummary } from "../lib/sessionStore";
 import type { SettingsSectionId } from "../lib/settings";
 import type { InstalledUpdate } from "../lib/updateNotice";
-import {
-  loadTabGroupColors,
-  loadTabGroupCustomColors,
-  loadTabGroupLabels,
-  loadTabGroupMascots,
-  resolveTabGroupColor,
-  resolveTabGroupLabel,
-  resolveTabGroupLogo,
-  resolveTabGroupMascot,
-} from "../lib/tabGroups";
 import { useDragResize } from "../hooks/useDragResize";
 import { useGitFileStatuses } from "../hooks/useGitFileStatuses";
-import { useInboxUnseen } from "../hooks/useInboxUnseen";
 import { useLockOverscroll } from "../hooks/useLockOverscroll";
 import { useProjectDiffStats } from "../hooks/useProjectDiffStats";
 import { useSortable } from "../hooks/useSortable";
-import { useTabGroupLogos } from "../hooks/useTabGroupLogos";
+import { useAnimatedReorder } from "../hooks/useAnimatedReorder";
 import {
+  collectRailProjects,
   looksLikeProject,
-  projectRailItems,
   sameProjectPath,
   type RecentProject,
 } from "../lib/recents";
@@ -122,15 +117,22 @@ import { FolderColorSwatches } from "./FolderColorSwatches";
 import { ExplorerMenu, type ExplorerMenuItem } from "./ExplorerMenu";
 import { FileTree } from "./FileTree";
 import { HarnessIcon } from "./HarnessIcon";
+import { LiveAgentsPreview } from "./LiveAgentsPreview";
 import { ProjectRail } from "./ProjectRail";
+import { InboxNotificationMenu } from "./InboxNotificationMenu";
 import { RailAction } from "./RailAction";
 import { TerminalSpinner } from "./TerminalSpinner";
 import { DevModeSlot, IconButton, TabVisitNav } from "./TitleBar";
 import { ProjectSearch } from "./ProjectSearch";
-import { ProjectLogoIcon } from "./ProjectLogoIcon";
-import { ProjectMascot } from "./ProjectMascot";
 import { Popover } from "./Popover";
+import { SearchableProjectPicker } from "./SearchableProjectPicker";
 import { SessionFiltersMenu } from "./SessionFiltersMenu";
+import { sessionReminderPresets } from "./sessionReminderPresets";
+import {
+  formatReminderTime,
+  reminderTime,
+  type SessionReminder,
+} from "../lib/sessionReminders";
 import { SessionsEmpty } from "./SessionsEmpty";
 import { SidebarUpdateFooter } from "./SidebarUpdate";
 import { SourceControl } from "./SourceControl";
@@ -138,6 +140,7 @@ import { SourceControl } from "./SourceControl";
 const MIN_WIDTH = 260;
 const MAX_WIDTH = 560;
 const DEFAULT_WIDTH = 260;
+const REMINDERS_COLOR = "#f59e0b";
 
 let rememberedWidth = DEFAULT_WIDTH;
 
@@ -191,9 +194,12 @@ type Props = {
   ) => void;
   onPinSession?: (sessionId: string, pinned: boolean) => void;
   onPinSessions?: (sessionIds: readonly string[], pinned: boolean) => void;
+  reminders?: readonly SessionReminder[];
+  onSetReminders?: (sessionIds: readonly string[], dueAt: number) => void;
+  onCancelReminders?: (sessionIds: readonly string[]) => void;
   onDeleteSession?: (sessionId: string) => void;
   onDeleteSessions?: (sessionIds: readonly string[]) => void;
-  onOpenFile: (path: string) => void;
+  onOpenFile: OpenFileFn;
   onOpenTerminal?: (cwd: string) => void;
   onFileMoved?: (from: string, to: string) => void;
   onFileDeleted?: (path: string) => void;
@@ -226,7 +232,7 @@ type Props = {
   onNewTerminal?: () => void;
   onSearch?: () => void;
   onOpenInbox?: () => void;
-  onOpenInboxItem?: (item: LinkedWorkItem) => void;
+  onOpenInboxItem?: (item: LinkedWorkItem, sessionId: string) => void;
   onOpenNotes?: () => void;
   onGoToFile?: () => void;
   searchActive?: boolean;
@@ -238,9 +244,13 @@ type Props = {
   onToggleProjectRail?: () => void;
   projectRailOpen?: boolean;
   unseenFinishedIds?: Set<string>;
+  inboxUnseen?: boolean;
+  /** Linked GitHub work changed after the session last advanced. */
+  linkedSessionUpdateIds?: ReadonlySet<string>;
   settingsOpen?: boolean;
   settingsSection?: SettingsSectionId;
   onOpenSettings?: () => void;
+  onOpenNotificationSettings?: (projectPath?: string) => void;
   onSelectSettingsSection?: (section: SettingsSectionId) => void;
   onCloseSettings?: () => void;
   updateNotice?: InstalledUpdate | null;
@@ -268,6 +278,9 @@ function SidebarComponent({
   onArchiveSessions,
   onPinSession,
   onPinSessions,
+  reminders = [],
+  onSetReminders,
+  onCancelReminders,
   onDeleteSession,
   onDeleteSessions,
   onOpenFile,
@@ -314,9 +327,12 @@ function SidebarComponent({
   onToggleProjectRail,
   projectRailOpen = true,
   unseenFinishedIds: unseenFinishedIdsProp,
+  inboxUnseen = false,
+  linkedSessionUpdateIds = new Set(),
   settingsOpen = false,
   settingsSection = "general",
   onOpenSettings,
+  onOpenNotificationSettings,
   onSelectSettingsSection,
   onCloseSettings,
   updateNotice = null,
@@ -324,7 +340,6 @@ function SidebarComponent({
   onDismissUpdate,
 }: Props) {
   const gitRoot = gitCwd || cwd;
-  const inboxUnseen = useInboxUnseen(recents, cwd);
   const resize = useDragResize({
     min: MIN_WIDTH,
     max: () => Math.min(MAX_WIDTH, Math.floor(window.innerWidth * 0.5)),
@@ -347,6 +362,7 @@ function SidebarComponent({
     () => new Set(),
   );
   const contextSelectionRef = useRef(false);
+  const selectionAnchorRef = useRef<string | null>(null);
   const [folderMenu, setFolderMenu] = useState<{
     x: number;
     y: number;
@@ -359,6 +375,12 @@ function SidebarComponent({
   const [sessionFolders, setSessionFolders] = useState<SessionFolder[]>(() =>
     loadSessionFolders(cwd),
   );
+  const [pinnedSessionsCollapsed, setPinnedSessionsCollapsed] = useState(() =>
+    loadPinnedSessionsCollapsed(cwd),
+  );
+  const [reminderSessionsCollapsed, setReminderSessionsCollapsed] = useState(
+    () => loadReminderSessionsCollapsed(cwd),
+  );
   const [sessionDrop, setSessionDrop] = useState<SessionListDropTarget | null>(
     null,
   );
@@ -369,7 +391,7 @@ function SidebarComponent({
     null,
   );
   const [searchQuery, setSearchQuery] = useState("");
-  const [sessionListLimit, setSessionListLimit] = useState(SESSION_LIST_PAGE);
+  const [sessionListLimit, setSessionListLimit] = useState(LIST_PAGE_SIZE);
   const loadMoreRef = useRef<HTMLLIElement>(null);
   const searchInputRef = useRef<HTMLInputElement>(null);
   const pendingFolderSessionIds = useRef(new Set<string>());
@@ -398,7 +420,7 @@ function SidebarComponent({
     sessions,
     openSessions,
     sessionFolders,
-  );
+  ).filter((session) => !session.orchestrationLeadId);
   const visibleSessions = [
     ...filterSessionsByQuery(
       filterSessionsByStatus(
@@ -426,11 +448,21 @@ function SidebarComponent({
   // Summaries for the whole project stay in `sessions` so filters still work.
   // Folders sit above the ungrouped list. Only a page of ungrouped cards
   // mounts; the sentinel below asks for the next page.
-  const ungroupedVisible = ungroupedSessions(visibleSessions, sessionFolders);
+  const reminderIds = new Set(reminders.map((reminder) => reminder.sessionId));
+  const reminderGroup = {
+    sessionIds: [...reminders]
+      .sort((a, b) => a.dueAt - b.dueAt)
+      .map((reminder) => reminder.sessionId),
+    collapsed: reminderSessionsCollapsed,
+  };
+  const ungroupedVisible = ungroupedSessions(
+    visibleSessions,
+    sessionFolders,
+  ).filter((session) => !reminderIds.has(session.id));
   const activeUngroupedIndex = ungroupedVisible.findIndex(
     (session) => session.id === activeSessionId,
   );
-  const shownUngroupedCount = sessionListWindow(
+  const shownUngroupedCount = listWindowSize(
     ungroupedVisible.length,
     sessionListLimit,
     activeUngroupedIndex,
@@ -440,11 +472,15 @@ function SidebarComponent({
     visibleSessions,
     sessionFolders,
     ungroupedVisible,
+    pinnedSessionsCollapsed,
+    reminderGroup,
   );
   const sessionListEntries = buildSessionList(
     visibleSessions,
     sessionFolders,
     shownUngrouped,
+    pinnedSessionsCollapsed,
+    reminderGroup,
   );
   const sessionNavigationIds = sessionListNavigationIds(
     fullSessionListEntries,
@@ -456,10 +492,14 @@ function SidebarComponent({
   }, [onSessionNavigationOrder, sessionNavigationKey]);
   useEffect(() => {
     if (tab !== "sessions") {
+      selectionAnchorRef.current = null;
       setSelectedSessionIds(new Set());
       return;
     }
     const available = new Set(sessionNavigationIds);
+    if (selectionAnchorRef.current && !available.has(selectionAnchorRef.current)) {
+      selectionAnchorRef.current = null;
+    }
     setSelectedSessionIds((current) =>
       pruneSessionSelection(current, available),
     );
@@ -468,11 +508,14 @@ function SidebarComponent({
   const sessionListKey = `${cwd}\0${sessionFilters.showArchived}\0${sessionFilters.time}\0${sessionFilters.hiddenHarnesses.join(",")}\0${sessionFilters.status.working}\0${sessionFilters.status.needsApproval}\0${sessionFilters.status.done}\0${searchQuery}`;
   const sessionHarnesses = harnessesInSessions(sessions);
   const narrowedByUser = searchNarrowed || filtersActive;
-  const sortable = useSortable(tabOrder, (ids) => {
-    const next = ids as SidebarTab[];
+  const visibleTabs = tabOrder.filter((itemId) => itemId !== "inbox");
+  const sortable = useAnimatedReorder(visibleTabs, (ids) => {
+    let index = 0;
+    const next = tabOrder.map((itemId) =>
+      itemId === "inbox" ? itemId : ids[index++],
+    );
     setTabOrder(next);
     saveSidebarTabOrder(next);
-    if (next[0]) onTabChange(next[0]);
   });
   const visibleFolderIds = sessionListEntries.flatMap((entry) =>
     entry.kind === "folder" ? [entry.folder.id] : [],
@@ -489,8 +532,6 @@ function SidebarComponent({
     },
     { axis: "y" },
   );
-  const visibleTabs = tabOrder.filter((itemId) => itemId !== "inbox");
-  const canDragTabs = visibleTabs.length > 1;
   const showProjectRail = Boolean(onSelectProject && onOpenProject);
   // Settings live in the rail slot, so they keep it visible even when the
   // project rail itself is collapsed.
@@ -511,7 +552,7 @@ function SidebarComponent({
   const changeStats = useProjectDiffStats(gitRoot, open);
 
   useEffect(() => {
-    setSessionListLimit(SESSION_LIST_PAGE);
+    setSessionListLimit(LIST_PAGE_SIZE);
     const scroller = sessionsScrollRef.current;
     if (scroller) scroller.scrollTop = 0;
   }, [sessionListKey]);
@@ -524,7 +565,7 @@ function SidebarComponent({
     const observer = new IntersectionObserver(
       ([entry]) => {
         if (!entry?.isIntersecting) return;
-        setSessionListLimit((current) => current + SESSION_LIST_PAGE);
+        setSessionListLimit((current) => current + LIST_PAGE_SIZE);
       },
       { root, rootMargin: "240px" },
     );
@@ -534,11 +575,21 @@ function SidebarComponent({
 
   useEffect(() => {
     setSessionFolders(loadSessionFolders(cwd));
+    setPinnedSessionsCollapsed(loadPinnedSessionsCollapsed(cwd));
+    setReminderSessionsCollapsed(loadReminderSessionsCollapsed(cwd));
     setRenamingFolderId(null);
     setFolderMenu(null);
     setSessionDrop(null);
     pendingFolderSessionIds.current.clear();
   }, [cwd]);
+
+  useEffect(
+    () =>
+      subscribeSessionFolders(cwd, () => {
+        setSessionFolders(loadSessionFolders(cwd));
+      }),
+    [cwd],
+  );
 
   useEffect(() => {
     if (pending || status === "error") return;
@@ -590,6 +641,7 @@ function SidebarComponent({
   useEffect(() => {
     if (selectedSessionIds.size === 0) return;
     const clear = () => {
+      selectionAnchorRef.current = null;
       contextSelectionRef.current = false;
       setSelectedSessionIds(new Set());
       setSessionMenu(null);
@@ -647,6 +699,13 @@ function SidebarComponent({
     return session ? [session] : [];
   });
   const multipleMenuSessions = menuSessionIds.length > 1;
+  const menuReminderTimes = [
+    ...new Set(
+      reminders
+        .filter((reminder) => menuSessionIds.includes(reminder.sessionId))
+        .map((reminder) => reminder.dueAt),
+    ),
+  ];
   const allMenuSessionsPinned =
     menuSessions.length > 0 && menuSessions.every((session) => session.pinned);
   const allMenuSessionsArchived =
@@ -671,6 +730,20 @@ function SidebarComponent({
     { kind: "item", id: "ungroup", label: "Ungroup" },
   ];
   const sessionMenuItems: ExplorerMenuItem[] = [
+    ...(onCancelReminders && menuReminderTimes.length > 0
+      ? [
+          {
+            kind: "item" as const,
+            id: "reminder:cancel",
+            label: "Cancel reminder",
+            description:
+              menuReminderTimes.length === 1
+                ? formatReminderTime(menuReminderTimes[0])
+                : "Multiple reminder times",
+          },
+          { kind: "sep" as const },
+        ]
+      : []),
     ...(onPinSession || onPinSessions
       ? [
           {
@@ -690,6 +763,13 @@ function SidebarComponent({
           },
         ]
       : []),
+    {
+      kind: "item",
+      id: "reminder",
+      label: "Remind me",
+      disabled: !onSetReminders,
+      submenu: sessionReminderPresets(),
+    },
     { kind: "sep" as const },
     { kind: "item" as const, id: "folder-new", label: "New folder" },
     ...(sessionFolders.length > 0 ? [{ kind: "sep" as const }] : []),
@@ -763,6 +843,7 @@ function SidebarComponent({
     setSessionMenu(null);
     if (!contextSelectionRef.current) return;
     contextSelectionRef.current = false;
+    selectionAnchorRef.current = null;
     setSelectedSessionIds(new Set());
   };
 
@@ -784,6 +865,19 @@ function SidebarComponent({
     const archived = allMenuSessionsArchived;
     const pinned = allMenuSessionsPinned;
     closeSessionMenu();
+    if (id === "reminder:cancel") {
+      onCancelReminders?.(sessionIds);
+      return;
+    }
+    if (id.startsWith("reminder:")) {
+      const dueAt = reminderTime(id);
+      if (dueAt != null) {
+        setReminderSessionsCollapsed(false);
+        saveReminderSessionsCollapsed(cwd, false);
+        onSetReminders?.(sessionIds, dueAt);
+      }
+      return;
+    }
     if (id === "pin") {
       if (sessionIds.length > 1 && onPinSessions) {
         onPinSessions(sessionIds, !pinned);
@@ -887,14 +981,41 @@ function SidebarComponent({
 
   const onSessionCardSelect = (
     sessionId: string,
-    event: { shiftKey: boolean },
+    event: { shiftKey: boolean; ctrlKey: boolean; metaKey: boolean },
   ) => {
+    contextSelectionRef.current = false;
+    setSessionMenu(null);
     if (event.shiftKey) {
-      contextSelectionRef.current = false;
-      setSessionMenu(null);
-      setSelectedSessionIds((current) =>
-        toggleSessionSelection(current, sessionId),
+      const visibleIds = sessionListNavigationIds(
+        sessionListEntries,
+        searchNarrowed,
       );
+      if (
+        selectionAnchorRef.current &&
+        !visibleIds.includes(selectionAnchorRef.current)
+      ) {
+        selectionAnchorRef.current = null;
+      }
+      const anchor = selectionAnchorRef.current ?? activeSessionId ?? sessionId;
+      const start = visibleIds.indexOf(anchor);
+      const end = visibleIds.indexOf(sessionId);
+      const range =
+        start < 0 || end < 0
+          ? [sessionId]
+          : visibleIds.slice(Math.min(start, end), Math.max(start, end) + 1);
+      selectionAnchorRef.current = start < 0 ? sessionId : anchor;
+      setSelectedSessionIds(
+        (current) => new Set(
+          event.ctrlKey || event.metaKey ? [...current, ...range] : range,
+        ),
+      );
+      return;
+    }
+    selectionAnchorRef.current = sessionId;
+    if (event.ctrlKey || event.metaKey) {
+      const next = toggleSessionSelection(selectedSessionIds, sessionId);
+      if (next.size === 0) selectionAnchorRef.current = null;
+      setSelectedSessionIds(next);
       return;
     }
     setSelectedSessionIds(new Set());
@@ -920,6 +1041,7 @@ function SidebarComponent({
         isSelected={selectedSessionIds.has(session.id)}
         busy={busySessionIds.has(session.id)}
         done={unseenFinishedIds.has(session.id)}
+        linkedUpdate={linkedSessionUpdateIds.has(session.id)}
         needsApproval={approvalSessionIds.has(session.id)}
         dropTarget={isSessionDrop("session", session.id)}
         compact={compact}
@@ -928,7 +1050,7 @@ function SidebarComponent({
         onOpenWorkItem={onOpenInboxItem}
         onPrefetch={onPrefetchSession}
         onPlaceOnPane={onPlaceSessionOnPane}
-        onListDrop={onSessionListDrop}
+        onListDrop={reminderIds.has(session.id) ? undefined : onSessionListDrop}
         onListDropTargetChange={setSessionDrop}
         onContextMenu={(e) => onSessionContextMenu(session.id, e)}
         onArchive={
@@ -996,39 +1118,19 @@ function SidebarComponent({
   const changeDeletions = changeStats?.deletions ?? 0;
   const hasChangeStats = changeAdditions > 0 || changeDeletions > 0;
 
-  const workspaceTabItems = visibleTabs.map((itemId, index) => {
+  const workspaceTabItems = visibleTabs.map((itemId) => {
     const active = tab === itemId;
     const isChangesTab = itemId === "changes";
-    const draggingTab = sortable.draggingId === itemId;
-    const showStart =
-      sortable.draggingId &&
-      sortable.toIndex === index &&
-      sortable.fromIndex !== null &&
-      sortable.toIndex < sortable.fromIndex;
-    const showEnd =
-      sortable.draggingId &&
-      sortable.toIndex === index &&
-      sortable.fromIndex !== null &&
-      sortable.toIndex > sortable.fromIndex;
     return (
       <div
         key={itemId}
         ref={(el) => sortable.setItemRef(itemId, el)}
-        className={`relative flex min-w-0 flex-1 touch-none items-stretch ${
-          draggingTab ? "opacity-40" : ""
-        } ${canDragTabs ? "cursor-grab active:cursor-grabbing" : ""}`}
+        className="reorder-item workspace-tab relative flex min-w-0 flex-1 touch-none items-stretch"
         onPointerDown={(event) => {
           if (event.button !== 0) return;
-          onTabPick(itemId);
           sortable.onItemPointerDown(itemId, event);
         }}
       >
-        {showStart ? (
-          <div className="pointer-events-none absolute inset-y-0 left-0 z-20 w-0.5 bg-accent" />
-        ) : null}
-        {showEnd ? (
-          <div className="pointer-events-none absolute inset-y-0 right-0 z-20 w-0.5 bg-accent" />
-        ) : null}
         <button
           type="button"
           role="tab"
@@ -1052,10 +1154,8 @@ function SidebarComponent({
             onTabPick(itemId);
           }}
           className={`flex h-6 min-w-0 flex-1 items-center justify-center self-center rounded-md px-2 text-[12px] leading-none ${
-            active
-              ? "bg-content/10 text-content"
-              : "text-content/50 hover:bg-content/5 hover:text-content"
-          } ${canDragTabs ? "cursor-grab active:cursor-grabbing" : ""}`}
+            active ? "bg-selection text-content" : "text-content/50"
+          }`}
         >
           {isChangesTab && hasChangeStats ? (
             <DiffStat additions={changeAdditions} deletions={changeDeletions} />
@@ -1072,12 +1172,12 @@ function SidebarComponent({
   const sidebarContent = (
     <aside
       ref={resize.setPaneRef}
-      className="sidebar-glass relative flex h-full min-h-0 shrink-0 flex-col border-r border-content/10"
+      className="body-glass relative flex h-full min-h-0 shrink-0 flex-col border-r border-stroke"
     >
       {railVisible ? (
         <>
           <div
-            className="flex h-10 shrink-0 select-none items-center gap-1 border-b border-content/10 pl-3 pr-1.5"
+            className="flex h-10 shrink-0 select-none items-center gap-1 border-b border-stroke pl-3 pr-1.5"
             data-tauri-drag-region="deep"
           >
             <span className="min-w-0 flex-1 truncate text-sm font-medium leading-tight">
@@ -1088,7 +1188,7 @@ function SidebarComponent({
           <div
             role="tablist"
             aria-label="Workspace"
-            className="flex h-9 shrink-0 items-center gap-px border-b border-content/10 px-2"
+            className="flex h-9 shrink-0 items-center gap-px border-b border-stroke px-2"
           >
             {workspaceTabItems}
           </div>
@@ -1096,7 +1196,7 @@ function SidebarComponent({
       ) : (
         <>
           <div
-            className="flex h-10 shrink-0 select-none items-center border-b border-content/10 pr-1.5"
+            className="flex h-10 shrink-0 select-none items-center border-b border-stroke pr-1.5"
             data-tauri-drag-region="deep"
           >
             {IS_MAC ? <div className="w-[78px] shrink-0" /> : null}
@@ -1120,6 +1220,7 @@ function SidebarComponent({
               onNew={onNew}
               onSearch={onSearch}
               onOpenInbox={onOpenInbox}
+              onOpenNotificationSettings={onOpenNotificationSettings}
               onOpenNotes={notesEnabled ? onOpenNotes : undefined}
               searchActive={searchActive}
               inboxActive={inboxActive}
@@ -1130,7 +1231,7 @@ function SidebarComponent({
           <div
             role="tablist"
             aria-label="Workspace"
-            className="flex h-9 shrink-0 items-center gap-px overflow-visible border-b border-content/10 px-2"
+            className="flex h-9 shrink-0 items-center gap-px overflow-visible border-b border-stroke px-2"
           >
             {workspaceTabItems}
           </div>
@@ -1171,7 +1272,7 @@ function SidebarComponent({
           )}
         </div>
         {tab === "sessions" && cwd && cwd !== "~" ? (
-          <div className="flex h-9 shrink-0 items-center gap-1 border-b border-content/10 px-2">
+          <div className="flex h-9 shrink-0 items-center gap-1 border-b border-stroke px-2">
             <div className="relative flex h-7 min-w-0 flex-1 items-center">
               <Search className="pointer-events-none absolute left-2 size-3 shrink-0 opacity-50" />
               {sessionSearchInput}
@@ -1230,14 +1331,77 @@ function SidebarComponent({
               ) : (
                 <ul className="flex flex-col gap-0.5 p-1.5">
                   {sessionListEntries.map((entry, index) => {
-                    if (entry.kind === "divider") {
+                    if (entry.kind === "pinned" || entry.kind === "reminders") {
+                      const isReminders = entry.kind === "reminders";
+                      const expanded = searchNarrowed || !entry.collapsed;
+                      const beforeUngrouped =
+                        sessionListEntries[index + 1]?.kind === "session";
                       return (
                         <li
-                          key={`divider-${index}`}
-                          aria-hidden
-                          className="mx-1 my-1 list-none"
+                          key={`${entry.kind}-sessions`}
+                          data-pinned-sessions={isReminders ? undefined : ""}
+                          data-reminder-sessions={isReminders ? "" : undefined}
+                          className={`relative ${
+                            expanded || beforeUngrouped ? "mb-1.5" : ""
+                          }`}
                         >
-                          <div className="h-px bg-content/10" />
+                          <div className="overflow-hidden rounded-md bg-content/5">
+                            <FolderRow
+                              folder={
+                                isReminders
+                                  ? {
+                                      name: "Reminders",
+                                      customColor: REMINDERS_COLOR,
+                                    }
+                                  : { name: "Pinned" }
+                              }
+                              sessions={entry.sessions}
+                              expanded={expanded}
+                              dropTarget={false}
+                              busy={entry.sessions.some((session) =>
+                                busySessionIds.has(session.id),
+                              )}
+                              done={entry.sessions.some((session) =>
+                                unseenFinishedIds.has(session.id),
+                              )}
+                              needsApproval={entry.sessions.some((session) =>
+                                approvalSessionIds.has(session.id),
+                              )}
+                              groupIcon={
+                                isReminders ? (
+                                  <Clock
+                                    className="size-3.5"
+                                    strokeWidth={1.75}
+                                  />
+                                ) : (
+                                  <Pin
+                                    className="size-3.5 text-content"
+                                    strokeWidth={1.75}
+                                  />
+                                )
+                              }
+                              onToggle={() => {
+                                if (searchNarrowed) return;
+                                const collapsed = !entry.collapsed;
+                                if (isReminders) {
+                                  setReminderSessionsCollapsed(collapsed);
+                                  saveReminderSessionsCollapsed(cwd, collapsed);
+                                  return;
+                                }
+                                setPinnedSessionsCollapsed(collapsed);
+                                savePinnedSessionsCollapsed(cwd, collapsed);
+                              }}
+                            />
+                            {expanded ? (
+                              <ul className="flex flex-col gap-px p-1">
+                                {entry.sessions.map((session) => (
+                                  <li key={session.id}>
+                                    {renderSessionCard(session, true)}
+                                  </li>
+                                ))}
+                              </ul>
+                            ) : null}
+                          </div>
                         </li>
                       );
                     }
@@ -1319,7 +1483,6 @@ function SidebarComponent({
                                   "folder",
                                   entry.folder.id,
                                 )}
-                                canReorder={visibleFolderIds.length > 1}
                                 busy={entry.sessions.some((session) =>
                                   busySessionIds.has(session.id),
                                 )}
@@ -1364,7 +1527,7 @@ function SidebarComponent({
                                   ))}
                                 </ul>
                                 {onNew ? (
-                                  <div className="border-t border-content/10 p-1">
+                                  <div className="border-t border-stroke p-1">
                                     <button
                                       type="button"
                                       data-no-drag
@@ -1419,7 +1582,10 @@ function SidebarComponent({
               selectedPath={selectedDiffPath}
               selectedKind={selectedDiffKind}
               selectedSha={selectedCommitSha}
-              onOpenFile={onOpenDiff ?? onOpenFile}
+              onOpenFile={
+                onOpenDiff ??
+                ((path) => onOpenFile(path, undefined, { exact: true }))
+              }
               onOpenAllChanges={onOpenAllChanges ?? (() => {})}
               onOpenCommit={onOpenCommit ?? (() => {})}
             />
@@ -1427,6 +1593,11 @@ function SidebarComponent({
         ) : null}
         {showSidebarFooter ? (
           <>
+            <LiveAgentsPreview
+              agents={liveAgents}
+              activeSessionId={activeSessionId}
+              onSelect={onSelectAgent}
+            />
             <SidebarUpdateFooter
               update={updateNotice}
               onOpenWhatsNew={onOpenWhatsNew}
@@ -1538,6 +1709,7 @@ function SidebarComponent({
           settingsOpen={settingsOpen}
           settingsSection={settingsSection}
           onOpenSettings={onOpenSettings}
+          onOpenNotificationSettings={onOpenNotificationSettings}
           onSelectSettingsSection={onSelectSettingsSection}
           onCloseSettings={onCloseSettings}
           updateNotice={updateNotice}
@@ -1561,6 +1733,7 @@ function SidebarProjectPicker({
   onNew,
   onSearch,
   onOpenInbox,
+  onOpenNotificationSettings,
   onOpenNotes,
   searchActive = false,
   inboxActive = false,
@@ -1575,248 +1748,28 @@ function SidebarProjectPicker({
   onNew?: () => void;
   onSearch?: () => void;
   onOpenInbox?: () => void;
+  onOpenNotificationSettings?: () => void;
   onOpenNotes?: () => void;
   searchActive?: boolean;
   inboxActive?: boolean;
   notesActive?: boolean;
   inboxUnseen?: boolean;
 }) {
-  const [open, setOpen] = useState(false);
-  const [query, setQuery] = useState("");
-  const [active, setActive] = useState(0);
-  const pickerRef = useRef<HTMLDivElement>(null);
-  const [groupLabels] = useState(loadTabGroupLabels);
-  const [groupColors] = useState(loadTabGroupColors);
-  const [groupCustomColors] = useState(loadTabGroupCustomColors);
-  const [groupMascots] = useState(loadTabGroupMascots);
-  const groupLogos = useTabGroupLogos();
-  const seed = projectName(cwd);
-  const key = projectKey(cwd);
-  const label = resolveTabGroupLabel(key, groupLabels, basename(cwd) || seed);
-  const logoPath = resolveTabGroupLogo(key, groupLogos);
-  const color = resolveTabGroupColor(key, groupColors, groupCustomColors, seed);
-  const projects = projectRailItems(recents, cwd);
-  const orderedProjects = [
-    ...projects.filter((item) => sameProjectPath(item.path, cwd)),
-    ...projects.filter((item) => !sameProjectPath(item.path, cwd)),
-  ];
-  const normalizedQuery = query.trim().toLocaleLowerCase();
-  const filteredProjects = normalizedQuery
-    ? orderedProjects.filter((item) => {
-        const itemKey = projectKey(item.path);
-        const itemLabel = resolveTabGroupLabel(
-          itemKey,
-          groupLabels,
-          basename(item.path) || projectName(item.path),
-        );
-        return `${itemLabel}\n${item.path}`
-          .toLocaleLowerCase()
-          .includes(normalizedQuery);
-      })
-    : orderedProjects;
-
-  const closePicker = () => {
-    setOpen(false);
-    setQuery("");
-    setActive(0);
-  };
-
-  const openPicker = () => {
-    setOpen(true);
-    setQuery("");
-    setActive(0);
-  };
-
-  const pickProject = (path: string) => {
-    closePicker();
-    if (!sameProjectPath(path, cwd)) onSelectProject(path);
-  };
-
-  const onPickerKeyDown = (event: ReactKeyboardEvent<HTMLElement>) => {
-    if (!(event.target instanceof HTMLInputElement)) return;
-    if (event.key === "ArrowDown") {
-      event.preventDefault();
-      if (filteredProjects.length === 0) return;
-      setActive((index) => Math.min(filteredProjects.length - 1, index + 1));
-      return;
-    }
-    if (event.key === "ArrowUp") {
-      event.preventDefault();
-      setActive((index) => Math.max(0, index - 1));
-      return;
-    }
-    if (event.key === "Enter") {
-      const project = filteredProjects[active];
-      if (!project) return;
-      event.preventDefault();
-      pickProject(project.path);
-    }
-  };
-
+  const [inboxMenu, setInboxMenu] = useState<{ x: number; y: number } | null>(null);
+  const inboxTrigger = useRef<HTMLElement | null>(null);
   return (
     <div
-      className="flex h-9 items-center gap-0.5 border-b border-content/10 px-2"
+      className="flex h-9 items-center gap-0.5 border-b border-stroke px-2"
       data-tauri-drag-region="deep"
     >
-      <div
-        ref={pickerRef}
-        className="relative flex h-full min-w-0 flex-1 items-center"
-      >
-        <button
-          type="button"
-          title={cwd}
-          aria-label={`Switch project, current project ${label}`}
-          aria-expanded={open}
-          aria-haspopup="dialog"
-          data-tauri-drag-region="false"
-          onClick={() => (open ? closePicker() : openPicker())}
-          onKeyDown={(event) => {
-            if (open) return;
-            if (event.key !== "ArrowDown") return;
-            event.preventDefault();
-            openPicker();
-          }}
-          className={`flex h-6.5 min-w-0 items-center gap-1.5 rounded-md px-2 text-[12px] leading-none hover:text-content ${
-            open
-              ? "bg-content/10 text-content"
-              : "text-content/50 hover:bg-content/5"
-          }`}
-        >
-          {logoPath ? (
-            <ProjectLogoIcon
-              path={logoPath}
-              className="size-3.5 shrink-0 rounded-sm"
-              imageClassName="size-3.5"
-            />
-          ) : (
-            <ProjectMascot
-              project={seed}
-              color={color}
-              name={resolveTabGroupMascot(key, groupMascots)}
-              className="size-3 shrink-0"
-              active={busy}
-            />
-          )}
-          <span className="min-w-0 truncate font-medium text-content/90">
-            {label}
-          </span>
-          <ChevronDown
-            className={`size-3 shrink-0 text-content/45 transition-transform ${
-              open ? "rotate-180" : ""
-            }`}
-            strokeWidth={1.75}
-          />
-        </button>
-        {open ? (
-          <Popover
-            anchor={pickerRef}
-            side="bottom"
-            align="start"
-            gap={4}
-            width={286}
-            maxHeight={380}
-            role="dialog"
-            aria-label="Project picker"
-            onDismiss={() => closePicker()}
-            onKeyDown={onPickerKeyDown}
-            className="flex flex-col overflow-hidden"
-          >
-            <label className="flex h-11 shrink-0 items-center gap-2.5 border-b border-content/10 px-3 text-content/45 focus-within:text-content/70">
-              <Search className="size-4 shrink-0" strokeWidth={1.75} />
-              <span className="sr-only">Search projects</span>
-              <input
-                autoFocus
-                value={query}
-                onChange={(event) => {
-                  setQuery(event.target.value);
-                  setActive(0);
-                }}
-                placeholder="Search projects..."
-                className="min-w-0 flex-1 bg-transparent text-[13px] text-content outline-none placeholder:text-content/35"
-              />
-            </label>
-            <div className="min-h-0 flex-1 overflow-y-auto overscroll-none p-1.5">
-              {filteredProjects.length > 0 ? (
-                filteredProjects.map((item, index) => {
-                  const current = sameProjectPath(item.path, cwd);
-                  const itemKey = projectKey(item.path);
-                  const itemSeed = projectName(item.path);
-                  const itemLabel = resolveTabGroupLabel(
-                    itemKey,
-                    groupLabels,
-                    basename(item.path) || itemSeed,
-                  );
-                  const itemLogo = resolveTabGroupLogo(itemKey, groupLogos);
-                  const itemColor = resolveTabGroupColor(
-                    itemKey,
-                    groupColors,
-                    groupCustomColors,
-                    itemSeed,
-                  );
-                  return (
-                    <button
-                      key={item.path}
-                      type="button"
-                      title={item.path}
-                      onMouseEnter={() => setActive(index)}
-                      onClick={() => pickProject(item.path)}
-                      className={`flex h-9 w-full items-center gap-2.5 rounded-lg px-2.5 text-left ${
-                        active === index
-                          ? "bg-content/10 text-content"
-                          : "text-content/75 hover:bg-content/5 hover:text-content"
-                      }`}
-                    >
-                      <span className="grid size-4 shrink-0 place-items-center">
-                        {current ? (
-                          <Check className="size-3.5" strokeWidth={2} />
-                        ) : itemLogo ? (
-                          <ProjectLogoIcon
-                            path={itemLogo}
-                            className="size-4 rounded-sm"
-                            imageClassName="size-4"
-                          />
-                        ) : (
-                          <ProjectMascot
-                            project={itemSeed}
-                            color={itemColor}
-                            name={resolveTabGroupMascot(itemKey, groupMascots)}
-                            className="size-3.5"
-                          />
-                        )}
-                      </span>
-                      <span className="min-w-0 flex-1 truncate text-[13px] font-medium">
-                        {itemLabel}
-                      </span>
-                      <span className="max-w-44 shrink truncate font-mono text-[11px] text-content/40">
-                        {prettyParent(item.path)}
-                      </span>
-                    </button>
-                  );
-                })
-              ) : (
-                <p className="px-2.5 py-5 text-center text-[12px] text-content/45">
-                  No projects found
-                </p>
-              )}
-            </div>
-            {onOpenProject ? (
-              <div className="shrink-0 border-t border-content/10 p-1.5">
-                <button
-                  type="button"
-                  onClick={() => {
-                    closePicker();
-                    onOpenProject();
-                  }}
-                  className="flex h-9 w-full items-center gap-2.5 rounded-lg px-2.5 text-left text-[13px] text-content/75 hover:bg-content/8 hover:text-content"
-                >
-                  <Plus className="size-4 shrink-0" strokeWidth={1.75} />
-                  <span>New project</span>
-                </button>
-              </div>
-            ) : null}
-          </Popover>
-        ) : null}
-      </div>
+      <SearchableProjectPicker
+        cwd={cwd}
+        recents={recents}
+        busy={busy}
+        className="flex-1"
+        onSelectProject={onSelectProject}
+        onOpenProject={onOpenProject}
+      />
       <div className="flex items-center ml-auto">
         {onNew ? (
           <IconButton label={`New tab (${MOD}T)`} onClick={onNew}>
@@ -1837,6 +1790,11 @@ function SidebarProjectPicker({
             label={inboxUnseen ? "Inbox, new items" : "Inbox"}
             active={inboxActive}
             onClick={onOpenInbox}
+            onOpenContextMenu={(x, y) => {
+              inboxTrigger.current = document.activeElement instanceof HTMLElement
+                ? document.activeElement : null;
+              setInboxMenu({ x, y });
+            }}
           >
             <span className="relative">
               <Inbox className="size-3.5" strokeWidth={1.75} />
@@ -1855,6 +1813,17 @@ function SidebarProjectPicker({
           </IconButton>
         ) : null}
       </div>
+      {inboxMenu ? (
+        <InboxNotificationMenu
+          {...inboxMenu}
+          projectPaths={[...collectRailProjects(recents, cwd).keys()]}
+          onOpenSettings={onOpenNotificationSettings}
+          onClose={() => {
+            setInboxMenu(null);
+            inboxTrigger.current?.focus();
+          }}
+        />
+      ) : null}
     </div>
   );
 }
@@ -1911,7 +1880,7 @@ function SessionsHeaderButton({
       onPointerDown={(event) => event.stopPropagation()}
       onClick={onClick}
       className={`relative z-50 grid size-6 place-items-center rounded-md text-content/50 hover:bg-content/10 hover:text-content ${
-        open || active ? "bg-content/10 text-content" : ""
+        open || active ? "bg-selection text-content" : ""
       }`}
     >
       {children}
@@ -1926,6 +1895,7 @@ function sessionListDropFromPoint(
 ): SessionListDropTarget | null {
   const el = document.elementFromPoint(x, y);
   if (!el) return null;
+  if (el.closest("[data-reminder-sessions]")) return null;
   const card = el.closest("[data-session-card]") as HTMLElement | null;
   const cardId = card?.dataset.sessionCard;
   if (cardId === draggedId) return null;
@@ -1944,27 +1914,27 @@ function FolderRow({
   sessions,
   expanded,
   dropTarget,
-  canReorder = false,
   busy,
   done,
   needsApproval,
+  groupIcon,
   onPointerDown,
   onToggle,
   onContextMenu,
   onRename,
 }: {
-  folder: SessionFolder;
+  folder: Pick<SessionFolder, "name" | "colorIndex" | "customColor">;
   sessions: SessionSummary[];
   expanded: boolean;
   dropTarget: boolean;
-  canReorder?: boolean;
   busy: boolean;
   done: boolean;
   needsApproval: boolean;
+  groupIcon?: ReactNode;
   onPointerDown?: (event: ReactPointerEvent<HTMLButtonElement>) => void;
   onToggle: () => void;
-  onContextMenu: (event: ReactMouseEvent<HTMLButtonElement>) => void;
-  onRename: () => void;
+  onContextMenu?: (event: ReactMouseEvent<HTMLButtonElement>) => void;
+  onRename?: () => void;
 }) {
   const count = sessions.length;
   const accent = folderAccent(folder.colorIndex, folder.customColor);
@@ -1978,14 +1948,14 @@ function FolderRow({
       onClick={onToggle}
       onContextMenu={onContextMenu}
       onKeyDown={(event) => {
-        if (event.key === "F2") {
+        if (event.key === "F2" && onRename) {
           event.preventDefault();
           onRename();
         }
       }}
       className={`group relative flex w-full touch-none items-center gap-1.5 px-2 h-8 text-left ${
         expanded ? "rounded-md" : ""
-      } ${canReorder ? "cursor-grab active:cursor-grabbing" : ""} ${
+      } ${
         dropTarget
           ? "text-content"
           : expanded
@@ -2003,13 +1973,26 @@ function FolderRow({
         style={accent ? { color: accent } : undefined}
       >
         {expanded ? (
-          <ChevronDown className="size-3.5 text-content" strokeWidth={1.75} />
+          groupIcon ? (
+            <>
+              <span className="group-hover:hidden group-focus-visible:hidden">
+                {groupIcon}
+              </span>
+              <ChevronDown
+                className="hidden size-3.5 text-content group-hover:block group-focus-visible:block"
+                strokeWidth={1.75}
+              />
+            </>
+          ) : (
+            <ChevronDown className="size-3.5 text-content" strokeWidth={1.75} />
+          )
         ) : (
           <>
-            <Folder
-              className={`size-3.5 group-hover:hidden group-focus-visible:hidden text-content`}
-              strokeWidth={1.75}
-            />
+            <span className="group-hover:hidden group-focus-visible:hidden">
+              {groupIcon ?? (
+                <Folder className="size-3.5 text-content" strokeWidth={1.75} />
+              )}
+            </span>
             <ChevronRight
               className="hidden size-3.5 group-hover:block group-focus-visible:block text-content"
               strokeWidth={1.75}
@@ -2111,12 +2094,15 @@ function FolderRenameRow({
   );
 }
 
+const SESSION_PREFETCH_DELAY_MS = 120;
+
 function SessionCard({
   session,
   isActive,
   isSelected,
   busy,
   done,
+  linkedUpdate,
   needsApproval,
   dropTarget,
   compact = false,
@@ -2137,12 +2123,16 @@ function SessionCard({
   isSelected: boolean;
   busy: boolean;
   done: boolean;
+  linkedUpdate: boolean;
   needsApproval: boolean;
   dropTarget?: boolean;
   compact?: boolean;
   now: number;
-  onSelect: (sessionId: string, event: { shiftKey: boolean }) => void;
-  onOpenWorkItem?: (item: LinkedWorkItem) => void;
+  onSelect: (
+    sessionId: string,
+    event: { shiftKey: boolean; ctrlKey: boolean; metaKey: boolean },
+  ) => void;
+  onOpenWorkItem?: (item: LinkedWorkItem, sessionId: string) => void;
   onPrefetch?: (sessionId: string) => void;
   onPlaceOnPane?: (sessionId: string, targetId: string, edge: PaneEdge) => void;
   onListDrop?: (draggedId: string, target: SessionListDropTarget) => void;
@@ -2153,13 +2143,25 @@ function SessionCard({
   onDelete?: () => void;
 }) {
   const skipClickUntil = useRef(0);
+  const prefetchTimer = useRef<number | null>(null);
+  const orchestrationTooltipRootRef = useRef<HTMLDivElement>(null);
+  const orchestrationTooltipId = useId();
   const [dragging, setDragging] = useState(false);
+  const [orchestrationTooltipOpen, setOrchestrationTooltipOpen] =
+    useState(false);
+  const orchestration = session.orchestration;
+  const orchestrationExpanded =
+    !!orchestration && (isActive || isSelected || busy);
+  const orchestrationDone =
+    orchestration?.tasks.filter((task) => task.status === "completed").length ??
+    0;
   const title = sessionDisplayTitle(session.title, session.harness);
   const gitLabel = formatGitLabel(session.repo, session.branch);
   const time = formatRelative(session.updatedAt, now);
-  const model = compact
-    ? null
-    : resolveModel(session.harness, session.model).name;
+  const model =
+    compact && !orchestrationExpanded
+      ? null
+      : resolveModel(session.harness, session.model).name;
   const statusClass = needsApproval
     ? "text-amber-400"
     : busy
@@ -2174,7 +2176,7 @@ function SessionCard({
       {needsApproval ? (
         <>
           <CircleAlert className="size-3" strokeWidth={1.75} />
-          <span>Need approval</span>
+          <span>{orchestration ? "Needs input" : "Need approval"}</span>
         </>
       ) : busy ? (
         <>
@@ -2193,12 +2195,19 @@ function SessionCard({
   );
 
   const linkedWorkItem = session.linkedWorkItem;
+  const linkedUpdateDot = linkedUpdate ? (
+    <span
+      title={`Linked ${linkedWorkItem?.kind === "pr" ? "PR" : "issue"} updated since this session`}
+      aria-label="Linked work item updated"
+      className="size-1.5 shrink-0 rounded-full bg-accent"
+    />
+  ) : null;
   const workItemBadge = linkedWorkItem ? (
     <button
       type="button"
       data-no-drag
       data-tauri-drag-region="false"
-      title={`Open ${linkedWorkItem.kind === "pr" ? "PR" : "issue"} #${linkedWorkItem.number} in Inbox (${MOD}-click for GitHub)`}
+      title={`Open ${linkedWorkItem.kind === "pr" ? "PR" : "issue"} #${linkedWorkItem.number} beside this session (${MOD}-click for GitHub)`}
       aria-label={`Open ${linkedWorkItem.kind === "pr" ? "PR" : "issue"} #${linkedWorkItem.number}`}
       onPointerDown={(event) => event.stopPropagation()}
       onClick={(event) => {
@@ -2208,7 +2217,7 @@ function SessionCard({
           void openUrl(linkedWorkItem.url).catch(() => undefined);
           return;
         }
-        if (onOpenWorkItem) onOpenWorkItem(linkedWorkItem);
+        if (onOpenWorkItem) onOpenWorkItem(linkedWorkItem, session.id);
         else void openUrl(linkedWorkItem.url).catch(() => undefined);
       }}
       onAuxClick={(event) => {
@@ -2232,7 +2241,7 @@ function SessionCard({
     if (e.target !== e.currentTarget) return;
     if (e.key === "Enter" || e.key === " ") {
       e.preventDefault();
-      onSelect(session.id, { shiftKey: e.shiftKey });
+      onSelect(session.id, e);
       return;
     }
     if (e.key === "F2" && onRename) {
@@ -2250,6 +2259,10 @@ function SessionCard({
     if (event.button !== 0) return;
     // Warm the transcript during the press. Opening stays on click so a
     // drag-to-pane gesture does not switch conversations.
+    if (prefetchTimer.current != null) {
+      window.clearTimeout(prefetchTimer.current);
+      prefetchTimer.current = null;
+    }
     onPrefetch?.(session.id);
     if (!onPlaceOnPane && !onListDrop) return;
     const handle = event.currentTarget;
@@ -2285,7 +2298,9 @@ function SessionCard({
         }
       }
       setListTarget(
-        sessionListDropFromPoint(ev.clientX, ev.clientY, session.id),
+        onListDrop
+          ? sessionListDropFromPoint(ev.clientX, ev.clientY, session.id)
+          : null,
       );
       if (!onPlaceOnPane) return;
       const over = paneDropFromPoint(ev.clientX, ev.clientY);
@@ -2328,7 +2343,9 @@ function SessionCard({
       if (!active) return;
       skipClickUntil.current = performance.now() + 400;
       if (!commit) return;
-      const listOver = sessionListDropFromPoint(lastX, lastY, session.id);
+      const listOver = onListDrop
+        ? sessionListDropFromPoint(lastX, lastY, session.id)
+        : null;
       if (listOver) {
         onListDrop?.(session.id, listOver);
         return;
@@ -2345,30 +2362,61 @@ function SessionCard({
     window.addEventListener("keydown", onKey);
   };
 
+  useEffect(
+    () => () => {
+      if (prefetchTimer.current != null) {
+        window.clearTimeout(prefetchTimer.current);
+        prefetchTimer.current = null;
+      }
+    },
+    [onPrefetch, session.id],
+  );
+
+  const schedulePrefetch = () => {
+    if (!onPrefetch || prefetchTimer.current != null) return;
+    prefetchTimer.current = window.setTimeout(() => {
+      prefetchTimer.current = null;
+      onPrefetch(session.id);
+    }, SESSION_PREFETCH_DELAY_MS);
+  };
+
+  const cancelScheduledPrefetch = () => {
+    if (prefetchTimer.current == null) return;
+    window.clearTimeout(prefetchTimer.current);
+    prefetchTimer.current = null;
+  };
+
   const archiveLabel = session.archived ? "Unarchive" : "Archive";
+  // Expanding an orchestration card must not move its existing header. Keep
+  // the collapsed top inset and give only the new detail area extra room at
+  // the bottom.
+  const cardPaddingY = orchestrationExpanded
+    ? compact
+      ? "pb-2.5 pt-1.5"
+      : "pb-2.5 pt-2"
+    : compact
+      ? "py-1.5"
+      : "py-2";
 
   return (
     <div className="group relative">
       <div
-        role="button"
-        tabIndex={0}
         title={title}
-        aria-current={isActive ? "true" : undefined}
-        aria-pressed={isSelected}
         data-session-card={session.id}
+        data-orchestration-card={orchestration ? "true" : undefined}
         data-session-selected={isSelected ? "true" : undefined}
         data-tauri-drag-region="false"
         onPointerDown={onPointerDown}
-        onPointerEnter={() => onPrefetch?.(session.id)}
+        onPointerEnter={schedulePrefetch}
+        onPointerLeave={cancelScheduledPrefetch}
         onClick={(event) => {
           if (performance.now() < skipClickUntil.current) return;
           onSelect(session.id, event);
         }}
         onContextMenu={onContextMenu}
-        onKeyDown={onKeyDown}
-        className={`relative border flex w-full touch-none flex-col rounded-md px-2.5 text-left ${
-          compact ? "py-1.5" : "py-2"
-        } ${dragging ? "opacity-40" : ""} ${
+        className={`relative border flex w-full cursor-default select-none touch-none flex-col rounded-md px-2.5 text-left ${cardPaddingY} ${
+          dragging ? "opacity-40" : ""
+        } ${
           dropTarget
             ? "text-content border-transparent"
             : isSelected
@@ -2376,51 +2424,80 @@ function SessionCard({
               : needsApproval
                 ? "bg-content/20 text-content border-content/30 border-dashed"
                 : isActive
-                  ? "bg-content/10 text-content border-transparent"
-                  : "text-content/80 hover:bg-content/5 hover:text-content border-transparent"
+                  ? "bg-selection text-content border-transparent"
+                  : `text-content/80 hover:text-content border-transparent ${
+                      orchestrationExpanded
+                        ? "bg-content/5 hover:bg-content/10"
+                        : "hover:bg-content/5"
+                    }`
         }`}
       >
         {dropTarget ? (
           <div className="pointer-events-none absolute inset-0 rounded-md bg-accent/20" />
         ) : null}
-        {compact ? null : (
-          <span className="relative flex items-center gap-2">
-            <span className="flex min-w-0 flex-1 items-center gap-1.5">
-              <HarnessIcon
-                harness={session.harness}
-                className="size-3.5 shrink-0"
-              />
-              <span className="min-w-0 truncate text-[11px] text-content/50">
-                {model}
+        <div
+          role="button"
+          tabIndex={0}
+          aria-current={isActive ? "true" : undefined}
+          aria-pressed={isSelected}
+          data-session-select={session.id}
+          onKeyDown={onKeyDown}
+          onMouseDown={(event) => {
+            if (event.button !== 0) return;
+            // Shift-click can trigger :focus-visible. Mouse selection should
+            // only highlight the card; Tab can still focus this button.
+            event.preventDefault();
+            // Clear prior focus too, so shortcuts cannot target another card.
+            const focused = event.currentTarget.ownerDocument.activeElement;
+            if (focused instanceof HTMLElement) focused.blur();
+          }}
+          className="rounded-sm outline-none focus-visible:ring-1 focus-visible:ring-accent/50"
+        >
+          {compact && !orchestrationExpanded ? null : (
+            <span className="relative flex items-center gap-2">
+              <span className="flex min-w-0 flex-1 items-center gap-1.5">
+                <HarnessIcon
+                  harness={session.harness}
+                  className="size-3.5 shrink-0"
+                />
+                <span className="min-w-0 truncate text-[11px] text-content/50">
+                  {model}
+                </span>
+              </span>
+              <span className="flex shrink-0 items-center gap-1.5">
+                {linkedUpdateDot}
+                {status}
               </span>
             </span>
-            <span className="flex shrink-0 items-center gap-1.5">
-              {workItemBadge}
-              {status}
+          )}
+          <span
+            className={`relative flex min-w-0 items-center gap-1.5 ${
+              compact && !orchestrationExpanded ? "" : "mt-1"
+            }`}
+          >
+            {session.pinned ? (
+              <Pin
+                className="size-3 shrink-0 text-content/45"
+                strokeWidth={1.75}
+              />
+            ) : null}
+            <span className="min-w-0 flex-1 line-clamp-1 text-[13px] font-semibold leading-snug text-content">
+              {title}
             </span>
+            {compact && !orchestrationExpanded ? (
+              <span className="flex shrink-0 items-center gap-1.5">
+                {linkedUpdateDot}
+                {status}
+              </span>
+            ) : null}
           </span>
-        )}
-        <span
-          className={`relative flex min-w-0 items-center gap-1.5 ${
-            compact ? "" : "mt-1"
-          }`}
-        >
-          {session.pinned ? (
-            <Pin
-              className="size-3 shrink-0 text-content/45"
-              strokeWidth={1.75}
-            />
-          ) : null}
-          <span className="min-w-0 flex-1 line-clamp-1 text-[13px] font-semibold leading-snug text-content">
-            {title}
-          </span>
-          {compact ? (
-            <span className="flex shrink-0 items-center gap-1.5">
-              {workItemBadge}
-              {status}
-            </span>
-          ) : null}
-        </span>
+        </div>
+        {orchestrationExpanded ? (
+          <OrchestrationSidebarAgents
+            leadId={session.id}
+            summary={orchestration!}
+          />
+        ) : null}
         <span className="relative mt-1 flex items-center gap-2">
           {gitLabel ? (
             <span className="flex min-w-0 flex-1 items-center gap-1 text-[11px] text-content/45">
@@ -2430,38 +2507,114 @@ function SessionCard({
           ) : (
             <span className="min-w-0 flex-1" />
           )}
-          <span
-            className={`flex shrink-0 items-center gap-1.5 ${
-              onArchive
-                ? "transition-[padding] group-focus-within:pl-5 group-hover:pl-5"
-                : ""
-            }`}
-          >
-            <HarnessIcon
-              harness={session.harness}
-              className="size-3.5 shrink-0"
-            />
+          <span className="relative flex shrink-0 items-center gap-px">
+            {onArchive ? (
+              <button
+                type="button"
+                data-no-drag
+                data-tauri-drag-region="false"
+                title={archiveLabel}
+                aria-label={`${archiveLabel} ${title}`}
+                onPointerDown={(event) => event.stopPropagation()}
+                onClick={(event) => {
+                  event.stopPropagation();
+                  onArchive();
+                }}
+                className="pointer-events-none grid size-5 place-items-center rounded-md text-content/50 opacity-0 hover:bg-content/10 hover:text-content group-focus-within:pointer-events-auto group-focus-within:opacity-100 group-hover:pointer-events-auto group-hover:opacity-100"
+              >
+                <Archive className="size-3 shrink-0" strokeWidth={1.75} />
+              </button>
+            ) : null}
+            {workItemBadge}
+            {orchestration ? (
+              <div
+                ref={orchestrationTooltipRootRef}
+                className="relative shrink-0"
+                onMouseEnter={() => setOrchestrationTooltipOpen(true)}
+                onMouseLeave={() => setOrchestrationTooltipOpen(false)}
+              >
+                <button
+                  type="button"
+                  data-no-drag
+                  data-tauri-drag-region="false"
+                  data-orchestration-icon
+                  aria-label={`Orchestrator, ${orchestration.tasks.length} ${
+                    orchestration.tasks.length === 1 ? "subagent" : "subagents"
+                  }, ${orchestrationDone} done`}
+                  aria-describedby={
+                    orchestrationTooltipOpen
+                      ? orchestrationTooltipId
+                      : undefined
+                  }
+                  onPointerDown={(event) => event.stopPropagation()}
+                  onFocus={() => setOrchestrationTooltipOpen(true)}
+                  onBlur={() => setOrchestrationTooltipOpen(false)}
+                  onClick={(event) => {
+                    event.stopPropagation();
+                    setOrchestrationTooltipOpen(false);
+                    onSelect(session.id, event);
+                  }}
+                  className="grid size-5 shrink-0 place-items-center rounded-md text-fuchsia-300/65 hover:bg-content/10 hover:text-fuchsia-200/90"
+                >
+                  <Share className="size-3" />
+                </button>
+              </div>
+            ) : null}
           </span>
         </span>
       </div>
-      {onArchive ? (
-        <button
-          type="button"
-          data-no-drag
-          data-tauri-drag-region="false"
-          title={archiveLabel}
-          aria-label={`${archiveLabel} ${title}`}
-          onPointerDown={(event) => event.stopPropagation()}
-          onClick={(event) => {
-            event.stopPropagation();
-            onArchive();
-          }}
-          className={`pointer-events-none absolute right-7 grid size-5 place-items-center rounded text-content/50 opacity-0 transition-opacity hover:bg-content/10 hover:text-content group-focus-within:pointer-events-auto group-focus-within:opacity-100 group-hover:pointer-events-auto group-hover:opacity-100 ${
-            compact ? "bottom-[5px]" : "bottom-[7px]"
-          }`}
+      {orchestration && orchestrationTooltipOpen ? (
+        <Popover
+          anchor={orchestrationTooltipRootRef}
+          side="right"
+          align="end"
+          width={248}
+          maxHeight={320}
+          role="tooltip"
+          id={orchestrationTooltipId}
+          className="pointer-events-none overflow-y-auto p-2.5"
         >
-          <Archive className="size-3.5" strokeWidth={1.75} />
-        </button>
+          <div className="flex items-center justify-between gap-3">
+            <span className="text-[11px] font-semibold text-content/85">
+              Subagents
+            </span>
+            <span className="shrink-0 text-[10px] tabular-nums text-content/45">
+              {orchestrationDone}/{orchestration.tasks.length} done
+            </span>
+          </div>
+          <div className="mt-1.5 flex flex-col gap-0.5">
+            {orchestration.tasks.map((task) => {
+              const label = orchestrationTaskLabel(task, orchestration);
+              return (
+                <div
+                  key={task.sessionId}
+                  className="flex min-w-0 items-center gap-1.5 rounded-md px-1 py-1"
+                >
+                  <HarnessIcon
+                    harness={task.harness}
+                    className="size-3.5 shrink-0 opacity-75"
+                  />
+                  <span className="min-w-0 flex-1 truncate text-[11px] text-content/75">
+                    {task.title}
+                  </span>
+                  <span
+                    className={`shrink-0 text-[10px] ${
+                      task.needsInput || task.status === "failed"
+                        ? "text-amber-400"
+                        : label === "Working"
+                          ? "text-accent"
+                          : task.status === "completed"
+                            ? "text-emerald-400"
+                            : "text-content/45"
+                    }`}
+                  >
+                    {label}
+                  </span>
+                </div>
+              );
+            })}
+          </div>
+        </Popover>
       ) : null}
     </div>
   );
@@ -2527,7 +2680,7 @@ function SessionRenameRow({
         needsApproval
           ? "bg-amber-400/10 text-content"
           : isActive
-            ? "bg-content/10 text-content"
+            ? "bg-selection text-content"
             : "text-content/80"
       }`}
     >

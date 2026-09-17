@@ -2,6 +2,8 @@ import { describe, expect, it } from "vitest";
 import { INTERRUPT_MESSAGE } from "./inFlight";
 import {
   leaf,
+  leafIds,
+  newAgentTab,
   newChangesTab,
   newCommitTab,
   newFileTab,
@@ -9,6 +11,7 @@ import {
   newSessionChangesTab,
   newTab,
   newTerminalFile,
+  splitPane,
 } from "./layout";
 import { createProjectTerminal } from "./projectTerminal";
 import { newSession, type Session } from "./session";
@@ -26,6 +29,125 @@ function chat(id: string, cwd: string): Session {
   return session;
 }
 
+describe("project return snapshots", () => {
+  function saved() {
+    const sessions = [
+      chat("a1", "/alpha"),
+      chat("a2", "/alpha"),
+      chat("b1", "/beta"),
+      chat("b2", "/beta"),
+    ];
+    const tabs = sessions.map((session) => ({
+      ...newTab(session.id),
+      id: `tab-${session.id}`,
+    }));
+    return {
+      ...collectWorkspaceSnapshot(tabs, sessions, "tab-b2", "/beta", new Map()),
+      projectReturnTargets: [
+        { projectPath: "/alpha", tabId: "a2" },
+        { projectPath: "/beta", tabId: "b2" },
+      ],
+    };
+  }
+
+  it("collects and round-trips choices while rejecting stale references", () => {
+    const sessions = [
+      chat("a1", "/alpha"),
+      chat("a2", "/alpha"),
+      chat("b2", "/beta"),
+    ];
+    const tabs = sessions.map((session) => ({
+      ...newTab(session.id),
+      id: `tab-${session.id}`,
+    }));
+    const memory = new Map([
+      ["/alpha", "a2"],
+      ["/beta", "b2"],
+      ["/gone", "missing"],
+    ]);
+    const snapshot = collectWorkspaceSnapshot(
+      tabs,
+      sessions,
+      "tab-b2",
+      "/beta",
+      memory,
+    );
+    const restored = hydrateWorkspaceSnapshot(snapshot, new Map());
+    expect([...(restored?.projectReturnMemory ?? [])]).toEqual([
+      ["/alpha", "a2"],
+      ["/beta", "b2"],
+    ]);
+    expect(memory.size).toBe(3);
+  });
+
+  it("restores both project choices, not just the active tab", () => {
+    const restored = hydrateWorkspaceSnapshot(saved(), new Map());
+    expect(restored?.projectReturnMemory?.get("/alpha")).toBe("a2");
+    expect(restored?.projectReturnMemory?.get("/beta")).toBe("b2");
+  });
+
+  it("loads old snapshots and seeds only the active project", () => {
+    const { projectReturnTargets: _targets, ...old } = saved();
+    const restored = hydrateWorkspaceSnapshot(old, new Map());
+    expect([...(restored?.projectReturnMemory ?? [])]).toEqual([
+      ["/beta", "b2"],
+    ]);
+  });
+
+  it("prunes invalid entries and uses the last valid duplicate", () => {
+    const raw = saved();
+    const parsed = parseWorkspaceSnapshot({
+      ...raw,
+      projectReturnTargets: [
+        null,
+        42,
+        {},
+        { projectPath: "/alpha", tabId: 12 },
+        { projectPath: "/alpha/", tabId: "a1" },
+        { projectPath: "/alpha", tabId: "a2" },
+        { projectPath: "/gone", tabId: "missing" },
+        { projectPath: "/beta", tabId: "a1" },
+      ],
+    });
+    expect(parsed?.projectReturnTargets).toEqual([
+      { projectPath: "/alpha", tabId: "a2" },
+    ]);
+  });
+
+  it("lets the restored active tab override inconsistent saved preference", () => {
+    const raw = saved();
+    raw.projectReturnTargets[1].tabId = "tab-b1";
+    expect(
+      hydrateWorkspaceSnapshot(raw, new Map())?.projectReturnMemory?.get(
+        "/beta",
+      ),
+    ).toBe("b2");
+  });
+
+  it.each([null, "broken", {}])(
+    "ignores a malformed choice list: %j",
+    (projectReturnTargets) => {
+      const restored = hydrateWorkspaceSnapshot(
+        { ...saved(), projectReturnTargets },
+        new Map(),
+      );
+      expect(restored?.tabs).toHaveLength(4);
+      expect([...(restored?.projectReturnMemory ?? [])]).toEqual([
+        ["/beta", "b2"],
+      ]);
+    },
+  );
+
+  it("rechecks project membership against loaded sessions", () => {
+    const restored = hydrateWorkspaceSnapshot(
+      saved(),
+      new Map([["a2", chat("a2", "/moved")]]),
+    );
+    expect(restored?.projectReturnMemory?.has("/alpha")).toBe(false);
+    expect(restored?.projectReturnMemory?.get("/beta")).toBe("b2");
+  });
+});
+
 describe("collectWorkspaceSnapshot", () => {
   it("stores tabs, stubs, and the focused tab — not transcripts", () => {
     const session = chat("s1", "/tmp/a");
@@ -36,7 +158,13 @@ describe("collectWorkspaceSnapshot", () => {
       id: "t1",
       editorPanes: [{ id: "e1", files: [file], activeFileId: file.id }],
     };
-    const snapshot = collectWorkspaceSnapshot([tab], [session], "t1", "/tmp/a");
+    const snapshot = collectWorkspaceSnapshot(
+      [tab],
+      [session],
+      "t1",
+      "/tmp/a",
+      new Map(),
+    );
     expect(snapshot.activeTabId).toBe("t1");
     expect(snapshot.tabs[0]?.editorPanes[0]?.files[0]?.path).toBe(
       "/tmp/a/README.md",
@@ -52,6 +180,45 @@ describe("collectWorkspaceSnapshot", () => {
     expect(snapshot.projectTerminals).toEqual([]);
   });
 
+  it("drops agent tabs, and the pane holding only them", () => {
+    const file = newFileTab("/tmp/a/README.md", "/tmp/a");
+    const agent = newAgentTab("Audit the UI", "/tmp/a", {
+      sessionId: "worker",
+      leadId: "s1",
+      harness: "codex",
+    });
+    const mixed = newAgentTab("Audit the engine", "/tmp/a", {
+      sessionId: "worker-2",
+      leadId: "s1",
+      harness: "codex",
+    });
+    const tab = {
+      ...newTab("s1"),
+      id: "t1",
+      layout: splitPane(newTab("s1").layout, "s1", "right", "e1"),
+      editorPanes: [
+        { id: "e1", files: [agent], activeFileId: agent.id },
+        { id: "e2", files: [file, mixed], activeFileId: mixed.id },
+      ],
+    };
+    const snapshot = collectWorkspaceSnapshot(
+      [tab],
+      [],
+      "t1",
+      "/tmp/a",
+      new Map(),
+    );
+    const panes = snapshot.tabs[0]!.editorPanes;
+    // The agent-only pane is gone along with its leaf; the mixed one keeps its
+    // file and falls back to it as the active tab.
+    expect(panes.map((pane) => pane.id)).toEqual(["e2"]);
+    expect(panes[0]!.files.map((entry) => entry.path)).toEqual([
+      "/tmp/a/README.md",
+    ]);
+    expect(panes[0]!.activeFileId).toBe(file.id);
+    expect(leafIds(snapshot.tabs[0]!.layout)).toEqual(["s1"]);
+  });
+
   it("round-trips a unified Changes tab", () => {
     const file = newChangesTab("/tmp/a", "/tmp/a/src/lib.rs", "staged");
     const tab = {
@@ -59,7 +226,13 @@ describe("collectWorkspaceSnapshot", () => {
       id: "t1",
       editorPanes: [{ id: "e1", files: [file], activeFileId: file.id }],
     };
-    const snapshot = collectWorkspaceSnapshot([tab], [], "t1", "/tmp/a");
+    const snapshot = collectWorkspaceSnapshot(
+      [tab],
+      [],
+      "t1",
+      "/tmp/a",
+      new Map(),
+    );
     const workspace = hydrateWorkspaceSnapshot(snapshot, new Map());
     const restored = workspace?.tabs[0]?.editorPanes[0]?.files[0];
     expect(restored?.changes).toBe(true);
@@ -79,7 +252,13 @@ describe("collectWorkspaceSnapshot", () => {
       id: "t1",
       editorPanes: [{ id: "e1", files: [file], activeFileId: file.id }],
     };
-    const snapshot = collectWorkspaceSnapshot([tab], [], "t1", "/tmp/a");
+    const snapshot = collectWorkspaceSnapshot(
+      [tab],
+      [],
+      "t1",
+      "/tmp/a",
+      new Map(),
+    );
     const restored = hydrateWorkspaceSnapshot(snapshot, new Map())?.tabs[0]
       ?.editorPanes[0]?.files[0];
     expect(restored?.sessionChanges).toEqual({ sessionId: "session-a" });
@@ -98,7 +277,13 @@ describe("collectWorkspaceSnapshot", () => {
       id: "t1",
       editorPanes: [{ id: "e1", files: [file], activeFileId: file.id }],
     };
-    const snapshot = collectWorkspaceSnapshot([tab], [], "t1", "/tmp/a");
+    const snapshot = collectWorkspaceSnapshot(
+      [tab],
+      [],
+      "t1",
+      "/tmp/a",
+      new Map(),
+    );
     const workspace = hydrateWorkspaceSnapshot(snapshot, new Map());
     const restored = workspace?.tabs[0]?.editorPanes[0]?.files[0];
     expect(restored?.commit).toEqual({
@@ -110,7 +295,13 @@ describe("collectWorkspaceSnapshot", () => {
 
   it("round-trips a release-note descriptor", () => {
     const tab = newReleaseNotesWorkspaceTab({ version: "0.1.22" });
-    const snapshot = collectWorkspaceSnapshot([tab], [], tab.id, "~");
+    const snapshot = collectWorkspaceSnapshot(
+      [tab],
+      [],
+      tab.id,
+      "~",
+      new Map(),
+    );
     const workspace = hydrateWorkspaceSnapshot(snapshot, new Map());
 
     expect(workspace?.tabs[0]?.editorPanes[0]?.files[0]?.releaseNotes).toEqual({
@@ -127,6 +318,7 @@ describe("collectWorkspaceSnapshot", () => {
       [],
       "t1",
       "/tmp/a",
+      new Map(),
       [dock],
     );
     expect(snapshot.projectTerminals).toEqual([
@@ -245,6 +437,7 @@ describe("hydrateWorkspaceSnapshot", () => {
       [left, right],
       "t1",
       "/tmp/a",
+      new Map(),
     );
     const loaded = new Map([
       [
@@ -281,6 +474,7 @@ describe("hydrateWorkspaceSnapshot", () => {
       [open, parked],
       "t1",
       "/tmp/a",
+      new Map(),
     );
     const workspace = hydrateWorkspaceSnapshot(
       snapshot,
@@ -308,7 +502,13 @@ describe("hydrateWorkspaceSnapshot", () => {
       editorPanes: [],
       terminalPanes: [{ id: "p1", files: [term], activeFileId: term.id }],
     };
-    const snapshot = collectWorkspaceSnapshot([tab], [], "t1", "/tmp/a");
+    const snapshot = collectWorkspaceSnapshot(
+      [tab],
+      [],
+      "t1",
+      "/tmp/a",
+      new Map(),
+    );
     const workspace = hydrateWorkspaceSnapshot(snapshot, new Map());
     expect(workspace?.tabs[0]?.terminalPanes[0]?.files[0]?.terminal).toBe(true);
   });
@@ -326,6 +526,7 @@ describe("hydrateWorkspaceSnapshot", () => {
       [],
       "t1",
       "/tmp/a",
+      new Map(),
       [dock],
     );
     const workspace = hydrateWorkspaceSnapshot(snapshot, new Map());

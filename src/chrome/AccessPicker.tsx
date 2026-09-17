@@ -17,6 +17,7 @@ type Props = {
   value: RuntimeMode;
   onChange: (mode: RuntimeMode) => void;
   onClose?: () => void;
+  busy?: boolean;
 };
 
 const MENU_WIDTH = 288;
@@ -28,7 +29,12 @@ const ICONS: Record<RuntimeMode, typeof Lock> = {
   "full-access": LockOpen,
 };
 
-export function AccessPicker({ value, onChange, onClose }: Props) {
+export function AccessPicker({
+  value,
+  onChange,
+  onClose,
+  busy = false,
+}: Props) {
   const [open, setOpen] = useState(false);
   const [active, setActive] = useState(() =>
     Math.max(0, RUNTIME_MODES.indexOf(value)),
@@ -75,7 +81,7 @@ export function AccessPicker({ value, onChange, onClose }: Props) {
     <div ref={root} className="relative">
       <button
         type="button"
-        title={RUNTIME_MODE_HINT[value]}
+        title={`${RUNTIME_MODE_HINT[value]}${busy ? " Changes apply to the next turn." : ""}`}
         aria-label={RUNTIME_MODE_LABEL[value]}
         aria-expanded={open}
         aria-haspopup="listbox"
@@ -89,8 +95,8 @@ export function AccessPicker({ value, onChange, onClose }: Props) {
         }}
         className={`flex h-6.5 max-w-52 items-center gap-1 rounded-md px-1.5 ${
           open
-            ? "bg-content/10 text-content"
-            : "bg-content/10 text-content hover:bg-content/15"
+            ? "bg-selection text-content"
+            : "bg-selection text-content hover:bg-selection-hover"
         }`}
       >
         <Icon className="size-3.5 shrink-0" strokeWidth={1.75} />
@@ -131,7 +137,7 @@ export function AccessPicker({ value, onChange, onClose }: Props) {
                 onClick={() => pick(mode)}
                 className={`flex w-full items-start gap-2.5 rounded-lg px-2 py-2 text-left ${
                   highlighted || selected
-                    ? "bg-content/10 text-content"
+                    ? "bg-selection text-content"
                     : "text-content hover:bg-content/5"
                 }`}
               >
@@ -150,6 +156,12 @@ export function AccessPicker({ value, onChange, onClose }: Props) {
               </button>
             );
           })}
+          {busy ? (
+            <p className="px-2 py-1.5 text-[11px] leading-4 text-content/50">
+              Access changes apply to the next turn. Stop and resend to apply
+              them now.
+            </p>
+          ) : null}
         </Popover>
       ) : null}
     </div>

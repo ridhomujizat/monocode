@@ -2,22 +2,27 @@ use tauri::Manager;
 
 mod chat_background;
 mod checkpoint;
+mod control;
+pub mod control_cli;
 mod cursor_store;
 mod fs;
 mod gitlab;
 mod harness;
 mod inbox_media;
 mod linear;
+mod link_preview;
 #[cfg(target_os = "macos")]
 mod macos;
 mod menu;
 mod notes;
 mod notifications;
+mod pasteboard;
 mod plugin_ui;
 mod plugins;
 mod project_logo;
 mod pty;
 mod rate_limits;
+mod reminders;
 mod search;
 mod session_store;
 mod skills;
@@ -79,10 +84,31 @@ pub(crate) fn hide_window_console(cmd: &mut std::process::Command) {
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;
-        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-        cmd.creation_flags(CREATE_NO_WINDOW);
+        cmd.creation_flags(WINDOWS_BACKGROUND_CREATION_FLAGS);
     }
     let _ = cmd;
+}
+
+#[cfg(windows)]
+const WINDOWS_BACKGROUND_CREATION_FLAGS: u32 = 0x0800_0000; // CREATE_NO_WINDOW
+
+#[cfg(all(test, windows))]
+mod background_command_tests {
+    use super::*;
+
+    #[test]
+    fn background_commands_keep_piped_output_and_exit_status() {
+        assert_eq!(WINDOWS_BACKGROUND_CREATION_FLAGS, 0x0800_0000);
+
+        let mut cmd = std::process::Command::new("cmd.exe");
+        cmd.args(["/D", "/C", "(echo stdout)&(echo stderr 1>&2)&exit /b 7"]);
+        hide_window_console(&mut cmd);
+
+        let output = cmd.output().expect("background command should run");
+        assert_eq!(output.status.code(), Some(7));
+        assert!(String::from_utf8_lossy(&output.stdout).contains("stdout"));
+        assert!(String::from_utf8_lossy(&output.stderr).contains("stderr"));
+    }
 }
 
 /// Finder-launched .app bundles often omit HOME/USER/SHELL. Fall back to the
@@ -189,6 +215,8 @@ pub fn run() {
         .setup(|app| {
             harness::reap_orphaned_harness_processes();
             session_store::init(app.handle())?;
+            control::init(app.handle())?;
+            reminders::init(app.handle());
             checkpoint::init(app.handle())?;
             menu::install(app.handle())?;
             #[cfg(target_os = "macos")]
@@ -211,12 +239,29 @@ pub fn run() {
             menu::dispatch(app, event.id().as_ref());
         })
         .invoke_handler(tauri::generate_handler![
+            control::control_enable,
+            control::control_disable,
+            control::control_reply,
+            control::control_save,
+            control::control_load,
+            control::control_scopes,
+            control::control_write_path,
+            control::control_attach_worker,
+            control::control_authorize_turn,
+            control::control_turn_finished,
             default_cwd,
             home_dir,
             notifications::notification_permission,
             notifications::request_notification_permission,
             notifications::show_notification,
             notifications::open_notification_settings,
+            reminders::reminder_list,
+            reminders::reminder_set,
+            reminders::reminder_clear,
+            reminders::reminder_configure,
+            reminders::reminder_take_open,
+            reminders::reminder_register_window,
+            reminders::reminder_open,
             fs::list_dir,
             fs::list_project_files,
             fs::git_diff_stats,
@@ -241,18 +286,22 @@ pub fn run() {
             fs::git_range_context,
             fs::git_pr_status,
             fs::git_pr_create,
+            fs::git_github_status,
             fs::git_github_repo,
+            fs::git_github_repositories,
             fs::git_github_work_item,
             fs::git_github_work_items,
             fs::git_github_work_item_details,
             fs::git_github_work_item_thread,
             fs::git_github_work_item_comment,
+            fs::git_github_pr_action,
             fs::git_github_pr_diff,
             inbox_media::fetch_inbox_media,
             gitlab::gitlab_status,
             gitlab::gitlab_set_config,
             gitlab::gitlab_repo,
             gitlab::gitlab_list_work_items,
+            gitlab::gitlab_list_todos,
             gitlab::gitlab_work_item_details,
             gitlab::gitlab_work_item_thread,
             gitlab::gitlab_work_item_comment,
@@ -264,6 +313,7 @@ pub fn run() {
             linear::linear_issue_details,
             linear::linear_issue_thread,
             linear::linear_issue_comment,
+            link_preview::fetch_link_preview,
             fs::git_branches,
             fs::git_checkout,
             fs::git_create_branch,
@@ -274,6 +324,8 @@ pub fn run() {
             fs::copy_path,
             fs::move_path,
             fs::reveal_path,
+            pasteboard::clipboard_file_paths,
+            pasteboard::copy_file_to_clipboard,
             fs::clone_repo,
             fs::read_file_preview,
             fs::stat_files,
@@ -282,10 +334,13 @@ pub fn run() {
             fs::read_binary_file,
             fs::write_attachment,
             fs::read_text_file,
+            fs::omp_session_interjections,
+            fs::omp_active_assistant_texts,
             fs::write_text_file,
             skills::list_skills,
             search::search_project,
             cursor_store::cursor_tool_calls,
+            cursor_store::cursor_subagent_runs,
             harness::harness_resolve_cursor,
             harness::harness_resolve_codex,
             harness::harness_resolve_opencode,
@@ -294,6 +349,7 @@ pub fn run() {
             harness::harness_resolve_pi,
             harness::harness_resolve_fx,
             harness::harness_resolve_grok,
+            harness::harness_resolve_hermes,
             harness::harness_free_port,
             harness::harness_spawn,
             harness::harness_write,
@@ -304,6 +360,7 @@ pub fn run() {
             harness::harness_sse_close,
             harness::harness_exec,
             rate_limits::fetch_claude_usage,
+            rate_limits::fetch_opencode_go_usage,
             pty::pty_spawn,
             pty::pty_write,
             pty::pty_resize,
@@ -391,6 +448,7 @@ pub fn run() {
             ..
         } => {
             let other_window = handle.webview_windows().keys().any(|name| name != &label);
+            control::window_closed(handle, &label);
             if !other_window {
                 reap_harness_children(handle);
             }

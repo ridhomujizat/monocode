@@ -1,6 +1,7 @@
 import { markTurnInterrupted, type ResumedWorkspace } from "./inFlight";
 import {
   closeLeaf,
+  isAgentTab,
   isTerminalTab,
   leafIds,
   newTab,
@@ -19,6 +20,8 @@ import {
   type ProjectTerminalDock,
 } from "./projectTerminal";
 import { normalizeProjectPath } from "./recents";
+import { pathKey } from "./paths";
+import { reconcileProjectReturn, type ProjectReturnMemory } from "./projectReturn";
 import type { InboxAskContext } from "./inboxAsk";
 import {
   HARNESSES,
@@ -39,6 +42,7 @@ export type WorkspaceSessionStub = {
   runtimeMode: RuntimeMode;
   title: string;
   providerSessionId?: string;
+  providerAccountId?: string;
   branch?: string;
   worktreeCwd?: string;
 };
@@ -49,6 +53,7 @@ export type WorkspaceSnapshot = {
   activeTabId: string;
   projectCwd: string;
   projectTerminals: ProjectTerminalDock[];
+  projectReturnTargets?: { projectPath: string; tabId?: string; paneId?: string }[];
 };
 
 export function collectWorkspaceSnapshot(
@@ -56,16 +61,85 @@ export function collectWorkspaceSnapshot(
   sessions: Session[],
   activeTabId: string,
   projectCwd: string,
+  memory: ProjectReturnMemory,
   projectTerminals: ProjectTerminalDock[] = [],
 ): WorkspaceSnapshot {
-  return withoutInboxSessions({
-    tabs: tabs.map(sanitizeTab).filter((tab): tab is WorkspaceTab => tab != null),
+  const snapshot = withoutInboxSessions({
+    tabs: withoutAgentTabs(tabs).map(sanitizeTab).filter((tab): tab is WorkspaceTab => tab != null),
     sessions: sessions.map(sessionStub).filter((stub): stub is WorkspaceSessionStub => stub != null),
     activeTabId,
     projectCwd: projectCwd.trim() || "~",
     projectTerminals: projectTerminals
       .map(sanitizeProjectTerminal)
       .filter((dock): dock is ProjectTerminalDock => dock != null),
+  });
+  return withProjectReturnTargets(snapshot, memory);
+}
+
+function withProjectReturnTargets(
+  snapshot: WorkspaceSnapshot,
+  memory: ProjectReturnMemory,
+): WorkspaceSnapshot {
+  const valid = reconcileProjectReturn({
+    ...snapshot,
+    memory,
+    activeTabId: "",
+  });
+  return {
+    ...snapshot,
+    projectReturnTargets: [...valid].map(([projectPath, paneId]) => ({
+      projectPath,
+      tabId: paneId,
+    })),
+  };
+}
+
+function parseProjectReturnTargets(raw: unknown): ProjectReturnMemory {
+  const memory = new Map<string, string>();
+  if (!Array.isArray(raw)) return memory;
+  for (const entry of raw) {
+    if (!entry || typeof entry !== "object") continue;
+    if (!("projectPath" in entry)) continue;
+    const projectPath = (entry as { projectPath?: unknown }).projectPath;
+    if (typeof projectPath !== "string" || !projectPath.trim()) continue;
+
+    const remembered =
+      (entry as { paneId?: unknown }).paneId ??
+      (entry as { tabId?: unknown }).tabId;
+    if (typeof remembered !== "string" || !remembered.trim()) continue;
+
+    memory.set(pathKey(projectPath), remembered.trim());
+  }
+  return memory;
+}
+
+/**
+ * Agent tabs watch a live worker, and a run does not outlive the window that
+ * started it. Dropping them in `sanitizeFile` would strand an empty pane and
+ * cost the whole workspace tab on restore, so the pane is closed here instead.
+ */
+function withoutAgentTabs(tabs: WorkspaceTab[]): WorkspaceTab[] {
+  return tabs.flatMap(tab => {
+    if (!tab.editorPanes.some(pane => pane.files.some(isAgentTab))) return [tab];
+    let remaining: WorkspaceTab | null = tab;
+    const panes: EditorPane[] = [];
+    for (const pane of tab.editorPanes) {
+      const files = pane.files.filter(file => !isAgentTab(file));
+      if (files.length === pane.files.length) {
+        panes.push(pane);
+      } else if (files.length === 0) {
+        remaining = remaining && closeLeaf(remaining, pane.id);
+      } else {
+        panes.push({
+          ...pane,
+          files,
+          activeFileId: files.some(file => file.id === pane.activeFileId)
+            ? pane.activeFileId
+            : files[0].id,
+        });
+      }
+    }
+    return remaining ? [{ ...remaining, editorPanes: panes }] : [];
   });
 }
 
@@ -99,6 +173,7 @@ export function parseWorkspaceSnapshot(raw: unknown): WorkspaceSnapshot | null {
     activeTabId?: unknown;
     projectCwd?: unknown;
     projectTerminals?: unknown;
+    projectReturnTargets?: unknown;
   };
   if (!Array.isArray(value.tabs) || typeof value.activeTabId !== "string") {
     return null;
@@ -125,7 +200,12 @@ export function parseWorkspaceSnapshot(raw: unknown): WorkspaceSnapshot | null {
         .filter((dock): dock is ProjectTerminalDock => dock != null)
     : [];
   const snapshot = withoutInboxSessions({ tabs, sessions, activeTabId, projectCwd, projectTerminals });
-  return snapshot.tabs.length > 0 ? snapshot : null;
+  return snapshot.tabs.length > 0
+    ? withProjectReturnTargets(
+        snapshot,
+        parseProjectReturnTargets(value.projectReturnTargets),
+      )
+    : null;
 }
 
 export function workspaceSnapshotKey(snapshot: WorkspaceSnapshot): string {
@@ -210,6 +290,12 @@ export function hydrateWorkspaceSnapshot(
     activeTabId,
     projectCwd,
     projectTerminals: parsed.projectTerminals,
+    projectReturnMemory: reconcileProjectReturn({
+      memory: parseProjectReturnTargets(parsed.projectReturnTargets),
+      tabs,
+      sessions: [...sessions.values()],
+      activeTabId,
+    }),
   };
 }
 
@@ -226,6 +312,9 @@ function sessionStub(session: Session): WorkspaceSessionStub | null {
     ...(session.inboxAsk ? { inboxAsk: session.inboxAsk } : {}),
     ...(session.providerSessionId
       ? { providerSessionId: session.providerSessionId }
+      : {}),
+    ...(session.providerAccountId
+      ? { providerAccountId: session.providerAccountId }
       : {}),
     ...(session.branch ? { branch: session.branch } : {}),
     ...(session.worktreeCwd ? { worktreeCwd: session.worktreeCwd } : {}),
@@ -247,6 +336,9 @@ function sessionFromStub(stub: WorkspaceSessionStub): Session {
     ...(stub.inboxAsk ? { inboxAsk: stub.inboxAsk } : {}),
     ...(stub.providerSessionId
       ? { providerSessionId: stub.providerSessionId }
+      : {}),
+    ...(stub.providerAccountId
+      ? { providerAccountId: stub.providerAccountId }
       : {}),
     ...(stub.branch ? { branch: stub.branch } : {}),
     ...(stub.worktreeCwd ? { worktreeCwd: stub.worktreeCwd } : {}),
@@ -283,6 +375,10 @@ function sanitizeStub(raw: unknown): WorkspaceSessionStub | null {
       ? { inboxAsk: value.inboxAsk as InboxAskContext } : {}),
     ...(typeof value.providerSessionId === "string" && value.providerSessionId
       ? { providerSessionId: value.providerSessionId }
+      : {}),
+    ...(typeof value.providerAccountId === "string" &&
+    /^[A-Za-z0-9_-]+$/.test(value.providerAccountId)
+      ? { providerAccountId: value.providerAccountId }
       : {}),
     ...(typeof value.branch === "string" && value.branch.trim()
       ? { branch: value.branch.trim() }

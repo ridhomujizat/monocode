@@ -1,6 +1,11 @@
 import { invoke } from "@tauri-apps/api/core";
 import { HARNESS_TITLE, sessionDisplayTitle, type Session } from "./session";
-import { loadSoundsEnabled } from "./sounds";
+import { loadSoundsEnabled, playCue } from "./sounds";
+import {
+  allowsProjectNotification,
+  type NotificationSubject,
+} from "./notificationPreferences";
+import { knownNotificationProject } from "./notificationProjects";
 
 const KEY = "monocode.notifications";
 
@@ -13,10 +18,7 @@ export const NOTIFICATIONS_CHANGE_EVENT = "monocode:notifications-change";
 export const NOTIFICATION_CLICK_EVENT = "monocode:notification-click";
 
 export type NotificationPermission =
-  | "prompt"
-  | "granted"
-  | "denied"
-  | "unsupported";
+  "prompt" | "granted" | "denied" | "unsupported";
 
 export function loadNotificationsEnabled(): boolean {
   try {
@@ -49,7 +51,9 @@ export function cachedNotificationPermission(): NotificationPermission {
 
 export async function probeNotificationPermission(): Promise<NotificationPermission> {
   try {
-    permission = await invoke<NotificationPermission>("notification_permission");
+    permission = await invoke<NotificationPermission>(
+      "notification_permission",
+    );
   } catch {
     permission = "unsupported";
   }
@@ -103,10 +107,61 @@ export function shouldNotify({
   return permission === "granted" || permission === "prompt";
 }
 
-export type NotificationEvent = "finished" | "needsInput";
+export type InputNotificationEvent = {
+  kind: "approval" | "question";
+  requestId: number;
+};
+export type NotificationEvent = "finished" | InputNotificationEvent;
+
+type PendingInputNotification = {
+  session: Session;
+  event: InputNotificationEvent;
+};
+
+/** Track each request, including a new request in an already-waiting session. */
+export function pendingInputNotifications(
+  sessions: Session[],
+): Map<string, PendingInputNotification> {
+  const pending = new Map<string, PendingInputNotification>();
+  for (const session of sessions) {
+    if (session.inboxAsk) continue;
+    for (const block of session.blocks) {
+      if (block.approval && !block.approval.decided) {
+        pending.set(
+          JSON.stringify([session.id, "approval", block.approval.requestId]),
+          {
+            session,
+            event: { kind: "approval", requestId: block.approval.requestId },
+          },
+        );
+      }
+    }
+    if (session.pendingQuestion) {
+      pending.set(
+        JSON.stringify([
+          session.id,
+          "question",
+          session.pendingQuestion.requestId,
+        ]),
+        {
+          session,
+          event: {
+            kind: "question",
+            requestId: session.pendingQuestion.requestId,
+          },
+        },
+      );
+    }
+  }
+  return pending;
+}
 
 /** App name, then the session title, then the reply itself. */
-export type NotificationText = { title: string; subtitle: string; body: string };
+export type NotificationText = {
+  title: string;
+  subtitle: string;
+  body: string;
+};
 
 const BODY_MAX = 240;
 
@@ -117,19 +172,24 @@ export function notificationText(
   const title = "MonoCode";
   const subtitle = sessionDisplayTitle(session.title, session.harness);
   const harness = HARNESS_TITLE[session.harness];
-  if (event === "needsInput") {
-    const question = session.pendingQuestion;
-    if (question) {
-      const prompt = question.title || question.questions[0]?.prompt;
+  if (event !== "finished") {
+    if (event.kind === "question") {
+      const question =
+        session.pendingQuestion?.requestId === event.requestId
+          ? session.pendingQuestion
+          : undefined;
+      const prompt = question?.title || question?.questions[0]?.prompt;
       return {
         title,
         subtitle,
         body: clip(prompt || `${harness} has a question for you`),
       };
     }
-    const pending = [...session.blocks]
-      .reverse()
-      .find((block) => block.approval && !block.approval.decided);
+    const pending = session.blocks.find(
+      (block) =>
+        block.approval?.requestId === event.requestId &&
+        !block.approval.decided,
+    );
     const what = pending?.tool?.title || pending?.text;
     return {
       title,
@@ -170,6 +230,46 @@ export async function notifySession(
   sessionVisible: boolean,
 ): Promise<boolean> {
   if (session.inboxAsk) return false;
+  const occurredAt = Date.now();
+  const project = knownNotificationProject(session.cwd);
+  if (!project) return false;
+  return notifyProjectSession(session, event, sessionVisible, {
+    projectId: project.id,
+    category: event === "finished" ? "agentFinished" : "agentInput",
+    occurredAt,
+  });
+}
+
+/** One policy decision covers both the OS banner and its in-app sound fallback. */
+export async function announceSessionFinished(
+  session: Session,
+  sessionVisible: boolean,
+): Promise<void> {
+  if (session.inboxAsk) return;
+  const occurredAt = Date.now();
+  const project = knownNotificationProject(session.cwd);
+  if (!project) return;
+  const subject: NotificationSubject = {
+    projectId: project.id,
+    category: "agentFinished",
+    occurredAt,
+  };
+  const sent = await notifyProjectSession(
+    session,
+    "finished",
+    sessionVisible,
+    subject,
+  );
+  if (!sent) playCue("turnFinished", subject);
+}
+
+async function notifyProjectSession(
+  session: Session,
+  event: NotificationEvent,
+  sessionVisible: boolean,
+  subject: NotificationSubject,
+): Promise<boolean> {
+  if (!allowsProjectNotification(subject)) return false;
   const decision = shouldNotify({
     enabled: loadNotificationsEnabled(),
     permission,

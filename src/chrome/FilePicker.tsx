@@ -17,6 +17,7 @@ import {
 } from "../lib/fileIndex";
 import { LAYER } from "../lib/layers";
 import { looksLikeProject } from "../lib/recents";
+import type { OpenFileFn } from "../lib/search";
 import { useLockOverscroll } from "../hooks/useLockOverscroll";
 import { FileTypeIcon } from "./FileTypeIcon";
 import { MatchText } from "./MatchText";
@@ -25,7 +26,7 @@ type Props = {
   open: boolean;
   cwd: string;
   openPaths?: string[];
-  onOpenFile: (path: string) => void;
+  onOpenFile: OpenFileFn;
   onClose: () => void;
 };
 
@@ -121,7 +122,7 @@ export function FilePicker({
   if (!open) return null;
 
   const pick = (file: RankedFile) => {
-    onOpenFile(file.path);
+    onOpenFile(file.path, undefined, { exact: true });
     onClose();
   };
 
@@ -167,7 +168,7 @@ export function FilePicker({
         className="absolute left-1/2 top-[12%] flex w-[min(560px,calc(100vw-24px))] -translate-x-1/2 flex-col overflow-hidden rounded-lg border border-content/10 bg-content/5 backdrop-blur-xl"
       >
         <div className="pb-1.5">
-          <label className="flex items-center gap-2 border-b border-content/10 px-2 py-2.5 text-content/50">
+          <label className="flex items-center gap-2 border-b border-stroke px-2 py-2.5 text-content/50">
             <Search className="size-3.5 shrink-0" strokeWidth={1.75} />
             <input
               ref={search}
@@ -298,7 +299,7 @@ function FileList({
             onMouseEnter={() => onRowEnter(index)}
             onClick={() => onPick(file)}
             className={`flex h-8 w-full items-center gap-2 rounded-md px-2 text-left text-sm leading-none ${
-              highlighted ? "bg-content/10 text-content" : "text-content"
+              highlighted ? "bg-selection text-content" : "text-content"
             }`}
           >
             <span className="shrink-0">

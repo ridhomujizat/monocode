@@ -1,6 +1,41 @@
 import { invoke } from "@tauri-apps/api/core";
 import { open } from "@tauri-apps/plugin-dialog";
 import { slash } from "./paths";
+import type { InterjectionMeta } from "./session";
+
+export type OmpInterjectionAnchor = InterjectionMeta & {
+  id: string;
+  afterAssistantText: string;
+  /** One-based occurrence among assistant messages with exactly this text. */
+  afterOccurrence: number;
+  /** Direct-concat live representation, with its own exact-text occurrence. */
+  afterAssistantTextConcat?: string;
+  afterConcatOccurrence?: number;
+  text: string;
+  /** Full text of a directly following text-only answer, if present. */
+  followingAssistantText?: string | null;
+  followingAssistantTextConcat?: string | null;
+};
+
+export function ompSessionInterjections(
+  providerSessionId: string,
+): Promise<OmpInterjectionAnchor[]> {
+  return invoke<OmpInterjectionAnchor[]>("omp_session_interjections", {
+    providerSessionId,
+  });
+}
+
+/** One active-path assistant message in source order. Its newline and concat
+ * representations are alternative forms of the same message, not two messages.
+ */
+export interface OmpAssistantText {
+  text: string;
+  concat: string;
+}
+
+export function ompActiveAssistantTexts(providerSessionId: string): Promise<OmpAssistantText[]> {
+  return invoke<OmpAssistantText[]>("omp_active_assistant_texts", { providerSessionId });
+}
 
 export type FsEntry = {
   name: string;
@@ -35,6 +70,7 @@ export type DiscoveredSkill = {
     | "omp"
     | "fx"
     | "grok"
+    | "hermes"
     | "monocode";
 };
 
@@ -338,6 +374,18 @@ export function copyPath(from: string, destParent: string): Promise<string> {
 
 export function movePath(from: string, destParent: string): Promise<string> {
   return invoke<string>("move_path", { from, destParent }).then(slash);
+}
+
+/** macOS only. Other platforms return an empty list. */
+export function clipboardFilePaths(): Promise<string[]> {
+  return invoke<string[]>("clipboard_file_paths").then((paths) =>
+    paths.map(slash),
+  );
+}
+
+/** Put the original file on the macOS clipboard, preserving its name and type. */
+export function copyFileToClipboard(path: string): Promise<void> {
+  return invoke<void>("copy_file_to_clipboard", { path });
 }
 
 export function revealPath(path: string): Promise<void> {
