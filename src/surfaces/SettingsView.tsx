@@ -152,7 +152,7 @@ import {
   subscribeModels,
 } from "../lib/models";
 import { prettyCwd, projectKey, projectName } from "../lib/paths";
-import { IS_MAC, IS_WIN } from "../lib/platform";
+import { HAS_BLUR_RADIUS, IS_MAC, IS_WIN } from "../lib/platform";
 import {
   loadArchivedProjects,
   looksLikeProject,
@@ -1685,7 +1685,7 @@ function AppearancePage({ appearance }: { appearance: AppearanceSettings }) {
             min={SIDEBAR_BLUR_MIN}
             max={SIDEBAR_BLUR_MAX}
             onChange={appearance.onBlur}
-            disabled={glassDisabled}
+            disabled={glassDisabled || !HAS_BLUR_RADIUS}
           />
         </Row>
         <Row

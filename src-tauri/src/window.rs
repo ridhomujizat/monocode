@@ -1,6 +1,5 @@
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
-#[cfg(any(target_os = "macos", target_os = "windows"))]
 use tauri::window::Color;
 #[cfg(target_os = "windows")]
 use tauri::window::{Effect, EffectsBuilder};
@@ -64,9 +63,15 @@ pub fn set_window_glass_enabled(window: WebviewWindow, enabled: bool) {
             let _ = window.set_background_color(Some(Color(247, 247, 247, 255)));
         }
     }
+    // Linux has no compositor blur to ask for. Clearing the opaque window
+    // background is the whole effect; the CSS alpha does the rest.
     #[cfg(not(any(target_os = "macos", target_os = "windows")))]
     {
-        let _ = (window, enabled);
+        let _ = window.set_background_color(Some(if enabled {
+            Color(0, 0, 0, 0)
+        } else {
+            Color(23, 23, 23, 255)
+        }));
     }
 }
 
