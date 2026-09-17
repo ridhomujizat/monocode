@@ -92,7 +92,7 @@ export const SETTINGS_SECTIONS: SettingsSection[] = [
     id: "inbox",
     group: "workspace",
     label: "Inbox",
-    description: "Connect and manage the services that appear in your Inbox.",
+    description: "Manage Inbox services and notification preferences for each project.",
     keywords: "github gitlab linear connect token integration",
   },
   {
@@ -264,6 +264,12 @@ export const SETTINGS_INDEX: SettingsEntry[] = [
     section: "providers",
     label: "Claude Code hooks",
     keywords: "pretooluse settings.json block command notification",
+  },
+  {
+    id: "project-notifications",
+    section: "inbox",
+    label: "Project notifications",
+    keywords: "mute resume sounds banners reminders categories",
   },
   {
     id: "github",

@@ -166,9 +166,9 @@ describe("model picker", () => {
     const modelFlyout = container.querySelector<HTMLElement>(
       '[role="dialog"][aria-label="Models"]',
     )!;
-    expect(modelFlyout.style.height).toBe("332px");
-    expect(modelFlyout.dataset.minHeight).toBe("334");
-    expect(modelFlyout.dataset.maxHeight).toBe("334");
+    expect(modelFlyout.style.height).toBe("368px");
+    expect(modelFlyout.dataset.minHeight).toBe("370");
+    expect(modelFlyout.dataset.maxHeight).toBe("370");
     expect(
       container.querySelector('[role="tablist"][aria-orientation="vertical"]'),
     ).not.toBeNull();
@@ -444,13 +444,13 @@ describe("model picker", () => {
     // The composer can retain focus after opening its toolbar menu. Recent
     // model navigation still needs to own these keys in that state.
     trigger.focus();
-    expect(grokModel.className).toContain("bg-content/10");
+    expect(grokModel.className).toContain("bg-selection");
     keyDown(trigger, "ArrowUp");
-    expect(claudeModel.className).toContain("bg-content/10");
+    expect(claudeModel.className).toContain("bg-selection");
     keyDown(trigger, "ArrowDown");
-    expect(grokModel.className).toContain("bg-content/10");
+    expect(grokModel.className).toContain("bg-selection");
     keyDown(trigger, "ArrowDown");
-    expect(cursorModel.className).toContain("bg-content/10");
+    expect(cursorModel.className).toContain("bg-selection");
 
     keyDown(trigger, "Enter");
     expect(onChange).toHaveBeenCalledWith("cursor", "cursor:composer-2.5");

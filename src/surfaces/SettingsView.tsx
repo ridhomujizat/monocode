@@ -30,6 +30,7 @@ import {
   ColorSwatchRow,
 } from "../chrome/ColorPickerPopover";
 import { Popover } from "../chrome/Popover";
+import { SecondaryButton } from "../chrome/SecondaryButton";
 import { InboxProviderMark } from "../chrome/InboxProviderMark";
 import { RemoveProjectDialog } from "../chrome/RemoveProjectDialog";
 import { WindowControls } from "../chrome/WindowControls";
@@ -157,6 +158,7 @@ import {
   looksLikeProject,
   subscribeArchivedProjects,
   type ArchivedProject,
+  type RecentProject,
 } from "../lib/recents";
 import {
   HARNESSES,
@@ -236,6 +238,7 @@ import {
 } from "../lib/updater";
 
 import { SkillsPage } from "./SkillsPage";
+import { ProjectNotificationSettings } from "./ProjectNotificationSettings";
 
 /**
  * The `data-setting-id` Settings should reveal when it opens: one of the ids in
@@ -252,6 +255,11 @@ type Props = {
   section: SettingsSectionId;
   /** Card to scroll to; the General page is too long to land at the top. */
   anchor?: SettingsAnchor | null;
+  /** Project to focus when opening notification settings from a quick action. */
+  notificationProjectPath?: string | null;
+  /** Changes for each quick action, including repeated requests for one project. */
+  notificationSettingsRequest?: number;
+  recents?: RecentProject[];
   cwd: string;
   sessions: SessionSummary[];
   besideRail?: boolean;
@@ -269,6 +277,9 @@ type Props = {
 export function SettingsView({
   section,
   anchor = null,
+  notificationProjectPath = null,
+  notificationSettingsRequest = 0,
+  recents,
   cwd,
   sessions,
   besideRail = false,
@@ -287,18 +298,21 @@ export function SettingsView({
   onCloseRef.current = onClose;
   const appearance = useAppearanceSettings();
 
-  useEffect(() => setRevealed(anchor), [anchor]);
+  useEffect(() => setRevealed(anchor), [anchor, notificationSettingsRequest]);
 
   // Section is a dependency so a search result on another page scrolls once
   // that page has mounted the row.
   useEffect(() => {
     if (!revealed) return;
-    document
-      .getElementById(settingDomId(revealed))
-      ?.scrollIntoView?.({ block: "center" });
+    // A project quick action lets the project card focus itself after discovery.
+    if (!(revealed === "project-notifications" && notificationProjectPath)) {
+      document
+        .getElementById(settingDomId(revealed))
+        ?.scrollIntoView?.({ block: "center" });
+    }
     const timer = window.setTimeout(() => setRevealed(null), 1800);
     return () => window.clearTimeout(timer);
-  }, [revealed, section]);
+  }, [revealed, section, notificationProjectPath, notificationSettingsRequest]);
 
   const onReveal = useCallback(
     (next: SettingsSectionId, settingId: string | null) => {
@@ -328,7 +342,7 @@ export function SettingsView({
       className="flex min-h-0 min-w-0 flex-1 flex-col text-content"
     >
       <div
-        className="flex h-10 shrink-0 select-none items-center border-b border-content/10"
+        className="flex h-10 shrink-0 select-none items-center border-b border-stroke"
         data-tauri-drag-region="deep"
       >
         {IS_MAC && !besideRail ? <div className="w-[78px] shrink-0" /> : null}
@@ -375,9 +389,9 @@ export function SettingsView({
         <RevealedSetting.Provider value={revealed}>
           <div
             ref={lockOverscroll}
-            className="min-h-0 flex-1 overflow-y-auto overscroll-none"
+            className="@container/settings min-h-0 flex-1 overflow-y-auto overscroll-none"
           >
-            <div className="mx-auto w-full max-w-5xl px-8 py-8 pb-16">
+            <div className="mx-auto w-full max-w-5xl px-5 py-6 pb-16 @min-[560px]/settings:px-8 @min-[560px]/settings:py-8">
               <PageHeader
                 title={settingsSectionLabel(section)}
                 description={settingsSectionDescription(section)}
@@ -392,7 +406,14 @@ export function SettingsView({
               {section === "keybindings" ? <KeybindingsPage /> : null}
               {section === "providers" ? <ProvidersPage /> : null}
               {section === "plugins" ? <PluginsPage /> : null}
-              {section === "inbox" ? <InboxPage /> : null}
+              {section === "inbox" ? (
+                <InboxPage
+                  cwd={cwd}
+                  recents={recents}
+                  notificationProjectPath={notificationProjectPath}
+                  notificationSettingsRequest={notificationSettingsRequest}
+                />
+              ) : null}
               {section === "archive" ? (
                 <ArchivePage
                   cwd={cwd}
@@ -517,7 +538,7 @@ function SettingsSearch({
                 onClick={() => go(result)}
                 className={`flex w-full items-center gap-2 rounded-lg px-2 py-1.5 text-left text-[12px] ${
                   index === active
-                    ? "bg-content/10 text-content"
+                    ? "bg-selection text-content"
                     : "text-content hover:bg-content/5"
                 }`}
               >
@@ -593,7 +614,7 @@ function GeneralPage({
         <Row
           id="sounds"
           label="Sounds"
-          description="Short cues when a turn finishes, a new inbox item appears on the project rail, or an update is available. Switches and Copy on a finished turn also play."
+          description="Short cues for project activity, finished turns, and available updates. Choose project notification categories in Inbox settings. Switches and Copy on a finished turn also play."
         >
           <Toggle
             label="Sounds"
@@ -832,9 +853,32 @@ function ChatPage() {
   );
 }
 
-function InboxPage() {
+function InboxPage({
+  cwd,
+  recents,
+  notificationProjectPath,
+  notificationSettingsRequest,
+}: {
+  cwd: string;
+  recents?: RecentProject[];
+  notificationProjectPath?: string | null;
+  notificationSettingsRequest?: number;
+}) {
+  const revealed = useContext(RevealedSetting);
   return (
     <>
+      <div
+        id={settingDomId("project-notifications")}
+        data-setting-id="project-notifications"
+      >
+        <ProjectNotificationSettings
+          cwd={cwd}
+          recents={recents}
+          notificationProjectPath={notificationProjectPath}
+          notificationSettingsRequest={notificationSettingsRequest}
+          highlighted={revealed === "project-notifications"}
+        />
+      </div>
       <Group
         id="github"
         title={
@@ -1010,7 +1054,7 @@ function GitlabSettings() {
         description="Connect GitLab.com or a self-managed GitLab instance. Use a personal access token with API access; the token is stored locally and Disconnect deletes it."
       >
         {connected ? (
-          <div className="flex min-w-0 items-center gap-2">
+          <div className="flex min-w-0 max-w-full flex-wrap items-center gap-2">
             <span className="max-w-56 truncate text-[12px] text-content/50">
               {url}
             </span>
@@ -1022,8 +1066,8 @@ function GitlabSettings() {
             </SecondaryButton>
           </div>
         ) : (
-          <div className="flex min-w-0 items-center gap-2">
-            <label className="flex h-7 w-52 shrink-0 items-center rounded-md border border-content/10 px-2 focus-within:border-content/20">
+          <div className="flex min-w-0 max-w-full flex-wrap items-center gap-2">
+            <label className="flex h-7 w-52 max-w-full shrink-0 items-center rounded-md border border-content/10 px-2 focus-within:border-content/20">
               <input
                 type="url"
                 value={url}
@@ -1035,7 +1079,7 @@ function GitlabSettings() {
                 className="min-w-0 flex-1 bg-transparent text-[12px] text-content outline-none placeholder:text-content/35"
               />
             </label>
-            <label className="flex h-7 w-52 shrink-0 items-center rounded-md border border-content/10 px-2 focus-within:border-content/20">
+            <label className="flex h-7 w-52 max-w-full shrink-0 items-center rounded-md border border-content/10 px-2 focus-within:border-content/20">
               <input
                 type="password"
                 value={token}
@@ -1165,8 +1209,8 @@ function LinearSettings() {
             Disconnect
           </SecondaryButton>
         ) : (
-          <div className="flex items-center gap-2">
-            <label className="flex h-7 w-52 shrink-0 items-center rounded-md border border-content/10 px-2 focus-within:border-content/20">
+          <div className="flex max-w-full flex-wrap items-center gap-2">
+            <label className="flex h-7 w-52 max-w-full shrink-0 items-center rounded-md border border-content/10 px-2 focus-within:border-content/20">
               <input
                 type="password"
                 value={token}
@@ -1835,7 +1879,7 @@ function KeybindingsPage() {
         </div>
       }
     >
-      <div className="flex items-center border-b border-content/10 bg-content/5 px-4 py-2 text-[11px] font-semibold uppercase tracking-[0.08em] text-content/40">
+      <div className="flex items-center border-b border-stroke bg-content/5 px-4 py-2 text-[11px] font-semibold uppercase tracking-[0.08em] text-content/40">
         <span className="min-w-0 flex-1">Command</span>
         <span className="w-40 shrink-0">Keybinding</span>
         <span className="w-28 shrink-0">When</span>
@@ -2498,7 +2542,7 @@ function Row({
     <div
       id={id ? settingDomId(id) : undefined}
       data-setting-id={id}
-      className={`flex items-start gap-6 border-b border-content/5 px-4 py-3.5 transition-colors last:border-b-0 ${
+      className={`settings-row flex items-start gap-6 border-b border-content/5 px-4 py-3.5 transition-colors last:border-b-0 ${
         flash ? "bg-accent/10" : ""
       }`}
     >
@@ -2510,7 +2554,7 @@ function Row({
           </p>
         ) : null}
       </div>
-      <div className="flex shrink-0 flex-wrap items-center justify-end gap-2">
+      <div className="settings-row-control flex min-w-0 max-w-[60%] shrink-0 flex-wrap items-center justify-end gap-2">
         {children}
       </div>
     </div>
@@ -2532,8 +2576,7 @@ function Segmented<T extends string>({
     <div
       role="radiogroup"
       aria-label={label}
-      className="inline-grid shrink-0 gap-0.5 rounded-md border border-content/10 p-0.5 text-[12px]"
-
+      className="inline-grid max-w-full shrink-0 gap-0.5 rounded-md border border-content/10 p-0.5 text-[12px]"
       style={{
         gridTemplateColumns: `repeat(${options.length}, minmax(0, 1fr))`,
       }}
@@ -2545,9 +2588,9 @@ function Segmented<T extends string>({
           role="radio"
           aria-checked={value === option.value}
           onClick={() => onChange(option.value)}
-          className={`min-w-0 whitespace-nowrap rounded-[5px] px-2.5 py-1 ${
+          className={`min-w-0 rounded-[5px] px-2.5 py-1 ${
             value === option.value
-              ? "bg-content/10 text-content"
+              ? "bg-selection text-content"
               : "text-content/50 hover:text-content"
           }`}
         >
@@ -2579,7 +2622,7 @@ function Slider({
 }) {
   return (
     <div
-      className={`flex w-56 items-center gap-3 ${disabled ? "opacity-40" : ""}`}
+      className={`flex w-56 max-w-full items-center gap-3 ${disabled ? "opacity-40" : ""}`}
     >
       <input
         type="range"
@@ -2857,7 +2900,7 @@ function Select({
                 onClick={() => pick(option.value)}
                 className={`flex w-full items-center gap-2 rounded-lg px-2 py-1.5 text-left text-[12px] ${
                   highlighted || isSelected
-                    ? "bg-content/10 text-content"
+                    ? "bg-selection text-content"
                     : "text-content hover:bg-content/5"
                 }`}
               >
@@ -2871,32 +2914,5 @@ function Select({
         </Popover>
       ) : null}
     </div>
-  );
-}
-
-function SecondaryButton({
-  onClick,
-  disabled = false,
-  danger = false,
-  children,
-}: {
-  onClick: () => void;
-  disabled?: boolean;
-  danger?: boolean;
-  children: ReactNode;
-}) {
-  return (
-    <button
-      type="button"
-      onClick={onClick}
-      disabled={disabled}
-      className={`flex shrink-0 items-center gap-1.5 rounded-md border border-content/10 px-2.5 py-1 text-[12px] ${
-        danger
-          ? "text-red-400 hover:border-red-400/40 hover:bg-red-400/10"
-          : "text-content/70 hover:bg-content/10 hover:text-content"
-      } disabled:cursor-default disabled:opacity-40 disabled:hover:bg-transparent`}
-    >
-      {children}
-    </button>
   );
 }

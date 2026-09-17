@@ -53,6 +53,7 @@ type Shared = {
   focusedId: string;
   addToChatSessionId?: string;
   composerFocused: boolean;
+  composerFocusToken?: number;
   recents: RecentProject[];
   hideProjectPicker?: boolean;
   onFocus: (paneId: string) => void;
@@ -160,6 +161,7 @@ function PaneTreeComponent({
   focusedId,
   addToChatSessionId,
   composerFocused,
+  composerFocusToken,
   recents,
   hideProjectPicker,
   onFocus,
@@ -405,6 +407,7 @@ function PaneTreeComponent({
                 addToChatTarget={addToChatSessionId === session.id}
                 inSplit={inSplit}
                 composerFocused={composerFocused}
+                composerFocusToken={composerFocusToken}
                 recents={recents}
                 hideProjectPicker={hideProjectPicker}
                 onFocus={onFocus}
@@ -527,8 +530,8 @@ function Sash({
       aria-valuenow={Math.round(boundary * 100)}
       className={
         row
-          ? "absolute z-10 w-px bg-content/10"
-          : "absolute z-10 h-px bg-content/10"
+          ? "absolute z-10 w-px bg-stroke"
+          : "absolute z-10 h-px bg-stroke"
       }
       style={
         row

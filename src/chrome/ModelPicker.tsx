@@ -586,8 +586,8 @@ export function ModelPicker({
         onClick={() => togglePicker()}
         className={`flex h-6.5 max-w-40 items-center gap-1 rounded-md px-1.5 ${
           open
-            ? "bg-content/10 text-content"
-            : "bg-content/10 text-content hover:bg-content/15"
+            ? "bg-selection text-content"
+            : "bg-selection text-content hover:bg-selection-hover"
         }`}
       >
         <HarnessIcon harness={current.harness} className="size-4 shrink-0" />
@@ -640,7 +640,7 @@ export function ModelPicker({
                     onClick={() => showEntrySubmenu(entry)}
                     className={`flex h-9 w-full items-center gap-2 rounded-lg px-2 text-left text-[13px] ${
                       highlighted
-                        ? "bg-content/10 text-content"
+                        ? "bg-selection text-content"
                         : "text-content hover:bg-content/5"
                     }`}
                   >
@@ -690,7 +690,7 @@ export function ModelPicker({
                   }}
                   className={`flex h-9 w-full items-center gap-2 rounded-lg px-2 text-left text-[13px] ${
                     highlighted
-                      ? "bg-content/10 text-content"
+                      ? "bg-selection text-content"
                       : "text-content hover:bg-content/5"
                   }`}
                 >
@@ -757,7 +757,7 @@ export function ModelPicker({
                     onClick={() => pickSetting(submenu.setting, option.value)}
                     className={`flex h-8 w-full items-center gap-2 rounded-lg px-2 text-left text-[13px] ${
                       highlighted
-                        ? "bg-content/10 text-content"
+                        ? "bg-selection text-content"
                         : "text-content hover:bg-content/5"
                     }`}
                   >
@@ -834,7 +834,7 @@ export function ModelPicker({
                   disabled
                     ? "text-content/30"
                     : highlighted
-                      ? "bg-content/10 text-content"
+                      ? "bg-selection text-content"
                       : "text-content hover:bg-content/5"
                 }`}
               >
@@ -922,8 +922,8 @@ export function EffortPicker({
         onClick={() => (open ? dismiss(true) : openPicker())}
         className={`flex h-6.5 max-w-28 items-center gap-1 rounded-md px-1.5 ${
           open
-            ? "bg-content/10 text-content"
-            : "bg-content/10 text-content hover:bg-content/15"
+            ? "bg-selection text-content"
+            : "bg-selection text-content hover:bg-selection-hover"
         }`}
       >
         <Gauge className="size-3.5 shrink-0" strokeWidth={1.75} />
@@ -978,7 +978,7 @@ export function EffortPicker({
                 onMouseEnter={() => setActive(index)}
                 onClick={() => pick(option.value)}
                 className={`flex h-8 w-full items-center gap-2 rounded-lg px-2 text-left text-[13px] text-content ${
-                  highlighted ? "bg-content/10" : "hover:bg-content/5"
+                  highlighted ? "bg-selection" : "hover:bg-content/5"
                 }`}
               >
                 <span className="min-w-0 flex-1 truncate">{option.label}</span>
@@ -1084,7 +1084,7 @@ function ModelFlyout({
         role="tablist"
         aria-label="Providers"
         aria-orientation="vertical"
-        className="flex w-11 shrink-0 flex-col items-center gap-1 border-r border-content/10 p-1.5"
+        className="flex w-11 shrink-0 flex-col items-center gap-1 border-r border-stroke p-1.5"
       >
         <ProviderTabButton
           title="Favorites"
@@ -1110,7 +1110,7 @@ function ModelFlyout({
       </nav>
 
       <div className="flex min-h-0 min-w-0 flex-1 flex-col">
-        <label className="flex shrink-0 items-center gap-2 border-b border-content/10 px-3 py-2.5 text-content/50">
+        <label className="flex shrink-0 items-center gap-2 border-b border-stroke px-3 py-2.5 text-content/50">
           <Search className="size-3.5 shrink-0" strokeWidth={1.75} />
           <input
             ref={searchRef}
@@ -1164,7 +1164,7 @@ function ModelFlyout({
                         disabled
                           ? "text-content/30"
                           : highlighted
-                            ? "bg-content/10 text-content"
+                            ? "bg-selection text-content"
                             : "text-content hover:bg-content/5"
                       }`}
                       onMouseEnter={() => onActive(index)}
@@ -1273,7 +1273,7 @@ function ProviderTabButton({
       onClick={onSelect}
       className={`grid size-8 shrink-0 place-items-center rounded-md ${
         selected
-          ? "bg-content/12 text-content"
+          ? "bg-selection-strong text-content"
           : "text-content/45 hover:bg-content/8 hover:text-content"
       }`}
     >

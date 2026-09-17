@@ -314,7 +314,7 @@ function TitleTabItem({
           closable ? "pr-7" : "pr-2.5"
         } ${
           active
-            ? "bg-content/10 text-content"
+            ? "bg-selection text-content"
             : "text-content/50 hover:bg-content/5 hover:text-content"
         }`}
       >
@@ -417,6 +417,7 @@ export function IconButton({
   accent,
   disabled,
   onClick,
+  onOpenContextMenu,
   children,
 }: {
   label: string;
@@ -424,6 +425,7 @@ export function IconButton({
   accent?: boolean;
   disabled?: boolean;
   onClick?: () => void;
+  onOpenContextMenu?: (x: number, y: number) => void;
   children: ReactNode;
 }) {
   return (
@@ -438,6 +440,22 @@ export function IconButton({
         if (disabled) return;
         onClick?.();
       }}
+      onContextMenu={onOpenContextMenu ? (event) => {
+        event.preventDefault();
+        event.stopPropagation();
+        if (disabled) return;
+        event.currentTarget.focus();
+        onOpenContextMenu(event.clientX, event.clientY);
+      } : undefined}
+      onKeyDown={onOpenContextMenu ? (event) => {
+        if (event.key !== "ContextMenu" && !(event.shiftKey && event.key === "F10")) return;
+        event.preventDefault();
+        event.stopPropagation();
+        if (disabled) return;
+        event.currentTarget.focus();
+        const rect = event.currentTarget.getBoundingClientRect();
+        onOpenContextMenu(rect.left, rect.bottom);
+      } : undefined}
       className={`grid size-6.5 place-items-center rounded-md ${
         disabled
           ? "text-content/25"
@@ -792,7 +810,7 @@ function TitleBarComponent({
   // exempts buttons, links and inputs on its own.
   return (
     <header
-      className="flex h-10 shrink-0 select-none items-stretch border-b border-content/10"
+      className="flex h-10 shrink-0 select-none items-stretch border-b border-stroke"
       data-tauri-drag-region="deep"
     >
       {/* Both the rail and the sidebar step aside without a project, so the
@@ -825,7 +843,7 @@ function TitleBarComponent({
 
       <div
         className={`flex min-w-0 flex-1 items-stretch${
-          showProjectButton ? " border-l border-content/10" : ""
+          showProjectButton ? " border-l border-stroke" : ""
         }`}
       >
         <div

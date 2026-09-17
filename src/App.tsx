@@ -4,7 +4,9 @@ import { modelsFor } from "./lib/models";
 import { isHarnessAvailable } from "./lib/harness/availability";
 import {
   completeOrchestrationProposal,
+  completeOrRepairOrchestrationProposal,
   orchestrationPlanningPrompt,
+  orchestrationRepairPrompt,
   proposalBlock,
   validateOrchestrationSettings,
   withOrchestrationProposal,
@@ -38,6 +40,7 @@ import {
 import { Sidebar } from "./chrome/Sidebar";
 import { ApprovalToasts } from "./chrome/ApprovalToasts";
 import { WhatsNewDialog } from "./chrome/WhatsNewDialog";
+import { ProviderSignInDialog } from "./chrome/ProviderSignInDialog";
 import { TitleBar, type Tab as TitleTab } from "./chrome/TitleBar";
 import { MenuBar } from "./chrome/MenuBar";
 import { FilePicker } from "./chrome/FilePicker";
@@ -166,6 +169,7 @@ import {
   forgetHarnessSession,
   generateHarnessTitle,
   isLiveHarness,
+  latestTurnNeedsHarnessLogin,
   probeHarnessAvailability,
   refreshHarnessCatalogs,
   registerBuiltinHarnesses,
@@ -183,6 +187,7 @@ import {
   type HarnessEvent,
   type UserQuestionReply,
 } from "./lib/harness";
+import { supportsHarnessLogin } from "./lib/harness/authSupport";
 import {
   appendPreparingHandoff,
   buildDeterministicHandoff,
@@ -259,6 +264,11 @@ import {
 } from "./lib/workspaceTabGroups";
 import { runSessionRemoval } from "./lib/sessionRemoval";
 import {
+  DEFAULT_PROVIDER_ACCOUNT_ID,
+  selectedProviderAccountId,
+} from "./lib/providerAccounts";
+import type { RateLimitProvider } from "./lib/rateLimits";
+import {
   HARNESSES,
   HARNESS_LABEL,
   HARNESS_TITLE,
@@ -313,12 +323,11 @@ import { nextUnseenFinishedSessions } from "./lib/sessionDone";
 import {
   loadNotificationsEnabled,
   NOTIFICATION_CLICK_EVENT,
-  notifySession,
+  announceSessionFinished,
   probeNotificationPermission,
   setWindowFocused,
 } from "./lib/notifications";
 import { useInputNotifications } from "./hooks/useInputNotifications";
-import { playCue } from "./lib/sounds";
 import { archiveFocusedSession } from "./lib/archiveShortcut";
 import {
   adjacentItemId,
@@ -451,6 +460,12 @@ import {
   type ResumedWorkspace,
 } from "./lib/appLifecycle";
 
+type LinkedWorkItemPanelState = {
+  item: LinkedWorkItem;
+  sessionId: string;
+  cwd: string;
+};
+
 function withPlanStatus(
   session: Session,
   blockId: string,
@@ -533,7 +548,9 @@ function withHarnessChoice(
     ...(session.model === model
       ? {}
       : { context: dropContextWindow(session.context) }),
-    ...(session.harness === harness ? {} : { providerSessionId: undefined }),
+    ...(session.harness === harness
+      ? {}
+      : { providerSessionId: undefined, providerAccountId: undefined }),
   };
 }
 
@@ -561,6 +578,9 @@ function withPlanBuildTarget(
       ...(plan.restoreProviderSessionId
         ? { providerSessionId: plan.restoreProviderSessionId }
         : { providerSessionId: undefined }),
+      ...(plan.restoreProviderAccountId
+        ? { providerAccountId: plan.restoreProviderAccountId }
+        : { providerAccountId: undefined }),
     };
   }
   if (plan.kind === "empty") {
@@ -672,6 +692,7 @@ export default function App({
       !!tab && resumed.sessions.some((session) => session.id === tab.focusedId)
     );
   });
+  const [composerFocusToken, setComposerFocusToken] = useState(0);
   /** Tab id -> project name, kept in sync with the rendered title tabs. */
   const tabProjectsRef = useRef(new Map<string, string>());
   const projectOfTab = useCallback(
@@ -690,15 +711,18 @@ export default function App({
   const [searchViewOpen, setSearchViewOpen] = useState(false);
   const [searchViewFocusToken, setSearchViewFocusToken] = useState(0);
   const [inboxViewOpen, setInboxViewOpen] = useState(false);
-  const [linkedWorkItemPanel, setLinkedWorkItemPanel] = useState<{
-    item: LinkedWorkItem;
-    sessionId: string;
-    cwd: string;
-  } | null>(null);
+  const [linkedWorkItemPanels, setLinkedWorkItemPanels] = useState<
+    ReadonlyMap<string, LinkedWorkItemPanelState>
+  >(() => new Map());
   const linkedWorkItemPanelRequest = useRef(0);
-  const closeLinkedWorkItemPanel = useCallback(() => {
+  const closeLinkedWorkItemPanel = useCallback((sessionId: string) => {
     linkedWorkItemPanelRequest.current += 1;
-    setLinkedWorkItemPanel(null);
+    setLinkedWorkItemPanels((current) => {
+      if (!current.has(sessionId)) return current;
+      const next = new Map(current);
+      next.delete(sessionId);
+      return next;
+    });
   }, []);
   const [inboxAskPortal, setInboxAskPortal] =
     useState<InboxSessionPortal | null>(null);
@@ -739,11 +763,32 @@ export default function App({
     !!activePlugin;
   const [updateNotice, setUpdateNotice] = useState(installedUpdate);
   const [whatsNewVersion, setWhatsNewVersion] = useState<string | null>(null);
+  const [providerSignInRequest, setProviderSignInRequest] = useState<{
+    key: string;
+    sessionId: string;
+    harness: HarnessId;
+  } | null>(null);
+  const seenProviderSignInRequestsRef = useRef<Set<string> | null>(null);
+  const seenProviderSignInRequests =
+    seenProviderSignInRequestsRef.current ??
+    (seenProviderSignInRequestsRef.current = new Set(
+      sessions.flatMap((session) => {
+        if (
+          !supportsHarnessLogin(session.harness) ||
+          !latestTurnNeedsHarnessLogin(session.blocks)
+        ) {
+          return [];
+        }
+        return [providerSignInRequestKey(session)];
+      }),
+    ));
   const [settingsSection, setSettingsSection] =
     useState<SettingsSectionId>(loadSettingsSection);
   const [settingsAnchor, setSettingsAnchor] = useState<SettingsAnchor | null>(
     null,
   );
+  const [notificationProjectPath, setNotificationProjectPath] = useState<string | null>(null);
+  const [notificationSettingsRequest, setNotificationSettingsRequest] = useState(0);
   const [editorNavigation, setEditorNavigation] =
     useState<EditorNavigationTarget | null>(null);
   const editorNavigationToken = useRef(0);
@@ -1018,28 +1063,27 @@ export default function App({
     sessions.find(
       (session) => activeTab && leafIds(activeTab.layout).includes(session.id),
     );
+  const activeTabSessionIds = activeTab ? leafIds(activeTab.layout) : [];
+  const activeLinkedWorkItemPanel = activeTab
+    ? (linkedWorkItemPanels.get(activeTab.focusedId) ??
+      [...linkedWorkItemPanels.values()]
+        .reverse()
+        .find((panel) => activeTabSessionIds.includes(panel.sessionId)) ??
+      null)
+    : null;
 
+  // Panels are tab-local UI. Keep mounted panels alive while their tab is in
+  // the workspace so switching away preserves the fetched issue and its UI
+  // state, then discard them when their session leaves every open tab.
   useEffect(() => {
-    if (!linkedWorkItemPanel || !activeTab) return;
-    if (leafIds(activeTab.layout).includes(linkedWorkItemPanel.sessionId)) {
-      return;
-    }
-    closeLinkedWorkItemPanel();
-  }, [activeTab, closeLinkedWorkItemPanel, linkedWorkItemPanel]);
-
-  useEffect(() => {
-    if (!linkedWorkItemPanel) return;
-    if (searchViewOpen || inboxViewOpen || notesViewOpen || settingsOpen) {
-      closeLinkedWorkItemPanel();
-    }
-  }, [
-    closeLinkedWorkItemPanel,
-    inboxViewOpen,
-    linkedWorkItemPanel,
-    notesViewOpen,
-    searchViewOpen,
-    settingsOpen,
-  ]);
+    const openSessionIds = new Set(tabs.flatMap((tab) => leafIds(tab.layout)));
+    setLinkedWorkItemPanels((current) => {
+      if ([...current.keys()].every((id) => openSessionIds.has(id))) {
+        return current;
+      }
+      return new Map([...current].filter(([id]) => openSessionIds.has(id)));
+    });
+  }, [tabs]);
 
   const sessionDefaults = active ?? sessions[0];
   const activeSkillContext = active
@@ -1105,15 +1149,58 @@ export default function App({
   }, [activeHarness]);
 
   const usageProviders = useMemo(() => {
-    if (active?.harness === "claude" || active?.harness === "codex") {
+    if (
+      active?.harness === "claude" ||
+      active?.harness === "codex" ||
+      active?.harness === "opencode"
+    ) {
       return [active.harness];
     }
     return [];
   }, [active?.harness]);
   const usageSession = useMemo(() => {
     if (!active) return undefined;
-    return { harness: active.harness };
-  }, [active?.harness]);
+    return {
+      id: active.id,
+      harness: active.harness,
+      authRequired: latestTurnNeedsHarnessLogin(active.blocks),
+      providerAccountId:
+        active.providerAccountId ??
+        (active.blocks.some((block) => block.role === "user")
+          ? DEFAULT_PROVIDER_ACCOUNT_ID
+          : undefined),
+    };
+  }, [active?.id, active?.harness, active?.blocks, active?.providerAccountId]);
+  const activeProviderSignInRequest = useMemo(() => {
+    if (
+      !active ||
+      !supportsHarnessLogin(active.harness) ||
+      !latestTurnNeedsHarnessLogin(active.blocks)
+    ) {
+      return null;
+    }
+    return {
+      key: providerSignInRequestKey(active),
+      sessionId: active.id,
+      harness: active.harness,
+    };
+  }, [active]);
+  useEffect(() => {
+    if (!activeProviderSignInRequest) return;
+    if (seenProviderSignInRequests.has(activeProviderSignInRequest.key)) {
+      return;
+    }
+    seenProviderSignInRequests.add(activeProviderSignInRequest.key);
+    setProviderSignInRequest(activeProviderSignInRequest);
+  }, [activeProviderSignInRequest, seenProviderSignInRequests]);
+  useEffect(() => {
+    if (
+      providerSignInRequest &&
+      active?.id !== providerSignInRequest.sessionId
+    ) {
+      setProviderSignInRequest(null);
+    }
+  }, [active?.id, providerSignInRequest]);
   const runningTerminals = useMemo(() => {
     const files: FilePaneTab[] = [];
     const dock = findProjectTerminal(projectTerminals, projectCwd);
@@ -1209,6 +1296,17 @@ export default function App({
         if (focused) {
           flushHarnessEvents();
           syncDockBadge(sessionsRef.current);
+          if (
+            document.activeElement === document.body &&
+            !projectTerminalFocusedRef.current &&
+            !searchViewOpenRef.current &&
+            !inboxViewOpenRef.current &&
+            !notesViewOpenRef.current &&
+            !settingsOpenRef.current
+          ) {
+            setComposerFocused(true);
+            setComposerFocusToken((token) => token + 1);
+          }
         }
       })
       .then((fn) => {
@@ -1616,6 +1714,44 @@ export default function App({
       );
     },
     [projectOfTab],
+  );
+
+  const onSelectProviderAccount = useCallback(
+    (provider: RateLimitProvider, accountId: string) => {
+      if (!active || active.harness !== provider) return;
+      const currentId = active.providerAccountId ?? DEFAULT_PROVIDER_ACCOUNT_ID;
+      if (currentId === accountId) return;
+
+      if (active.blocks.length === 0 && !active.busy) {
+        setSessions((current) =>
+          current.map((session) =>
+            session.id === active.id
+              ? { ...session, providerAccountId: accountId }
+              : session,
+          ),
+        );
+        return;
+      }
+
+      // Provider thread ids are account-owned. Keep the current conversation
+      // pinned to its account and open a clean one for the selected profile.
+      const session = {
+        ...newSession(
+          active.harness,
+          active.cwd,
+          active.model,
+          active.runtimeMode,
+          active.modelSettings,
+        ),
+        providerAccountId: accountId,
+      };
+      const tab = newTab(session.id);
+      setSessions((current) => [...current, session]);
+      appendTab(tab, active.cwd);
+      setActiveTabId(tab.id);
+      setComposerFocused(true);
+    },
+    [active, appendTab],
   );
 
   const onOpenWhatsNew = useCallback((version: string) => {
@@ -3117,6 +3253,7 @@ export default function App({
           restored.id,
           restored.providerSessionId,
           sessionWorkCwd(restored),
+          restored.providerAccountId,
         );
       }
       lastPersisted.current.set(restored.id, persistFingerprint(restored));
@@ -3190,6 +3327,7 @@ export default function App({
 
       void githubWorkItemThread(
         session.cwd,
+        session.linkedWorkItem.repo,
         session.linkedWorkItem.kind,
         session.linkedWorkItem.number,
         { force: true },
@@ -3344,13 +3482,7 @@ export default function App({
   }, [inboxAskPortal, inboxViewOpen]);
 
   const onSelectHistorySession = useCallback(
-    async (
-      sessionId: string,
-      options?: { preserveLinkedWorkItemPanel?: boolean },
-    ) => {
-      if (!options?.preserveLinkedWorkItemPanel) {
-        closeLinkedWorkItemPanel();
-      }
+    async (sessionId: string) => {
       let session = await ensureOpenSession(sessionId);
       if (!session || session.inboxAsk) return;
       const parentId =
@@ -3378,7 +3510,6 @@ export default function App({
     },
     [
       appendTab,
-      closeLinkedWorkItemPanel,
       ensureOpenSession,
       focusOpenSession,
       replaceBlankPaneWithSession,
@@ -4273,9 +4404,15 @@ export default function App({
         if (!tab) return;
         const file = newFileTab(resolved, sidebarCwdRef.current);
         setTabs((prev) =>
-          prev.map((entry) =>
-            entry.id === tab.id ? openEditorTab(entry, file) : entry,
-          ),
+          prev.map((entry) => {
+            if (entry.id !== tab.id) return entry;
+            const focusedSession = sessionsRef.current.find(
+              (session) => session.id === entry.focusedId,
+            );
+            return openEditorTab(entry, file, {
+              split: focusedSession?.blocks.length === 0 ? "left" : "right",
+            });
+          }),
         );
         if (navigation) {
           editorNavigationToken.current += 1;
@@ -4393,6 +4530,9 @@ export default function App({
               ...(plan.restoreProviderSessionId
                 ? { providerSessionId: plan.restoreProviderSessionId }
                 : { providerSessionId: undefined }),
+              ...(plan.restoreProviderAccountId
+                ? { providerAccountId: plan.restoreProviderAccountId }
+                : { providerAccountId: undefined }),
             };
           }
           if (plan.kind === "empty") {
@@ -4439,6 +4579,7 @@ export default function App({
         planBlockId?: string;
         buildTarget?: PlanBuildTarget;
         managed?: boolean;
+        orchestrationRetry?: OrchestrationProposal;
         onSettled?: (outcome: ControlOutcome) => void;
       },
     ) => {
@@ -4522,6 +4663,11 @@ export default function App({
       if (isPreparingHandoff(current)) return false;
       saveRecentModelChoice(current.harness, current.model);
       const workCwd = sessionWorkCwd(current);
+      const providerAccountId =
+        current.harness === "claude" || current.harness === "codex"
+          ? (current.providerAccountId ??
+            selectedProviderAccountId(current.harness, current.cwd))
+          : undefined;
       const submittedText = intent === "build" ? "Build approved plan" : text;
       const rawCommand = isNativeCommandPrompt(submittedText, current.harness);
       const harnessText = rawCommand
@@ -4701,6 +4847,7 @@ export default function App({
           const titled = isFirstTurn ? titleSeed : selected.title;
           let next: Session = {
             ...selected,
+            providerAccountId,
             inboxCard: rawCommand ? s.inboxCard : undefined,
             noteCard: rawCommand ? s.noteCard : undefined,
             handoffCard: rawCommand ? s.handoffCard : undefined,
@@ -4744,6 +4891,7 @@ export default function App({
                   id: crypto.randomUUID(),
                   role: "system",
                   text: `${next.harness} is not connected yet — install and sign in to that provider, then retry.`,
+                  notice: "error",
                 },
               ],
             };
@@ -4777,6 +4925,7 @@ export default function App({
           sessionId,
           cwd: workCwd,
           message: titleMessage,
+          providerAccountId,
         })
           .then(async (generated) => {
             const linkedWorkItem = await resolveLinkedWorkItem(
@@ -4842,6 +4991,7 @@ export default function App({
       let controlText = "";
       let proposalText = "";
       let nativeProposalText = "";
+      let completedProposal: OrchestrationProposal | undefined;
       void (async () => {
         if (proposalDraft && proposalId) {
           const settings = await discoverOrchestrationSettings();
@@ -4876,6 +5026,7 @@ export default function App({
                 cwd: workCwd,
                 model: pendingSwitch.fromModel,
                 modelSettings: pendingSwitch.fromSettings,
+                providerAccountId: pendingSwitch.fromProviderAccountId,
                 userRequest: text,
               });
             } catch {
@@ -4950,29 +5101,63 @@ export default function App({
                   cwd: workCwd,
                 });
           const turnPrompt = proposalDraft
-            ? orchestrationPlanningPrompt(
-                prompt,
-                proposalDraft.settings,
-                proposalDraft.cwd,
-              )
+            ? options?.orchestrationRetry?.response
+              ? orchestrationRepairPrompt({
+                  ...proposalDraft,
+                  error: options.orchestrationRetry.error,
+                  response: options.orchestrationRetry.response,
+                })
+              : orchestrationPlanningPrompt(
+                  prompt,
+                  proposalDraft.settings,
+                  proposalDraft.cwd,
+                )
             : intent === "plan" && !rawCommand
               ? planTurnPrompt(prompt)
               : prompt;
           const earlier = queuedHandoff
             ? userMessagesAfterHandoff(current)
             : [];
-          await sendHarnessTurn({
-            harness: current.harness,
-            sessionId,
-            cwd: workCwd,
-            model: current.model,
-            modelSettings: current.modelSettings,
-            runtimeMode: current.runtimeMode,
-            intent: intent === "orchestrate" ? "plan" : intent,
-            // A lead drives the control CLI over loopback; without this the
-            // harness sandbox denies the socket and it cannot supervise.
-            controlsAgents: orchestrator.run(sessionId)?.status === "active",
-            text: orchestrator.prompt(
+          const sendTurn = (text: string, turnAttachments = prepared) =>
+            sendHarnessTurn({
+              harness: current.harness,
+              sessionId,
+              cwd: workCwd,
+              model: current.model,
+              modelSettings: current.modelSettings,
+              providerAccountId,
+              runtimeMode: current.runtimeMode,
+              intent: intent === "orchestrate" ? "plan" : intent,
+              // A lead drives the control CLI over loopback; without this the
+              // harness sandbox denies the socket and it cannot supervise.
+              controlsAgents: orchestrator.run(sessionId)?.status === "active",
+              text,
+              attachments: turnAttachments,
+              onEvent: (event) => {
+                if (turnGen.current.get(sessionId) !== gen) return;
+                orchestrator.observe(sessionId, event);
+                if (options?.onSettled && event.type === "message.delta")
+                  controlText = (controlText + event.text).slice(-20_000);
+                if (options?.onSettled && event.type === "message.completed")
+                  controlText += "\n";
+                if (event.type === "session.error")
+                  controlOutcome.error = event.message;
+                if (
+                  wrap &&
+                  (event.type === "session.started" ||
+                    event.type === "session.providerBound")
+                ) {
+                  revealHandoff(wrap.text);
+                }
+                nudgeOpenEditors(event, workCwd);
+                if (!orchestrator.forSession(sessionId))
+                  trackSessionEdits(sessionId, workCwd, event);
+                const routed = routePlanEvent(event);
+                if (routed) enqueueHarnessEvent(sessionId, routed);
+              },
+            });
+          await sendTurn(
+            orchestrator.prompt(
               sessionId,
               inboxAskPrompt(
                 rawCommand ? undefined : current.inboxAsk,
@@ -4986,30 +5171,27 @@ export default function App({
                   : turnPrompt,
               ),
             ),
-            attachments: prepared,
-            onEvent: (event) => {
-              if (turnGen.current.get(sessionId) !== gen) return;
-              orchestrator.observe(sessionId, event);
-              if (options?.onSettled && event.type === "message.delta")
-                controlText = (controlText + event.text).slice(-20_000);
-              if (options?.onSettled && event.type === "message.completed")
-                controlText += "\n";
-              if (event.type === "session.error")
-                controlOutcome.error = event.message;
-              if (
-                wrap &&
-                (event.type === "session.started" ||
-                  event.type === "session.providerBound")
-              ) {
-                revealHandoff(wrap.text);
-              }
-              nudgeOpenEditors(event, workCwd);
-              if (!orchestrator.forSession(sessionId))
-                trackSessionEdits(sessionId, workCwd, event);
-              const routed = routePlanEvent(event);
-              if (routed) enqueueHarnessEvent(sessionId, routed);
-            },
-          });
+          );
+          if (proposalDraft && !providerFailureSeen) {
+            completedProposal = await completeOrRepairOrchestrationProposal(
+              proposalDraft,
+              nativeProposalText || proposalText,
+              async (repairPrompt) => {
+                proposalText = "";
+                nativeProposalText = "";
+                await sendTurn(repairPrompt, []);
+                if (providerFailureSeen)
+                  throw new Error(
+                    controlOutcome.error ??
+                      "The lead could not repair the proposal.",
+                  );
+                return nativeProposalText || proposalText;
+              },
+              () =>
+                turnGen.current.get(sessionId) === gen &&
+                !isProviderFailureText(nativeProposalText || proposalText),
+            );
+          }
           if (turnGen.current.get(sessionId) !== gen) return;
           if (wrap) {
             setSessions((prev) =>
@@ -5073,14 +5255,16 @@ export default function App({
                   ? withOrchestrationProposal(
                       stopped,
                       proposalId,
-                      completeOrchestrationProposal(
-                        proposalDraft,
-                        nativeProposalText || proposalText,
-                        providerFailed || !buildSucceeded
-                          ? (controlOutcome.error ??
-                              "The lead could not finish planning.")
-                          : undefined,
-                      ),
+                      completedProposal && !providerFailed && buildSucceeded
+                        ? completedProposal
+                        : completeOrchestrationProposal(
+                            proposalDraft,
+                            nativeProposalText || proposalText,
+                            providerFailed || !buildSucceeded
+                              ? (controlOutcome.error ??
+                                  "The lead could not finish planning.")
+                              : undefined,
+                          ),
                     )
                   : intent === "plan" && !nativePlanSeen && !providerFailed
                     ? promoteLastAssistantToPlan(stopped, planEventKey)
@@ -5101,12 +5285,7 @@ export default function App({
               (s) => s.id === sessionId,
             );
             const visible = sessionId === activeSessionIdRef.current;
-            const sent = finished
-              ? notifySession(finished, "finished", visible)
-              : Promise.resolve(false);
-            void sent.then((ok) => {
-              if (!ok) playCue("turnFinished");
-            });
+            if (finished) void announceSessionFinished(finished, visible);
           }, 0);
           notifyReviewChanged(sessionId);
           notifyGitChanged();
@@ -5572,6 +5751,11 @@ export default function App({
             cwd: workCwd,
             model: current.model,
             modelSettings: current.modelSettings,
+            providerAccountId:
+              current.harness === "claude" || current.harness === "codex"
+                ? (current.providerAccountId ??
+                  selectedProviderAccountId(current.harness, current.cwd))
+                : undefined,
             runtimeMode: current.runtimeMode,
             onEvent: (event) => {
               if (turnGen.current.get(sessionId) !== gen) return;
@@ -5760,7 +5944,7 @@ export default function App({
           models: modelsFor(harness).map(({ id, name }) => ({ id, name })),
         })),
       createWorker: async (run, task) => {
-        await invoke("control_attach_worker", {
+        const scratchDir = await invoke<string>("control_attach_worker", {
           leadId: run.leadId,
           sessionId: task.sessionId,
         });
@@ -5791,7 +5975,7 @@ export default function App({
             sessionsRef.current = next;
             setSessions(next);
           }
-          return;
+          return scratchDir;
         }
         const restored = await getSession(task.sessionId);
         if (
@@ -5832,12 +6016,14 @@ export default function App({
             worker.id,
             worker.providerSessionId,
             worker.cwd,
+            worker.providerAccountId,
           );
         await upsertSession(worker);
         const next = [...sessionsRef.current, worker];
         sessionsRef.current = next;
         setSessions(next);
         // Workers belong to the lead's agent panel; no workspace tab is created.
+        return scratchDir;
       },
       submit: (id, text, done) => {
         // Commit the new turn before the scheduler or confirmation updates
@@ -6123,7 +6309,10 @@ export default function App({
           (block) => block.id === blockId,
         )?.orchestration;
         if (!session || session.busy || !proposal) return;
-        onSubmit(leadId, proposal.request, [], { intent: "orchestrate" });
+        onSubmit(leadId, proposal.request, [], {
+          intent: "orchestrate",
+          orchestrationRetry: proposal,
+        });
       },
     }),
     [
@@ -6300,7 +6489,6 @@ export default function App({
     (item: LinkedWorkItem, sessionId: string) => {
       const request = linkedWorkItemPanelRequest.current + 1;
       linkedWorkItemPanelRequest.current = request;
-      setLinkedWorkItemPanel(null);
       setFilePickerOpen(false);
       setSettingsOpen(false);
       setSearchViewOpen(false);
@@ -6311,14 +6499,19 @@ export default function App({
         sessionsRef.current.find((session) => session.id === sessionId)?.cwd ??
         history.find((session) => session.id === sessionId)?.cwd ??
         sidebarCwd;
-      void onSelectHistorySession(sessionId, {
-        preserveLinkedWorkItemPanel: true,
-      }).then(() => {
+      void onSelectHistorySession(sessionId).then(() => {
         if (linkedWorkItemPanelRequest.current !== request) return;
         if (!sessionsRef.current.some((session) => session.id === sessionId)) {
           return;
         }
-        setLinkedWorkItemPanel({ item, sessionId, cwd });
+        setLinkedWorkItemPanels((current) => {
+          const next = new Map(current);
+          // Reinsert the panel so it wins if this workspace tab contains
+          // multiple sessions with remembered panels.
+          next.delete(sessionId);
+          next.set(sessionId, { item, sessionId, cwd });
+          return next;
+        });
       });
     },
     [history, onSelectHistorySession, sidebarCwd],
@@ -6373,12 +6566,19 @@ export default function App({
         saveSettingsSection(section);
       }
       setSettingsAnchor(anchor ?? null);
+      setNotificationProjectPath(null);
       setSettingsOpen(true);
     },
     [],
   );
 
   const onOpenSettings = useCallback(() => openSettings(), [openSettings]);
+
+  const onOpenNotificationSettings = useCallback((path?: string) => {
+    openSettings("inbox", "project-notifications");
+    setNotificationProjectPath(path ?? null);
+    setNotificationSettingsRequest((request) => request + 1);
+  }, [openSettings]);
 
   const onOpenInboxIntegrations = useCallback(
     (source: ConnectableInboxSource) => openSettings("inbox", source),
@@ -6995,6 +7195,7 @@ export default function App({
             settingsOpen={settingsOpen}
             settingsSection={settingsSection}
             onOpenSettings={onOpenSettings}
+            onOpenNotificationSettings={onOpenNotificationSettings}
             onSelectSettingsSection={onSelectSettingsSection}
             onCloseSettings={onCloseSettings}
             updateNotice={updateNotice}
@@ -7144,6 +7345,7 @@ export default function App({
                               composerFocused={
                                 composerFocused && !projectTerminalFocused
                               }
+                              composerFocusToken={composerFocusToken}
                               onSelectFile={onSelectFileSurface}
                               onCloseFile={onCloseFile}
                               onCloseOtherFiles={onCloseOtherFiles}
@@ -7165,14 +7367,22 @@ export default function App({
                     </div>
                   </div>
                 </div>
-                {linkedWorkItemPanel ? (
+                {[...linkedWorkItemPanels.values()].map((panel) => (
                   <LinkedWorkItemPanel
-                    target={linkedWorkItemPanel.item}
-                    cwd={linkedWorkItemPanel.cwd}
+                    key={panel.sessionId}
+                    target={panel.item}
+                    cwd={panel.cwd}
                     recents={recents}
-                    onClose={closeLinkedWorkItemPanel}
+                    visible={
+                      !searchViewOpen &&
+                      !settingsOpen &&
+                      !inboxViewOpen &&
+                      !notesViewOpen &&
+                      activeLinkedWorkItemPanel?.sessionId === panel.sessionId
+                    }
+                    onClose={() => closeLinkedWorkItemPanel(panel.sessionId)}
                   />
-                ) : null}
+                ))}
               </main>
             </div>
             {searchViewOpen ? (
@@ -7209,6 +7419,7 @@ export default function App({
                         focused={visible}
                         inSplit={false}
                         composerFocused={composerFocused}
+                        composerFocusToken={composerFocusToken}
                       />
                     </SessionSurface>
                   );
@@ -7252,6 +7463,9 @@ export default function App({
               <SettingsView
                 section={settingsSection}
                 anchor={settingsAnchor}
+                notificationProjectPath={notificationProjectPath}
+                notificationSettingsRequest={notificationSettingsRequest}
+                recents={recents}
                 cwd={sidebarCwd}
                 sessions={sidebarHistory}
                 besideRail
@@ -7271,6 +7485,8 @@ export default function App({
               <UsageFooter
                 providers={usageProviders}
                 session={usageSession}
+                project={active?.cwd ?? projectCwd}
+                onSelectAccount={onSelectProviderAccount}
                 terminals={runningTerminals}
                 terminalOpen={runningTerminalOpen}
                 onToggleTerminal={onToggleRunningTerminal}
@@ -7324,6 +7540,13 @@ export default function App({
               onClose={() => setWhatsNewVersion(null)}
             />
           ) : null}
+          {providerSignInRequest ? (
+            <ProviderSignInDialog
+              key={providerSignInRequest.key}
+              harness={providerSignInRequest.harness}
+              onClose={() => setProviderSignInRequest(null)}
+            />
+          ) : null}
         </div>
       </OrchestrationWorkers.Provider>
     </OrchestrationActions.Provider>
@@ -7339,6 +7562,11 @@ function lastUserBlockId(session: Session): string | undefined {
     if (session.blocks[i]?.role === "user") return session.blocks[i]?.id;
   }
   return undefined;
+}
+
+function providerSignInRequestKey(session: Session): string {
+  const lastBlockId = session.blocks[session.blocks.length - 1]?.id;
+  return `${session.id}:${lastUserBlockId(session) ?? lastBlockId ?? "auth"}`;
 }
 
 function selectedChangePath(

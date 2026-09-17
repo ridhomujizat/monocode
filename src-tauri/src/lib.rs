@@ -16,6 +16,7 @@ mod macos;
 mod menu;
 mod notes;
 mod notifications;
+mod pasteboard;
 mod plugin_ui;
 mod plugins;
 mod project_logo;
@@ -244,6 +245,7 @@ pub fn run() {
             control::control_save,
             control::control_load,
             control::control_scopes,
+            control::control_write_path,
             control::control_attach_worker,
             control::control_authorize_turn,
             control::control_turn_finished,
@@ -286,11 +288,13 @@ pub fn run() {
             fs::git_pr_create,
             fs::git_github_status,
             fs::git_github_repo,
+            fs::git_github_repositories,
             fs::git_github_work_item,
             fs::git_github_work_items,
             fs::git_github_work_item_details,
             fs::git_github_work_item_thread,
             fs::git_github_work_item_comment,
+            fs::git_github_pr_action,
             fs::git_github_pr_diff,
             inbox_media::fetch_inbox_media,
             gitlab::gitlab_status,
@@ -320,6 +324,8 @@ pub fn run() {
             fs::copy_path,
             fs::move_path,
             fs::reveal_path,
+            pasteboard::clipboard_file_paths,
+            pasteboard::copy_file_to_clipboard,
             fs::clone_repo,
             fs::read_file_preview,
             fs::stat_files,
@@ -343,6 +349,7 @@ pub fn run() {
             harness::harness_resolve_pi,
             harness::harness_resolve_fx,
             harness::harness_resolve_grok,
+            harness::harness_resolve_hermes,
             harness::harness_free_port,
             harness::harness_spawn,
             harness::harness_write,
@@ -353,6 +360,7 @@ pub fn run() {
             harness::harness_sse_close,
             harness::harness_exec,
             rate_limits::fetch_claude_usage,
+            rate_limits::fetch_opencode_go_usage,
             pty::pty_spawn,
             pty::pty_write,
             pty::pty_resize,

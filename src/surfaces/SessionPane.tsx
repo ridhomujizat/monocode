@@ -70,6 +70,7 @@ type Props = {
   addToChatTarget?: boolean;
   inSplit: boolean;
   composerFocused: boolean;
+  composerFocusToken?: number;
   recents: RecentProject[];
   hideProjectPicker?: boolean;
   onFocus: (sessionId: string) => void;
@@ -150,6 +151,7 @@ export const SessionPane = memo(function SessionPane({
   addToChatTarget = focused,
   inSplit,
   composerFocused,
+  composerFocusToken,
   recents,
   hideProjectPicker,
   onFocus,
@@ -331,6 +333,7 @@ export const SessionPane = memo(function SessionPane({
     <Composer
       enabled={visible}
       focused={focused && composerFocused}
+      focusToken={composerFocusToken}
       hotkeys={focused}
       shell={!dockComposer}
       harness={session.harness}
@@ -426,7 +429,7 @@ export const SessionPane = memo(function SessionPane({
       ) : null}
       {inSplit ? (
         <div
-          className={`flex h-9 shrink-0 touch-none items-center gap-1.5 border-b border-content/10 px-2 select-none ${
+          className={`flex h-9 shrink-0 touch-none items-center gap-1.5 border-b border-stroke px-2 select-none ${
             onPaneDragStart ? "cursor-grab active:cursor-grabbing" : ""
           }`}
           onPointerDown={(event) => {
