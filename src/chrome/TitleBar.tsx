@@ -619,25 +619,11 @@ function TitleBarComponent({
     syncTabOverflow();
   }, [activeId, syncTabOverflow, tabs]);
 
-  const activeTab = useMemo(
-    () => tabs.find((t) => t.id === activeId),
-    [activeId, tabs],
+  // Short WM title — long "… — MonoCode" labels waste niri/tiling tab space.
+  const systemTitle = useMemo(
+    () => (cwd ? basename(cwd) : "MonoCode"),
+    [cwd],
   );
-  const systemTitle = useMemo(() => {
-    const activeName = activeTab
-      ? activeTab.files[0]
-        ? basename(activeTab.files[0])
-        : activeTab.project
-      : "";
-    const project = cwd ? basename(cwd) : "";
-    if (activeName && project && activeName !== project) {
-      return `${activeName} — ${project} — MonoCode`;
-    }
-    if (project) {
-      return `${project} — MonoCode`;
-    }
-    return "MonoCode";
-  }, [activeTab, cwd]);
 
   useEffect(() => {
     document.title = systemTitle;
@@ -852,13 +838,6 @@ function TitleBarComponent({
           </div>
         </div>
 
-        {IS_MAC ? null : (
-          <div className="flex min-w-0 flex-1 items-center justify-center px-4">
-            <span className="pointer-events-none truncate text-[11.5px] font-medium text-content/40 select-none">
-              {systemTitle}
-            </span>
-          </div>
-        )}
         {trailingControls}
       </div>
       {tabMenu && contextTab ? (
