@@ -61,6 +61,11 @@
             ${pkgs.lib.optionalString pkgs.stdenv.hostPlatform.isDarwin ''
               export ${cargoLinkerVar}=${appleLinker}
             ''}
+            ${pkgs.lib.optionalString pkgs.stdenv.hostPlatform.isLinux ''
+              # GTK3 aborts on the first file dialog without its GSettings
+              # schemas ("org.gtk.Settings.FileChooser is not installed").
+              export XDG_DATA_DIRS=${pkgs.gsettings-desktop-schemas}/share/gsettings-schemas/${pkgs.gsettings-desktop-schemas.name}:${pkgs.gtk3}/share/gsettings-schemas/${pkgs.gtk3.name}''${XDG_DATA_DIRS:+:$XDG_DATA_DIRS}
+            ''}
             echo "monocode: node $(node -v), $(rustc --version)"
           '';
         };
