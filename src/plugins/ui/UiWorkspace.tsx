@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState, type ComponentType } from "react";
 import { openUrl } from "@tauri-apps/plugin-opener";
-import { IS_WIN } from "../../lib/platform";
+import { IS_WIN } from "../../platform/tauri/platform";
 import type { PluginHost } from "../registry";
 import type { PluginManifest } from "../manifest";
 

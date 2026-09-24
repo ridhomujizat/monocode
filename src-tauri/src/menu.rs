@@ -2,7 +2,7 @@
 use tauri::menu::{AboutMetadata, Menu, MenuItemBuilder, SubmenuBuilder};
 #[cfg(target_os = "macos")]
 use tauri::Wry;
-use tauri::{AppHandle, Emitter, Manager};
+use tauri::{AppHandle, Emitter};
 
 pub fn install(app: &AppHandle) -> tauri::Result<()> {
     #[cfg(target_os = "macos")]
@@ -25,17 +25,22 @@ pub fn dispatch(app: &AppHandle, id: &str) {
         | "open_model_picker" | "open_settings" | "check_for_updates" => {
             let _ = app.emit(id, ());
         }
-        // Zoom and Close All Tabs target one window: a broadcast would make
-        // every window act on a single menu click.
-        "zoom_in" | "zoom_out" | "zoom_reset" | "close_all_tabs" => emit_to_focused(app, id),
+        // Sidebar, Zoom, Reload, Command Palette, and Close All Tabs target one window: a broadcast would
+        // make every window act on a single menu click.
+        "toggle_session_sidebar"
+        | "zoom_in"
+        | "zoom_out"
+        | "zoom_reset"
+        | "reload"
+        | "open_command_palette"
+        | "close_all_tabs" => emit_to_focused(app, id),
         _ => {}
     }
 }
 
 /// Emit `id` to the focused window, falling back to a visible one, then any.
 fn emit_to_focused(app: &AppHandle, id: &str) {
-    let mut windows: Vec<_> = app.webview_windows().into_values().collect();
-    windows.sort_by(|a, b| a.label().cmp(b.label()));
+    let windows = crate::window::workspace_windows(app);
     let target = windows
         .iter()
         .find(|window| window.is_focused().unwrap_or(false))
@@ -70,6 +75,9 @@ fn build(app: &AppHandle) -> tauri::Result<Menu<Wry>> {
         .build(app)?;
     let go_to_file = MenuItemBuilder::with_id("go_to_file", "Go to File…")
         .accelerator("CmdOrCtrl+P")
+        .build(app)?;
+    let command_palette = MenuItemBuilder::with_id("open_command_palette", "Command Palette…")
+        .accelerator("CmdOrCtrl+Shift+P")
         .build(app)?;
     let open_search = MenuItemBuilder::with_id("open_search", "Search…")
         .accelerator("CmdOrCtrl+K")
@@ -132,6 +140,10 @@ fn build(app: &AppHandle) -> tauri::Result<Menu<Wry>> {
     let toggle_sidebar = MenuItemBuilder::with_id("toggle_sidebar", "Toggle Sidebar")
         .accelerator("CmdOrCtrl+B")
         .build(app)?;
+    let toggle_session_sidebar =
+        MenuItemBuilder::with_id("toggle_session_sidebar", "Toggle Session Sidebar")
+            .accelerator("CmdOrCtrl+Shift+B")
+            .build(app)?;
     let open_model_picker = MenuItemBuilder::with_id("open_model_picker", "Switch Model…")
         .accelerator("CmdOrCtrl+.")
         .build(app)?;
@@ -143,6 +155,9 @@ fn build(app: &AppHandle) -> tauri::Result<Menu<Wry>> {
     let zoom_in = MenuItemBuilder::with_id("zoom_in", "Zoom In").build(app)?;
     let zoom_out = MenuItemBuilder::with_id("zoom_out", "Zoom Out").build(app)?;
     let zoom_reset = MenuItemBuilder::with_id("zoom_reset", "Reset Zoom").build(app)?;
+    let reload = MenuItemBuilder::with_id("reload", "Reload")
+        .accelerator("CmdOrCtrl+Shift+R")
+        .build(app)?;
     let find = MenuItemBuilder::with_id("find", "Find")
         .accelerator("CmdOrCtrl+F")
         .build(app)?;
@@ -156,6 +171,7 @@ fn build(app: &AppHandle) -> tauri::Result<Menu<Wry>> {
         .item(&open_project)
         .item(&open_search)
         .item(&go_to_file)
+        .item(&command_palette)
         .item(&find_in_project)
         .separator()
         .item(&new_tab)
@@ -175,6 +191,7 @@ fn build(app: &AppHandle) -> tauri::Result<Menu<Wry>> {
 
     let view = SubmenuBuilder::new(app, "View")
         .item(&toggle_sidebar)
+        .item(&toggle_session_sidebar)
         .item(&open_inbox)
         .item(&open_notes)
         .item(&toggle_terminal)
@@ -188,6 +205,7 @@ fn build(app: &AppHandle) -> tauri::Result<Menu<Wry>> {
         .item(&zoom_in)
         .item(&zoom_out)
         .item(&zoom_reset)
+        .item(&reload)
         .separator()
         .item(&sidebar_opacity)
         .build()?;
@@ -221,8 +239,8 @@ fn build(app: &AppHandle) -> tauri::Result<Menu<Wry>> {
             .separator()
             .item(&quit)
             .build()?;
-        let window_menu = SubmenuBuilder::new(app, "Window").build()?;
-        window_menu.set_as_windows_menu_for_nsapp()?;
+        let window_menu =
+            SubmenuBuilder::with_id(app, tauri::menu::WINDOW_SUBMENU_ID, "Window").build()?;
         return Menu::with_items(app, &[&app_menu, &file, &edit, &view, &window_menu]);
     }
 

@@ -32,7 +32,7 @@ export type PluginAction = {
 export type PluginManifest = {
   id: string;
   label: string;
-  /** Name of an export from src/chrome/icons.tsx, e.g. "Zap". */
+  /** Name of an export from src/shared/ui/icons.tsx, e.g. "Zap". */
   icon?: string;
   description?: string;
   /**

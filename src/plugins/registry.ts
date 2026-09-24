@@ -1,8 +1,8 @@
 import { invoke } from "@tauri-apps/api/core";
 import { useSyncExternalStore, type ComponentType } from "react";
-import * as iconSet from "../chrome/icons";
-import type { IconComponent } from "../chrome/icons";
-import { ADD_NOTE_TO_CHAT_EVENT, type NoteComposerCard } from "../lib/notes";
+import * as iconSet from "../shared/ui/icons";
+import type { IconComponent } from "../shared/ui/icons";
+import { ADD_NOTE_TO_CHAT_EVENT, type NoteComposerCard } from "../features/notes/notes";
 import { manifestWorkspace } from "./ManifestWorkspace";
 import { validateManifest, type PluginManifest } from "./manifest";
 import { syncPluginProcesses } from "./process";
@@ -166,7 +166,7 @@ export function pluginHost(plugin: Plugin, cwd: string): PluginHost {
   };
 }
 
-/** Icon by export name from `src/chrome/icons.tsx`, `Wrench` when unknown. */
+/** Icon by export name from `src/shared/ui/icons.tsx`, `Wrench` when unknown. */
 export function iconByName(name?: string): IconComponent {
   const found =
     name && /^[A-Z]/.test(name)

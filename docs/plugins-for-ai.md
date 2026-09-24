@@ -44,7 +44,7 @@ Only `id`, `label` and `request.url` are required.
 {
   "id": "jira", // required: 1-40 chars, a-z 0-9 - only. Same as the folder.
   "label": "Jira", // required: rail entry text
-  "icon": "Inbox", // export name from src/chrome/icons.tsx, default Wrench
+  "icon": "Inbox", // export name from src/shared/ui/icons.tsx, default Wrench
   "description": "Issues assigned to me.", // shown above the connect form
 
   // Values the user types once, in the workspace. Available to every {{template}}.
@@ -82,7 +82,7 @@ Only `id`, `label` and `request.url` are required.
 Icon names that exist today: `AlertCircle AppWindow Archive Bot AiIdea Check
 Copy ExternalLink File Folder Gauge GitBranch GitPullRequest Inbox Keyboard
 ListFilter Lock MessageSquare Palette Play Search Settings Sparkles Star
-StickyNote Terminal Wrench Zap` — any export of `src/chrome/icons.tsx` works,
+StickyNote Terminal Wrench Zap` — any export of `src/shared/ui/icons.tsx` works,
 and an unknown name silently falls back to `Wrench`.
 
 ### Templates
