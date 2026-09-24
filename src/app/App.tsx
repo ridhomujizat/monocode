@@ -456,6 +456,8 @@ import {
   type AutomationRun,
 } from "../features/automations/model/automations";
 import { useQuickComposerLaunches } from "../features/quick-composer/hooks/useQuickComposerLaunches";
+// monocode-nixos: Linux quick composer (Quickshell panel over a socket)
+import { useExternalQuickLaunches } from "../features/quick-composer/hooks/useExternalQuickLaunches";
 import type { QuickLaunch } from "../features/quick-composer/model/quickComposer";
 import { claimInboxAutomationRuns } from "../features/automations/model/automationEvents";
 import {
@@ -6777,6 +6779,8 @@ export default function App({
     [appendTab, submitSession],
   );
   useQuickComposerLaunches(launchQuickSession);
+  // monocode-nixos: Linux quick composer
+  useExternalQuickLaunches(launchQuickSession);
 
   const ensureAutomationRecovery = useCallback(() => {
     if (!automationRecoveryRef.current) {

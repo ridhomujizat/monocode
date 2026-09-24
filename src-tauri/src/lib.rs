@@ -29,6 +29,9 @@ mod project_logo;
 mod pty;
 #[cfg(target_os = "macos")]
 mod quick_composer;
+// monocode-nixos: Linux quick composer socket (panel lives in Quickshell)
+#[cfg(target_os = "linux")]
+mod quick_socket;
 mod rate_limits;
 mod reminders;
 mod search;
@@ -236,6 +239,9 @@ pub fn run() {
             session_store::init(app.handle())?;
             control::init(app.handle())?;
             reminders::init(app.handle());
+            // monocode-nixos: Linux quick composer socket
+            #[cfg(target_os = "linux")]
+            quick_socket::init(app.handle());
             checkpoint::init(app.handle())?;
             menu::install(app.handle())?;
             #[cfg(target_os = "windows")]
@@ -484,6 +490,9 @@ pub fn run() {
             window::quit_decision,
             window::quit_ready,
             window::set_window_glass_enabled,
+            // monocode-nixos: Linux quick composer socket
+            #[cfg(target_os = "linux")]
+            quick_socket::quick_socket_catalog,
             #[cfg(target_os = "macos")]
             quick_composer::quick_composer_set_enabled,
             #[cfg(target_os = "macos")]
