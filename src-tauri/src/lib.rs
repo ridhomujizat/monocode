@@ -1,18 +1,24 @@
 use tauri::Manager;
 
+mod automations;
+mod azure_devops;
 mod chat_background;
 mod checkpoint;
 mod control;
 pub mod control_cli;
 mod cursor_store;
+mod external_editor;
 mod fs;
 mod gitlab;
 mod harness;
 mod inbox_media;
+mod jira;
 mod linear;
 mod link_preview;
 #[cfg(target_os = "macos")]
 mod macos;
+#[cfg(target_os = "macos")]
+mod macos_background;
 mod menu;
 mod notes;
 mod notifications;
@@ -21,15 +27,21 @@ mod plugin_ui;
 mod plugins;
 mod project_logo;
 mod pty;
+#[cfg(target_os = "macos")]
+mod quick_composer;
 mod rate_limits;
 mod reminders;
 mod search;
 mod session_store;
 mod skills;
+#[cfg(target_os = "windows")]
+mod tray;
 mod window;
 mod window_transfer;
 #[cfg(windows)]
 mod windows;
+mod worktree_lifecycle;
+mod worktrees;
 
 // Phase 1 seam: spawn / kill harness children per MonoCode thread.
 // Adapters own the protocol; this host only supervises processes.
@@ -207,7 +219,14 @@ pub fn run() {
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
-        .plugin(tauri_plugin_window_state::Builder::default().build())
+        .plugin(
+            tauri_plugin_window_state::Builder::default()
+                .with_denylist(&[
+                    window::QUICK_COMPOSER_LABEL,
+                    window::QUICK_COMPOSER_GIT_LABEL,
+                ])
+                .build(),
+        )
         .manage(harness::HarnessHost::new())
         .manage(plugins::PluginProcs::new())
         .manage(pty::PtyHost::new())
@@ -219,8 +238,11 @@ pub fn run() {
             reminders::init(app.handle());
             checkpoint::init(app.handle())?;
             menu::install(app.handle())?;
+            #[cfg(target_os = "windows")]
+            tray::install(app.handle())?;
             #[cfg(target_os = "macos")]
             {
+                quick_composer::init(app.handle())?;
                 macos::install_dock_menu(app.handle());
                 if let Some(window) = app.get_webview_window("main") {
                     macos::install(&window);
@@ -262,6 +284,19 @@ pub fn run() {
             reminders::reminder_take_open,
             reminders::reminder_register_window,
             reminders::reminder_open,
+            automations::automations_list,
+            automations::automations_upsert,
+            automations::automations_delete,
+            automations::automation_runs_list,
+            automations::automation_runs_recover,
+            automations::automation_run_now,
+            automations::automations_claim_due,
+            automations::automations_claim_event,
+            automations::automation_run_update,
+            external_editor::list_external_editors,
+            external_editor::open_in_external_editor,
+            fs::resolve_project_location,
+            fs::open_path_with_default_app,
             fs::list_dir,
             fs::list_project_files,
             fs::git_diff_stats,
@@ -279,6 +314,7 @@ pub fn run() {
             fs::git_stage_all,
             fs::git_unstage_all,
             fs::git_commit,
+            fs::git_head_message,
             fs::git_staged_context,
             fs::git_push,
             fs::git_pull,
@@ -287,6 +323,8 @@ pub fn run() {
             fs::git_pr_status,
             fs::git_pr_create,
             fs::git_github_status,
+            fs::github_monocode_star_status,
+            fs::github_star_monocode,
             fs::git_github_repo,
             fs::git_github_repositories,
             fs::git_github_work_item,
@@ -296,6 +334,8 @@ pub fn run() {
             fs::git_github_work_item_comment,
             fs::git_github_pr_action,
             fs::git_github_pr_diff,
+            fs::git_github_pr_checks,
+            fs::git_github_check_details,
             inbox_media::fetch_inbox_media,
             gitlab::gitlab_status,
             gitlab::gitlab_set_config,
@@ -306,6 +346,15 @@ pub fn run() {
             gitlab::gitlab_work_item_thread,
             gitlab::gitlab_work_item_comment,
             gitlab::gitlab_mr_diff,
+            azure_devops::azure_devops_status,
+            azure_devops::azure_devops_set_config,
+            azure_devops::azure_devops_repo,
+            azure_devops::azure_devops_list_work_items,
+            azure_devops::azure_devops_list_todos,
+            azure_devops::azure_devops_work_item_details,
+            azure_devops::azure_devops_work_item_thread,
+            azure_devops::azure_devops_work_item_comment,
+            azure_devops::azure_devops_mr_diff,
             linear::linear_status,
             linear::linear_set_token,
             linear::linear_list_teams,
@@ -313,11 +362,26 @@ pub fn run() {
             linear::linear_issue_details,
             linear::linear_issue_thread,
             linear::linear_issue_comment,
+            jira::jira_status,
+            jira::jira_set_config,
+            jira::jira_list_projects,
+            jira::jira_list_issues,
+            jira::jira_issue_details,
+            jira::jira_issue_thread,
+            jira::jira_issue_comment,
             link_preview::fetch_link_preview,
             fs::git_branches,
             fs::git_checkout,
             fs::git_create_branch,
             fs::git_stash,
+            worktrees::git_worktrees,
+            worktrees::git_worktree_create,
+            worktrees::git_orchestration_worktree_create,
+            worktrees::git_worktree_rename_branch,
+            worktrees::git_worktree_check_remove,
+            worktrees::git_worktree_remove,
+            worktrees::git_orchestration_worktree_remove,
+            worktrees::git_orchestration_branch_remove,
             fs::create_path,
             fs::rename_path,
             fs::delete_path,
@@ -350,6 +414,7 @@ pub fn run() {
             harness::harness_resolve_fx,
             harness::harness_resolve_grok,
             harness::harness_resolve_hermes,
+            harness::harness_resolve_antigravity,
             harness::harness_free_port,
             harness::harness_spawn,
             harness::harness_write,
@@ -359,6 +424,7 @@ pub fn run() {
             harness::harness_sse_open,
             harness::harness_sse_close,
             harness::harness_exec,
+            harness::provider_account_remove,
             rate_limits::fetch_claude_usage,
             rate_limits::fetch_opencode_go_usage,
             pty::pty_spawn,
@@ -369,12 +435,14 @@ pub fn run() {
             pty::pty_kill_all,
             session_store::session_upsert,
             session_store::session_list_by_project,
+            session_store::session_rebase_project,
             session_store::session_list_linked,
             session_store::session_search,
             session_store::session_get,
             session_store::session_delete,
             session_store::session_set_archived,
             session_store::session_set_pinned,
+            session_store::session_set_linked_work_item,
             session_store::session_set_in_flight,
             session_store::session_list_in_flight,
             session_store::session_take_in_flight,
@@ -400,6 +468,9 @@ pub fn run() {
             checkpoint::session_checkpoint_prepare,
             checkpoint::session_checkpoint_capture,
             checkpoint::session_checkpoint_status,
+            checkpoint::session_checkpoint_apply,
+            checkpoint::session_checkpoint_cleanup_safe,
+            checkpoint::session_checkpoint_forget,
             checkpoint::session_checkpoint_file_diff,
             checkpoint::session_checkpoint_undo,
             checkpoint::session_checkpoint_keep,
@@ -409,8 +480,36 @@ pub fn run() {
             open_new_window,
             window::hide_window,
             window::destroy_window,
-            window::confirm_quit,
+            window::quit_poll_reply,
+            window::quit_decision,
+            window::quit_ready,
             window::set_window_glass_enabled,
+            #[cfg(target_os = "macos")]
+            quick_composer::quick_composer_set_enabled,
+            #[cfg(target_os = "macos")]
+            quick_composer::quick_composer_prepare,
+            #[cfg(target_os = "macos")]
+            quick_composer::quick_composer_fit,
+            #[cfg(target_os = "macos")]
+            quick_composer::quick_composer_submit,
+            #[cfg(target_os = "macos")]
+            quick_composer::quick_composer_take,
+            #[cfg(target_os = "macos")]
+            quick_composer::quick_composer_ack,
+            #[cfg(target_os = "macos")]
+            quick_composer::screenshots::quick_composer_release_capture,
+            #[cfg(target_os = "macos")]
+            quick_composer::quick_composer_capture,
+            #[cfg(target_os = "macos")]
+            quick_composer::git_popup::quick_git_open,
+            #[cfg(target_os = "macos")]
+            quick_composer::git_popup::quick_git_state,
+            #[cfg(target_os = "macos")]
+            quick_composer::git_popup::quick_git_fit,
+            #[cfg(target_os = "macos")]
+            quick_composer::git_popup::quick_git_complete,
+            #[cfg(target_os = "macos")]
+            quick_composer::git_popup::quick_composer_dismiss,
             window_transfer::stage_window_transfer,
             window_transfer::take_window_transfer,
             chat_background::save_chat_background,
@@ -447,7 +546,10 @@ pub fn run() {
             event: tauri::WindowEvent::Destroyed,
             ..
         } => {
-            let other_window = handle.webview_windows().keys().any(|name| name != &label);
+            window::forget_quit_window(handle, &label);
+            let other_window = window::workspace_windows(handle)
+                .iter()
+                .any(|window| window.label() != label);
             control::window_closed(handle, &label);
             if !other_window {
                 reap_harness_children(handle);

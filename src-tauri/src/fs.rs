@@ -13,6 +13,104 @@ pub(crate) const MAX_TEXT_FILE_BYTES: u64 = 8 * 1024 * 1024;
 pub(crate) const MAX_ATTACHMENT_EMBED_BYTES: u64 = 20 * 1024 * 1024;
 pub(crate) const MAX_PREVIEW_BYTES: u64 = 25 * 1024 * 1024;
 
+#[derive(Serialize, Debug, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ProjectLocation {
+    path: String,
+    identity: String,
+}
+
+/// Resolve a project by filesystem identity when its directory was renamed.
+///
+/// A rename preserves the directory identity. We only inspect direct siblings
+/// of the missing path, which keeps this bounded and avoids a filesystem watch
+/// or a broad disk search.
+#[tauri::command(async)]
+pub fn resolve_project_location(
+    path: String,
+    identity: Option<String>,
+) -> Result<Option<ProjectLocation>, String> {
+    resolve_project_location_sync(&path, identity.as_deref())
+}
+
+fn resolve_project_location_sync(
+    path: &str,
+    identity: Option<&str>,
+) -> Result<Option<ProjectLocation>, String> {
+    let path = expand_home(path);
+    if path.is_dir() {
+        let identity = directory_identity(&path)?;
+        return Ok(Some(ProjectLocation {
+            path: path_to_js(&path),
+            identity,
+        }));
+    }
+
+    let Some(identity) = identity.filter(|value| !value.is_empty()) else {
+        return Ok(None);
+    };
+    let Some(parent) = path.parent() else {
+        return Ok(None);
+    };
+    let entries = match std::fs::read_dir(parent) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error.to_string()),
+    };
+    for entry in entries.flatten() {
+        let candidate = entry.path();
+        if !candidate.is_dir() {
+            continue;
+        }
+        let Ok(candidate_identity) = directory_identity(&candidate) else {
+            continue;
+        };
+        if candidate_identity == identity {
+            return Ok(Some(ProjectLocation {
+                path: path_to_js(&candidate),
+                identity: candidate_identity,
+            }));
+        }
+    }
+    Ok(None)
+}
+
+#[cfg(unix)]
+fn directory_identity(path: &Path) -> Result<String, String> {
+    use std::os::unix::fs::MetadataExt;
+
+    let metadata = std::fs::metadata(path).map_err(|error| error.to_string())?;
+    Ok(format!("unix:{}:{}", metadata.dev(), metadata.ino()))
+}
+
+#[cfg(windows)]
+fn directory_identity(path: &Path) -> Result<String, String> {
+    use std::fs::OpenOptions;
+    use std::os::windows::fs::OpenOptionsExt;
+    use std::os::windows::io::AsRawHandle;
+    use windows_sys::Win32::Storage::FileSystem::{
+        GetFileInformationByHandle, BY_HANDLE_FILE_INFORMATION, FILE_FLAG_BACKUP_SEMANTICS,
+    };
+
+    let file = OpenOptions::new()
+        .read(true)
+        .custom_flags(FILE_FLAG_BACKUP_SEMANTICS)
+        .open(path)
+        .map_err(|error| error.to_string())?;
+    let mut info = BY_HANDLE_FILE_INFORMATION::default();
+    let succeeded = unsafe {
+        GetFileInformationByHandle(file.as_raw_handle() as _, std::ptr::addr_of_mut!(info))
+    };
+    if succeeded == 0 {
+        return Err(std::io::Error::last_os_error().to_string());
+    }
+    let file_index = (u64::from(info.nFileIndexHigh) << 32) | u64::from(info.nFileIndexLow);
+    Ok(format!(
+        "windows:{}:{file_index}",
+        info.dwVolumeSerialNumber
+    ))
+}
+
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DirEntry {
@@ -331,9 +429,11 @@ fn parse_omp_interjections(path: &Path) -> Result<Vec<OmpInterjectionAnchor>, St
 /// Immediate children of `path` (project tree). Folders first, then files.
 #[tauri::command(async)]
 pub fn list_dir(path: String) -> Result<Vec<DirEntry>, String> {
-    let dir = expand_home(&path);
-    let reader = std::fs::read_dir(&dir).map_err(|e| format!("{}: {e}", dir.display()))?;
-    let ignore = Ignore::load(&dir);
+    list_dir_sync(&expand_home(&path))
+}
+
+pub(crate) fn list_dir_sync(dir: &Path) -> Result<Vec<DirEntry>, String> {
+    let reader = std::fs::read_dir(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
 
     let mut out = Vec::new();
     for ent in reader {
@@ -349,21 +449,76 @@ pub fn list_dir(path: String) -> Result<Vec<DirEntry>, String> {
             .map(|t| t.is_dir() || (t.is_symlink() && path.is_dir()))
             .unwrap_or_else(|_| path.is_dir());
         out.push(DirEntry {
-            ignored: ignore.matches(name),
+            ignored: false,
             name: name.to_string(),
             path: path_to_js(&path),
             is_dir,
         });
     }
 
+    let names: Vec<&str> = out.iter().map(|e| e.name.as_str()).collect();
+    let ignored = git_ignored_names(dir, &names).unwrap_or_else(|| {
+        let ignore = Ignore::load(dir);
+        names
+            .iter()
+            .filter(|n| ignore.matches(n))
+            .map(|n| n.to_string())
+            .collect()
+    });
+    for entry in &mut out {
+        entry.ignored = entry.name == ".git" || ignored.contains(&entry.name);
+    }
+
     out.sort_by(|a, b| {
-        b.is_dir.cmp(&a.is_dir).then_with(|| {
-            a.name
-                .to_ascii_lowercase()
-                .cmp(&b.name.to_ascii_lowercase())
-        })
+        b.is_dir
+            .cmp(&a.is_dir)
+            .then_with(|| compare_natural_names(&a.name, &b.name))
     });
     Ok(out)
+}
+
+fn compare_natural_names(a: &str, b: &str) -> std::cmp::Ordering {
+    use std::cmp::Ordering;
+
+    let (a, b) = (a.as_bytes(), b.as_bytes());
+    let (mut i, mut j) = (0, 0);
+    while i < a.len() && j < b.len() {
+        if a[i].is_ascii_digit() && b[j].is_ascii_digit() {
+            let a_start = i;
+            let b_start = j;
+            while i < a.len() && a[i].is_ascii_digit() {
+                i += 1;
+            }
+            while j < b.len() && b[j].is_ascii_digit() {
+                j += 1;
+            }
+            let a_digits = &a[a_start..i];
+            let b_digits = &b[b_start..j];
+            let a_value = a_digits
+                .iter()
+                .position(|digit| *digit != b'0')
+                .map_or(&a_digits[a_digits.len()..], |start| &a_digits[start..]);
+            let b_value = b_digits
+                .iter()
+                .position(|digit| *digit != b'0')
+                .map_or(&b_digits[b_digits.len()..], |start| &b_digits[start..]);
+            let order = a_value
+                .len()
+                .cmp(&b_value.len())
+                .then_with(|| a_value.cmp(b_value));
+            if order != Ordering::Equal {
+                return order;
+            }
+        } else {
+            let order = a[i].to_ascii_lowercase().cmp(&b[j].to_ascii_lowercase());
+            if order != Ordering::Equal {
+                return order;
+            }
+            i += 1;
+            j += 1;
+        }
+    }
+    (a.len() - i).cmp(&(b.len() - j)).then_with(|| a.cmp(b))
 }
 
 const MAX_PROJECT_FILES: usize = 20_000;
@@ -398,6 +553,53 @@ pub(crate) fn list_project_files_sync(cwd: &str) -> Result<Vec<ProjectFile>, Str
         return Ok(files);
     }
     Ok(walk_project_files(&root))
+}
+
+const CHECK_IGNORE_SOME_MATCHED: i32 = 0;
+const CHECK_IGNORE_NONE_MATCHED: i32 = 1;
+
+fn git_ignored_names(dir: &Path, names: &[&str]) -> Option<HashSet<String>> {
+    if names.is_empty() {
+        return Some(HashSet::new());
+    }
+    let mut child = git_cmd()
+        .arg("-C")
+        .arg(dir)
+        .args(["check-ignore", "--stdin", "-z"])
+        .env("GIT_OPTIONAL_LOCKS", "0")
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .ok()?;
+
+    let mut input = Vec::with_capacity(names.iter().map(|n| n.len() + 1).sum());
+    for name in names {
+        input.extend_from_slice(name.as_bytes());
+        input.push(0);
+    }
+    let mut stdin = child.stdin.take()?;
+    // Write on a separate thread: a large listing can fill the stdout pipe
+    // while git still waits for stdin, which would deadlock a serial writer.
+    let writer = std::thread::spawn(move || stdin.write_all(&input));
+    let output = child.wait_with_output().ok()?;
+    writer.join().ok()?.ok()?;
+
+    if !matches!(
+        output.status.code(),
+        Some(CHECK_IGNORE_SOME_MATCHED | CHECK_IGNORE_NONE_MATCHED)
+    ) {
+        return None;
+    }
+    Some(
+        output
+            .stdout
+            .split(|b| *b == 0)
+            .filter(|s| !s.is_empty())
+            .map(|s| String::from_utf8_lossy(s).into_owned())
+            .collect(),
+    )
 }
 
 fn git_ls_files(root: &Path) -> Option<Vec<ProjectFile>> {
@@ -520,6 +722,7 @@ pub struct GitChangedFile {
 #[serde(rename_all = "camelCase")]
 pub struct GitDiffIndex {
     pub branch: Option<String>,
+    pub head: Option<String>,
     pub files: Vec<GitChangedFile>,
     pub additions: i64,
     pub deletions: i64,
@@ -529,6 +732,7 @@ pub struct GitDiffIndex {
     pub ahead: i64,
     pub behind: i64,
     pub ahead_of_default: i64,
+    pub head_pushed: bool,
 }
 
 /// Changed files in the opened folder, with per-file line counts and status.
@@ -721,10 +925,25 @@ pub async fn git_staged_context(cwd: String) -> Result<GitStagedContext, String>
         .map_err(|e| e.to_string())?
 }
 
-/// Create a commit from the current index.
+/// Create a commit from the current index, or rewrite HEAD with it when `amend` is set.
 #[tauri::command]
-pub async fn git_commit(cwd: String, message: String) -> Result<(), String> {
-    tauri::async_runtime::spawn_blocking(move || git_commit_for(&expand_home(&cwd), &message))
+pub async fn git_commit(cwd: String, message: String, amend: bool) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let root = expand_home(&cwd);
+        if amend {
+            git_commit_amend_for(&root, &message)
+        } else {
+            git_commit_for(&root, &message)
+        }
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// Full message (subject and body) of the commit at HEAD.
+#[tauri::command]
+pub async fn git_head_message(cwd: String) -> Result<String, String> {
+    tauri::async_runtime::spawn_blocking(move || git_head_message_for(&expand_home(&cwd)))
         .await
         .map_err(|e| e.to_string())?
 }
@@ -860,6 +1079,16 @@ pub struct GitHubStatus {
     pub authenticated: bool,
 }
 
+#[derive(Serialize, Clone, Copy, Debug, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum GitHubStarStatus {
+    Starred,
+    NotStarred,
+    Unavailable,
+}
+
+const MONOCODE_STAR_ENDPOINT: &str = "/user/starred/hardbeat920/monocode";
+
 /// Whether the GitHub CLI is installed and has an active authenticated account.
 #[tauri::command]
 pub async fn git_github_status() -> Result<GitHubStatus, String> {
@@ -893,6 +1122,46 @@ fn git_github_status_for() -> GitHubStatus {
         installed: true,
         authenticated,
     }
+}
+
+/// Whether the active GitHub CLI account has starred the MonoCode repository.
+#[tauri::command]
+pub async fn github_monocode_star_status() -> Result<GitHubStarStatus, String> {
+    tauri::async_runtime::spawn_blocking(github_monocode_star_status_for)
+        .await
+        .map_err(|error| error.to_string())
+}
+
+fn github_monocode_star_status_for() -> GitHubStarStatus {
+    let result = gh_run(
+        Path::new("."),
+        &["api", "--silent", MONOCODE_STAR_ENDPOINT],
+        true,
+    );
+    github_star_status_from_result(result)
+}
+
+fn github_star_status_from_result(result: Result<String, String>) -> GitHubStarStatus {
+    match result {
+        Ok(_) => GitHubStarStatus::Starred,
+        Err(error) if error.contains("HTTP 404") => GitHubStarStatus::NotStarred,
+        Err(_) => GitHubStarStatus::Unavailable,
+    }
+}
+
+/// Star the MonoCode repository for the active GitHub CLI account.
+#[tauri::command]
+pub async fn github_star_monocode() -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(|| {
+        gh_run(
+            Path::new("."),
+            &["api", "--silent", "--method", "PUT", MONOCODE_STAR_ENDPOINT],
+            true,
+        )
+        .map(|_| ())
+    })
+    .await
+    .map_err(|error| error.to_string())?
 }
 
 /// `owner/repo` for the GitHub remote of this working copy, via `gh`.
@@ -1109,6 +1378,176 @@ pub async fn git_github_pr_diff(
     .map_err(|e| e.to_string())?
 }
 
+#[derive(Serialize, Clone, Debug, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct GitHubPrCheck {
+    pub name: String,
+    pub workflow: String,
+    pub state: String,
+    pub url: Option<String>,
+    pub started_at: Option<String>,
+    pub completed_at: Option<String>,
+}
+
+#[derive(Serialize, Clone, Debug, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct GitHubPrChecks {
+    pub head_oid: String,
+    pub checks: Vec<GitHubPrCheck>,
+}
+
+/// CI checks for one pull request, targeted explicitly by `repo` and `number` via `gh`.
+#[tauri::command]
+pub async fn git_github_pr_checks(
+    cwd: String,
+    repo: String,
+    number: i64,
+) -> Result<GitHubPrChecks, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        git_github_pr_checks_for(&expand_home(&cwd), &repo, number)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+#[derive(Serialize, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct GitHubCheckDetails {
+    steps: Vec<GitHubCheckStep>,
+    annotations: Vec<GitHubCheckAnnotation>,
+    notice: Option<String>,
+}
+
+#[derive(Serialize, Debug)]
+#[serde(rename_all = "camelCase")]
+struct GitHubCheckStep {
+    name: String,
+    state: String,
+    started_at: Option<String>,
+    completed_at: Option<String>,
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+struct GitHubCheckAnnotation {
+    #[serde(default)]
+    path: String,
+    #[serde(default, rename(deserialize = "start_line"))]
+    line: u64,
+    #[serde(default)]
+    message: String,
+    #[serde(default, rename(deserialize = "annotation_level"))]
+    level: String,
+}
+
+#[tauri::command]
+pub async fn git_github_check_details(
+    cwd: String,
+    repo: String,
+    job_id: String,
+) -> Result<GitHubCheckDetails, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        github_check_details_with(&repo, &job_id, |endpoint| {
+            gh_checked(
+                &expand_home(&cwd),
+                &["api", "--hostname", "github.com", endpoint],
+            )
+        })
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+fn github_check_details_with(
+    repo: &str,
+    job_id: &str,
+    mut fetch: impl FnMut(&str) -> Result<String, String>,
+) -> Result<GitHubCheckDetails, String> {
+    let (owner, name) = split_github_repo(repo)?;
+    // Only repository slugs and numeric IDs can enter API paths.
+    if [&owner, &name].iter().any(|part| {
+        matches!(part.as_str(), "." | "..")
+            || !part
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || "-_.".contains(c))
+    }) || job_id.parse::<u64>().ok().filter(|id| *id > 0).is_none()
+        || !job_id.bytes().all(|c| c.is_ascii_digit())
+    {
+        return Err("Invalid GitHub repository or job ID".into());
+    }
+    #[derive(Deserialize)]
+    struct Step {
+        name: String,
+        status: String,
+        conclusion: Option<String>,
+        started_at: Option<String>,
+        completed_at: Option<String>,
+    }
+    #[derive(Deserialize)]
+    struct Job {
+        id: u64,
+        #[serde(default)]
+        steps: Vec<Step>,
+        check_run_url: Option<String>,
+    }
+    let prefix = format!("repos/{owner}/{name}");
+    let json = fetch(&format!("{prefix}/actions/jobs/{job_id}"))?;
+    let job: Job = serde_json::from_str(&json).map_err(|error| error.to_string())?;
+    if job.id.to_string() != job_id {
+        return Err("GitHub returned a different job".into());
+    }
+    let mut details = GitHubCheckDetails {
+        steps: job
+            .steps
+            .into_iter()
+            .map(|step| GitHubCheckStep {
+                name: step.name,
+                state: github_check_state(
+                    &step.status,
+                    step.conclusion.as_deref().unwrap_or_default(),
+                ),
+                started_at: step.started_at,
+                completed_at: step.completed_at,
+            })
+            .collect(),
+        annotations: vec![],
+        notice: None,
+    };
+    let check_prefix = format!("https://api.github.com/{prefix}/check-runs/");
+    let check_id = job
+        .check_run_url
+        .as_deref()
+        .and_then(|value| value.strip_prefix(&check_prefix))
+        .filter(|value| !value.is_empty() && value.bytes().all(|c| c.is_ascii_digit()));
+    if let Some(check_id) = check_id {
+        let annotations = fetch(&format!(
+            "{prefix}/check-runs/{check_id}/annotations?per_page=100"
+        ))
+        .and_then(|json| {
+            serde_json::from_str::<Vec<GitHubCheckAnnotation>>(&json)
+                .map_err(|error| error.to_string())
+        });
+        match annotations {
+            Ok(annotations) => {
+                if annotations.len() == 100 {
+                    details.notice = Some(
+                        "Showing the first 100 annotations. View the full log on GitHub for more."
+                            .into(),
+                    );
+                }
+                details.annotations = annotations;
+            }
+            Err(_) => {
+                details.notice =
+                    Some("Could not load error annotations. View the full log on GitHub.".into())
+            }
+        }
+    } else {
+        details.notice =
+            Some("Error annotations are unavailable. View the full log on GitHub.".into());
+    }
+    Ok(details)
+}
+
 #[derive(Serialize, Clone, Debug, Default, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct GitBranches {
@@ -1316,6 +1755,7 @@ fn git_diff_index_with(root: &Path, include_sync: bool) -> GitDiffIndex {
     };
     GitDiffIndex {
         branch: git_branch(root),
+        head: git_stdout(root, &["rev-parse", "HEAD"]),
         files: out,
         additions,
         deletions,
@@ -1325,6 +1765,7 @@ fn git_diff_index_with(root: &Path, include_sync: bool) -> GitDiffIndex {
         ahead: sync.ahead,
         behind: sync.behind,
         ahead_of_default: sync.ahead_of_default,
+        head_pushed: sync.head_pushed,
     }
 }
 
@@ -1933,11 +2374,26 @@ fn git_staged_context_for(root: &Path) -> Result<GitStagedContext, String> {
 }
 
 fn git_commit_for(root: &Path, message: &str) -> Result<(), String> {
+    git_commit_args(root, message, &[])
+}
+
+fn git_commit_amend_for(root: &Path, message: &str) -> Result<(), String> {
+    git_commit_args(root, message, &["--amend"])
+}
+
+fn git_commit_args(root: &Path, message: &str, extra: &[&str]) -> Result<(), String> {
     let message = message.trim();
     if message.is_empty() {
         return Err("Commit message cannot be empty".into());
     }
-    git_checked(root, &["commit", "--cleanup=strip", "-m", message])
+    let mut args = vec!["commit"];
+    args.extend_from_slice(extra);
+    args.extend(["--cleanup=strip", "-m", message]);
+    git_checked(root, &args)
+}
+
+fn git_head_message_for(root: &Path) -> Result<String, String> {
+    git_stdout(root, &["log", "-1", "--pretty=%B"]).ok_or_else(|| "No commits yet".to_string())
 }
 
 fn git_push_for(root: &Path) -> Result<(), String> {
@@ -2983,6 +3439,140 @@ fn parse_github_pr_oids(json: &str) -> Result<(String, String), String> {
     Ok((base.to_string(), head.to_string()))
 }
 
+fn git_github_pr_checks_for(
+    root: &Path,
+    repo: &str,
+    number: i64,
+) -> Result<GitHubPrChecks, String> {
+    let args = github_pr_checks_args(repo, number)?;
+    let refs: Vec<&str> = args.iter().map(String::as_str).collect();
+    let json = gh_checked(root, &refs)?;
+    parse_github_pr_checks(&json)
+}
+
+fn github_pr_checks_args(repo: &str, number: i64) -> Result<Vec<String>, String> {
+    if number <= 0 {
+        return Err("GitHub pull request number must be positive".into());
+    }
+    let (owner, name) = split_github_repo(repo)?;
+    let repo = format!("{owner}/{name}");
+    let number = number.to_string();
+    Ok(vec![
+        "pr".into(),
+        "view".into(),
+        number,
+        "--repo".into(),
+        repo,
+        "--json".into(),
+        "headRefOid,statusCheckRollup".into(),
+    ])
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct GitHubStatusCheckRow {
+    #[serde(default, rename = "__typename")]
+    typename: String,
+    #[serde(default)]
+    name: String,
+    #[serde(default)]
+    context: String,
+    #[serde(default)]
+    status: String,
+    #[serde(default)]
+    conclusion: Option<String>,
+    #[serde(default)]
+    state: String,
+    #[serde(default)]
+    workflow_name: String,
+    #[serde(default)]
+    details_url: Option<String>,
+    #[serde(default)]
+    target_url: Option<String>,
+    #[serde(default)]
+    created_at: Option<String>,
+    #[serde(default)]
+    started_at: Option<String>,
+    #[serde(default)]
+    completed_at: Option<String>,
+}
+
+fn parse_github_pr_checks(json: &str) -> Result<GitHubPrChecks, String> {
+    #[derive(Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct Row {
+        #[serde(default)]
+        head_ref_oid: String,
+        #[serde(default)]
+        status_check_rollup: Option<Vec<GitHubStatusCheckRow>>,
+    }
+    let row: Row = serde_json::from_str(json).map_err(|error| error.to_string())?;
+    let head_oid = row.head_ref_oid.trim().to_string();
+    if head_oid.is_empty() {
+        return Err("Pull request is missing head commit".into());
+    }
+    Ok(GitHubPrChecks {
+        head_oid,
+        checks: row
+            .status_check_rollup
+            .unwrap_or_default()
+            .into_iter()
+            .map(github_pr_check_from_row)
+            .collect(),
+    })
+}
+
+fn github_pr_check_from_row(row: GitHubStatusCheckRow) -> GitHubPrCheck {
+    let is_status_context = if row.typename.is_empty() {
+        !row.context.is_empty()
+    } else {
+        row.typename.eq_ignore_ascii_case("StatusContext")
+    };
+    if is_status_context {
+        return GitHubPrCheck {
+            name: row.context,
+            workflow: String::new(),
+            state: github_check_conclusion_state(&row.state),
+            url: row.target_url.filter(|url| !url.trim().is_empty()),
+            started_at: row.created_at,
+            completed_at: None,
+        };
+    }
+    GitHubPrCheck {
+        name: row.name,
+        workflow: row.workflow_name,
+        state: github_check_state(&row.status, row.conclusion.as_deref().unwrap_or_default()),
+        url: row.details_url.filter(|url| !url.trim().is_empty()),
+        started_at: row.started_at,
+        completed_at: row.completed_at,
+    }
+}
+
+/// An unfinished CheckRun reports its execution state instead of a stale
+/// conclusion. Only a completed or entirely missing status trusts the
+/// conclusion; any other nonempty status stays unknown.
+fn github_check_state(status: &str, conclusion: &str) -> String {
+    match status.trim().to_ascii_uppercase().as_str() {
+        "QUEUED" | "IN_PROGRESS" | "PENDING" | "WAITING" | "REQUESTED" => {
+            return "pending".into();
+        }
+        "COMPLETED" | "" => return github_check_conclusion_state(conclusion),
+        _ => {}
+    }
+    "unknown".into()
+}
+
+fn github_check_conclusion_state(value: &str) -> String {
+    match value.trim().to_ascii_uppercase().as_str() {
+        "SUCCESS" => "pass".into(),
+        "FAILURE" | "ERROR" | "TIMED_OUT" | "ACTION_REQUIRED" | "STARTUP_FAILURE" => "fail".into(),
+        "QUEUED" | "IN_PROGRESS" | "PENDING" | "WAITING" | "REQUESTED" => "pending".into(),
+        "NEUTRAL" | "SKIPPED" => "skipping".into(),
+        "CANCELLED" => "cancel".into(),
+        _ => "unknown".into(),
+    }
+}
+
 fn git_diff_full_context(root: &Path, base: &str, head: &str) -> Result<(String, bool), String> {
     ensure_git_commit(root, base)?;
     ensure_git_commit(root, head)?;
@@ -3678,6 +4268,7 @@ struct GitSync {
     ahead: i64,
     behind: i64,
     ahead_of_default: i64,
+    head_pushed: bool,
 }
 
 fn git_sync_for(root: &Path) -> GitSync {
@@ -3700,6 +4291,17 @@ fn git_sync_for(root: &Path) -> GitSync {
     } else {
         ahead
     };
+    let head_pushed = git_stdout(
+        root,
+        &[
+            "for-each-ref",
+            "--count=1",
+            "--contains",
+            "HEAD",
+            "refs/remotes",
+        ],
+    )
+    .is_some();
     GitSync {
         remote,
         upstream,
@@ -3707,6 +4309,7 @@ fn git_sync_for(root: &Path) -> GitSync {
         ahead,
         behind,
         ahead_of_default,
+        head_pushed,
     }
 }
 
@@ -4043,6 +4646,8 @@ fn preserves_unix_backslash_filenames() {
     assert_eq!(expand_home(r"~\literal"), PathBuf::from(r"~\literal"));
 }
 
+/// Name-only `.gitignore` subset for directories outside a git repository.
+/// Inside a repository `git check-ignore` is the source of truth.
 struct Ignore {
     exact: HashSet<String>,
     suffixes: Vec<String>,
@@ -4737,6 +5342,22 @@ pub fn reveal_path(path: String) -> Result<(), String> {
     }
 }
 
+#[tauri::command]
+pub async fn open_path_with_default_app(path: String) -> Result<(), String> {
+    // The Tauri opener command needs a static path scope, and its detached
+    // launcher cannot report a failing `open` process back to the UI.
+    tauri::async_runtime::spawn_blocking(move || {
+        let path = expand_home(&path);
+        if !path.is_absolute() {
+            return Err("Expected an absolute file path".to_string());
+        }
+        std::fs::metadata(&path).map_err(|error| format!("{}: {error}", path.display()))?;
+        open::that(&path).map_err(|error| error.to_string())
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -4749,6 +5370,22 @@ mod tests {
             text: text.into(),
             concat: concat.into(),
         }
+    }
+
+    #[test]
+    fn github_star_status_distinguishes_a_missing_star_from_an_unavailable_check() {
+        assert_eq!(
+            github_star_status_from_result(Ok(String::new())),
+            GitHubStarStatus::Starred
+        );
+        assert_eq!(
+            github_star_status_from_result(Err("gh: Not Found (HTTP 404)".into())),
+            GitHubStarStatus::NotStarred
+        );
+        assert_eq!(
+            github_star_status_from_result(Err("GitHub CLI is not installed".into())),
+            GitHubStarStatus::Unavailable
+        );
     }
 
     #[test]
@@ -4920,6 +5557,38 @@ mod tests {
         assert!(stats[0].mtime_ms.is_some());
         assert_eq!(stats[1].path, missing);
         assert!(stats[1].mtime_ms.is_none());
+    }
+
+    #[test]
+    fn project_location_follows_a_sibling_rename() {
+        let parent = tmp("project-location-rename");
+        let original = parent.0.join("monocode");
+        let renamed = parent.0.join("monocode-personal");
+        std::fs::create_dir(&original).unwrap();
+
+        let first = resolve_project_location_sync(&path_to_js(&original), None)
+            .unwrap()
+            .unwrap();
+        assert_eq!(first.path, path_to_js(&original));
+
+        std::fs::rename(&original, &renamed).unwrap();
+        let resolved = resolve_project_location_sync(&path_to_js(&original), Some(&first.identity))
+            .unwrap()
+            .unwrap();
+        assert_eq!(resolved.path, path_to_js(&renamed));
+        assert_eq!(resolved.identity, first.identity);
+    }
+
+    #[test]
+    fn project_location_does_not_guess_without_a_saved_identity() {
+        let parent = tmp("project-location-missing");
+        let missing = parent.0.join("old-name");
+        std::fs::create_dir(parent.0.join("some-project")).unwrap();
+
+        assert_eq!(
+            resolve_project_location_sync(&path_to_js(&missing), None).unwrap(),
+            None
+        );
     }
 
     #[test]
@@ -5137,6 +5806,123 @@ mod tests {
     fn project_dirs_stay_indexable() {
         let dir = tmp("index-root");
         assert!(is_indexable_root(&dir.0));
+    }
+
+    fn ignored_names(entries: &[DirEntry]) -> Vec<String> {
+        entries
+            .iter()
+            .filter(|e| e.ignored)
+            .map(|e| e.name.clone())
+            .collect()
+    }
+
+    fn is_ignored(dir: &Path, name: &str) -> bool {
+        ignored_names(&list_dir_sync(dir).unwrap())
+            .iter()
+            .any(|n| n == name)
+    }
+
+    #[test]
+    fn list_dir_sorts_numbered_names_naturally_with_folders_first() {
+        let dir = tmp("list-dir-natural-sort");
+        for name in [
+            "chapter-100.md",
+            "chapter-11.md",
+            "chapter-09.md",
+            "chapter-10.md",
+            "Chapter-2.md",
+        ] {
+            std::fs::write(dir.0.join(name), "").unwrap();
+        }
+        for name in ["volume-10", "volume-2"] {
+            std::fs::create_dir(dir.0.join(name)).unwrap();
+        }
+
+        let names: Vec<_> = list_dir_sync(&dir.0)
+            .unwrap()
+            .into_iter()
+            .map(|entry| entry.name)
+            .collect();
+        assert_eq!(
+            names,
+            [
+                "volume-2",
+                "volume-10",
+                "Chapter-2.md",
+                "chapter-09.md",
+                "chapter-10.md",
+                "chapter-11.md",
+                "chapter-100.md",
+            ]
+        );
+    }
+
+    #[test]
+    fn natural_name_sort_handles_multiple_and_large_numbers() {
+        let mut names = [
+            "part-2-chapter-10",
+            "part-10-chapter-1",
+            "part-2-chapter-2",
+            "part-2-chapter-999999999999999999999999999999",
+        ];
+        names.sort_by(|a, b| compare_natural_names(a, b));
+        assert_eq!(
+            names,
+            [
+                "part-2-chapter-2",
+                "part-2-chapter-10",
+                "part-2-chapter-999999999999999999999999999999",
+                "part-10-chapter-1",
+            ]
+        );
+    }
+
+    #[test]
+    fn list_dir_marks_ignored_with_git_semantics() {
+        let dir = tmp("list-dir-git");
+        let init = Command::new("git")
+            .args(["init"])
+            .current_dir(&dir.0)
+            .output();
+        let Ok(init) = init else { return };
+        if !init.status.success() {
+            return;
+        }
+        std::fs::write(
+            dir.0.join(".gitignore"),
+            "*.zzlog\n!keep.zzlog\n/zz-dist\nzz-build/\nnested/*.zztmp\n",
+        )
+        .unwrap();
+        std::fs::write(dir.0.join("a.zzlog"), "x\n").unwrap();
+        std::fs::write(dir.0.join("keep.zzlog"), "x\n").unwrap();
+        std::fs::write(dir.0.join("zz-build"), "x\n").unwrap();
+        std::fs::create_dir_all(dir.0.join("zz-dist")).unwrap();
+        std::fs::create_dir_all(dir.0.join("src").join("zz-dist")).unwrap();
+        std::fs::create_dir_all(dir.0.join("nested")).unwrap();
+        std::fs::write(dir.0.join("nested").join("x.zztmp"), "x\n").unwrap();
+        std::fs::write(dir.0.join("nested").join("x.txt"), "x\n").unwrap();
+
+        assert!(is_ignored(&dir.0, ".git"));
+        assert!(is_ignored(&dir.0, "a.zzlog"));
+        assert!(!is_ignored(&dir.0, "keep.zzlog"));
+        assert!(is_ignored(&dir.0, "zz-dist"));
+        assert!(!is_ignored(&dir.0.join("src"), "zz-dist"));
+        assert!(!is_ignored(&dir.0, "zz-build"));
+        assert!(is_ignored(&dir.0.join("nested"), "x.zztmp"));
+        assert!(!is_ignored(&dir.0.join("nested"), "x.txt"));
+    }
+
+    #[test]
+    fn list_dir_falls_back_to_name_parser_outside_git() {
+        let dir = tmp("list-dir-plain");
+        std::fs::write(dir.0.join(".gitignore"), "secret.txt\n*.log\n").unwrap();
+        std::fs::write(dir.0.join("secret.txt"), "x\n").unwrap();
+        std::fs::write(dir.0.join("a.log"), "x\n").unwrap();
+        std::fs::write(dir.0.join("app.ts"), "x\n").unwrap();
+
+        let mut ignored = ignored_names(&list_dir_sync(&dir.0).unwrap());
+        ignored.sort_unstable();
+        assert_eq!(ignored, vec!["a.log", "secret.txt"]);
     }
 
     #[test]
@@ -5775,7 +6561,9 @@ mod tests {
         std::fs::write(dir.0.join("a.txt"), "beta\n").unwrap();
         git_stage_file_for(&dir.0, "a.txt").unwrap();
         git_commit_for(&dir.0, "update a").unwrap();
-        assert!(git_diff_index_for(&dir.0).files.is_empty());
+        let index = git_diff_index_for(&dir.0);
+        assert!(index.files.is_empty());
+        assert_eq!(index.head, git_stdout(&dir.0, &["rev-parse", "HEAD"]));
         assert_eq!(
             git_stdout(&dir.0, &["log", "-1", "--pretty=%s"]).as_deref(),
             Some("update a")
@@ -5786,6 +6574,71 @@ mod tests {
     fn git_commit_rejects_empty_message() {
         let dir = tmp("git-commit-empty");
         assert!(git_commit_for(&dir.0, "   ").is_err());
+    }
+
+    #[test]
+    fn git_commit_amend_rewrites_head_with_staged_changes() {
+        let dir = tmp("git-commit-amend");
+        if !init_git_commit(&dir.0, &[("a.txt", "alpha\n")]) {
+            return;
+        }
+        std::fs::write(dir.0.join("a.txt"), "beta\n").unwrap();
+        git_stage_file_for(&dir.0, "a.txt").unwrap();
+        git_commit_amend_for(&dir.0, "amended").unwrap();
+        assert!(git_diff_index_for(&dir.0).files.is_empty());
+        assert_eq!(
+            git_stdout(&dir.0, &["rev-list", "--count", "HEAD"]).as_deref(),
+            Some("1")
+        );
+        assert_eq!(
+            git_stdout(&dir.0, &["log", "-1", "--pretty=%s"]).as_deref(),
+            Some("amended")
+        );
+        assert_eq!(
+            git_stdout(&dir.0, &["show", "HEAD:a.txt"]).as_deref(),
+            Some("beta")
+        );
+    }
+
+    #[test]
+    fn git_commit_amend_rewords_without_staged_changes() {
+        let dir = tmp("git-commit-reword");
+        if !init_git_commit(&dir.0, &[("a.txt", "alpha\n")]) {
+            return;
+        }
+        git_commit_amend_for(&dir.0, "reworded").unwrap();
+        assert_eq!(
+            git_stdout(&dir.0, &["rev-list", "--count", "HEAD"]).as_deref(),
+            Some("1")
+        );
+        assert_eq!(
+            git_stdout(&dir.0, &["log", "-1", "--pretty=%s"]).as_deref(),
+            Some("reworded")
+        );
+    }
+
+    #[test]
+    fn git_head_message_returns_subject_and_body() {
+        let dir = tmp("git-head-message");
+        if !init_git_commit(&dir.0, &[("a.txt", "alpha\n")]) {
+            return;
+        }
+        std::fs::write(dir.0.join("a.txt"), "beta\n").unwrap();
+        git_stage_file_for(&dir.0, "a.txt").unwrap();
+        git_commit_for(&dir.0, "Subject line\n\nBody text").unwrap();
+        assert_eq!(
+            git_head_message_for(&dir.0).unwrap(),
+            "Subject line\n\nBody text"
+        );
+    }
+
+    #[test]
+    fn git_head_message_fails_without_commits() {
+        let dir = tmp("git-head-message-empty");
+        if !init_git(&dir.0, "main", None) {
+            return;
+        }
+        assert!(git_head_message_for(&dir.0).is_err());
     }
 
     #[test]
@@ -5882,6 +6735,41 @@ mod tests {
         assert_eq!(range.base, "main");
         assert_eq!(range.head, "feature");
         assert!(range.commit_summary.contains("feature work"));
+    }
+
+    #[test]
+    fn git_sync_marks_head_pushed_without_upstream() {
+        let repo = tmp("git-pushed-repo");
+        let origin = tmp("git-pushed-origin");
+        if !init_git_commit(&repo.0, &[("a.txt", "alpha\n")]) {
+            return;
+        }
+        if Command::new("git")
+            .args(["init", "--bare"])
+            .current_dir(&origin.0)
+            .status()
+            .map(|status| !status.success())
+            .unwrap_or(true)
+        {
+            return;
+        }
+        let origin_url = origin.0.to_string_lossy().into_owned();
+        if !git(&repo.0, &["remote", "add", "origin", &origin_url])
+            || !git(&repo.0, &["push", "-u", "origin", "main"])
+            || !git(&repo.0, &["checkout", "-b", "feature"])
+        {
+            return;
+        }
+        std::fs::write(repo.0.join("a.txt"), "beta\n").unwrap();
+        git_stage_file_for(&repo.0, "a.txt").unwrap();
+        git_commit_for(&repo.0, "feature work").unwrap();
+        assert!(!git_diff_index_for(&repo.0).head_pushed);
+        if !git(&repo.0, &["push", "origin", "feature"]) {
+            return;
+        }
+        let index = git_diff_index_for(&repo.0);
+        assert_eq!(index.upstream, None);
+        assert!(index.head_pushed);
     }
 
     #[test]
@@ -6399,6 +7287,248 @@ mod tests {
         assert_eq!(
             parse_github_pr_oids(json).unwrap(),
             ("aaa111".into(), "bbb222".into())
+        );
+    }
+
+    #[test]
+    fn github_status_context_keeps_its_report_time() {
+        let checks = parse_github_pr_checks(
+            r#"{
+            "headRefOid": "abc",
+            "statusCheckRollup": [{
+                "__typename": "StatusContext", "context": "External tests",
+                "state": "SUCCESS", "createdAt": "2030-01-01T10:00:00Z",
+                "targetUrl": "https://ci.example/project/web"
+            }]
+        }"#,
+        )
+        .unwrap();
+        assert_eq!(
+            checks.checks[0].started_at.as_deref(),
+            Some("2030-01-01T10:00:00Z")
+        );
+    }
+
+    #[test]
+    fn github_pr_checks_args_target_repo_and_number() {
+        assert_eq!(
+            github_pr_checks_args("acme/web", 42).unwrap(),
+            [
+                "pr",
+                "view",
+                "42",
+                "--repo",
+                "acme/web",
+                "--json",
+                "headRefOid,statusCheckRollup"
+            ]
+        );
+        assert!(github_pr_checks_args("acme/web", 0).is_err());
+        assert!(github_pr_checks_args("invalid", 42).is_err());
+    }
+
+    #[test]
+    fn github_check_details_reads_steps_and_failure_annotations() {
+        let details = github_check_details_with("acme/web", "123", |path| {
+            match path {
+                "repos/acme/web/actions/jobs/123" => Ok(r#"{
+                    "id":123, "status":"completed", "conclusion":"failure",
+                    "check_run_url":"https://api.github.com/repos/acme/web/check-runs/456",
+                    "steps":[
+                        {"name":"Install","status":"completed","conclusion":"success"},
+                        {"name":"Run tests","status":"completed","conclusion":"failure",
+                         "started_at":"2030-01-01T10:00:00Z","completed_at":"2030-01-01T10:00:12Z"}
+                    ]
+                }"#.into()),
+                "repos/acme/web/check-runs/456/annotations?per_page=100" => Ok(r#"[
+                    {"path":"src/app.test.ts","start_line":42,"message":"Expected 2, received 1","annotation_level":"failure"}
+                ]"#.into()),
+                _ => panic!("Unexpected request: {path}"),
+            }
+        }).unwrap();
+        assert_eq!(details.steps[0].state, "pass");
+        assert_eq!(details.steps[1].state, "fail");
+        assert_eq!(details.steps[1].name, "Run tests");
+        assert_eq!(details.annotations[0].message, "Expected 2, received 1");
+        assert_eq!(details.annotations[0].line, 42);
+        assert!(details.notice.is_none());
+    }
+
+    #[test]
+    fn parse_github_pr_checks_maps_check_run_states() {
+        let json = r#"{
+            "headRefOid": "abc123",
+            "statusCheckRollup": [
+                {
+                    "__typename": "CheckRun",
+                    "name": "build",
+                    "status": "COMPLETED",
+                    "conclusion": "SUCCESS",
+                    "workflowName": "CI",
+                    "detailsUrl": "https://github.com/acme/web/actions/runs/1",
+                    "startedAt": "2026-09-16T10:00:00Z",
+                    "completedAt": "2026-09-16T10:05:00Z"
+                },
+                {
+                    "__typename": "CheckRun",
+                    "name": "e2e",
+                    "status": "IN_PROGRESS",
+                    "conclusion": "FAILURE",
+                    "workflowName": "E2E",
+                    "detailsUrl": "https://github.com/acme/web/actions/runs/2",
+                    "startedAt": "2026-09-16T11:00:00Z"
+                },
+                {
+                    "__typename": "CheckRun",
+                    "name": "scan",
+                    "status": "COMPLETED",
+                    "conclusion": "ACTION_REQUIRED"
+                }
+            ]
+        }"#;
+        let checks = parse_github_pr_checks(json).unwrap();
+        assert_eq!(checks.head_oid, "abc123");
+        assert_eq!(checks.checks.len(), 3);
+        let build = &checks.checks[0];
+        assert_eq!(build.name, "build");
+        assert_eq!(build.state, "pass");
+        assert_eq!(build.workflow, "CI");
+        assert_eq!(
+            build.url.as_deref(),
+            Some("https://github.com/acme/web/actions/runs/1")
+        );
+        assert_eq!(build.started_at.as_deref(), Some("2026-09-16T10:00:00Z"));
+        assert_eq!(build.completed_at.as_deref(), Some("2026-09-16T10:05:00Z"));
+        let e2e = &checks.checks[1];
+        assert_eq!(e2e.state, "pending");
+        assert_eq!(e2e.completed_at, None);
+        assert_eq!(checks.checks[2].state, "fail");
+    }
+
+    #[test]
+    fn parse_github_pr_checks_maps_status_context_states() {
+        let json = r#"{
+            "headRefOid": "abc123",
+            "statusCheckRollup": [
+                {
+                    "__typename": "StatusContext",
+                    "context": "ci/lab",
+                    "state": "SUCCESS",
+                    "targetUrl": "https://ci.example.com/1"
+                },
+                {
+                    "__typename": "StatusContext",
+                    "context": "security/scan",
+                    "state": "FAILURE",
+                    "targetUrl": "https://ci.example.com/2"
+                },
+                {
+                    "__typename": "StatusContext",
+                    "context": "legacy/status",
+                    "state": "PENDING"
+                }
+            ]
+        }"#;
+        let checks = parse_github_pr_checks(json).unwrap();
+        let lab = &checks.checks[0];
+        assert_eq!(lab.name, "ci/lab");
+        assert_eq!(lab.state, "pass");
+        assert_eq!(lab.workflow, "");
+        assert_eq!(lab.url.as_deref(), Some("https://ci.example.com/1"));
+        assert_eq!(lab.started_at, None);
+        assert_eq!(lab.completed_at, None);
+        assert_eq!(checks.checks[1].state, "fail");
+        let legacy = &checks.checks[2];
+        assert_eq!(legacy.state, "pending");
+        assert_eq!(legacy.url, None);
+    }
+
+    #[test]
+    fn parse_github_pr_checks_combines_rollup_states_and_unknown_values() {
+        let json = r#"{
+            "headRefOid": "abc123",
+            "statusCheckRollup": [
+                {"__typename": "CheckRun", "name": "lint", "status": "COMPLETED", "conclusion": "SKIPPED"},
+                {"__typename": "CheckRun", "name": "announce", "status": "COMPLETED", "conclusion": "CANCELLED"},
+                {"__typename": "CheckRun", "name": "unit", "status": "COMPLETED", "conclusion": "TIMED_OUT"},
+                {"__typename": "CheckRun", "name": "stale", "status": "COMPLETED", "conclusion": "STALE"},
+                {"__typename": "StatusContext", "context": "deploy/expected", "state": "EXPECTED"},
+                {"__typename": "CheckRun", "name": "plan", "status": "QUEUED", "conclusion": "SUCCESS"}
+            ]
+        }"#;
+        let checks = parse_github_pr_checks(json).unwrap();
+        let states: Vec<&str> = checks.checks.iter().map(|c| c.state.as_str()).collect();
+        assert_eq!(
+            states,
+            ["skipping", "cancel", "fail", "unknown", "unknown", "pending"]
+        );
+    }
+
+    #[test]
+    fn parse_github_pr_checks_unknown_status_never_trusts_conclusion() {
+        let json = r#"{
+            "headRefOid": "abc123",
+            "statusCheckRollup": [
+                {
+                    "__typename": "CheckRun",
+                    "name": "mystery",
+                    "status": "RUNNING",
+                    "conclusion": "SUCCESS"
+                },
+                {"__typename": "CheckRun", "name": "done", "status": "COMPLETED", "conclusion": "SUCCESS"},
+                {"__typename": "CheckRun", "name": "legacy", "conclusion": "SUCCESS"}
+            ]
+        }"#;
+        let checks = parse_github_pr_checks(json).unwrap();
+        assert_eq!(checks.checks[0].state, "unknown");
+        assert_eq!(checks.checks[1].state, "pass");
+        assert_eq!(checks.checks[2].state, "pass");
+    }
+
+    #[test]
+    fn parse_github_pr_checks_treats_missing_rollup_as_empty() {
+        let checks = parse_github_pr_checks(r#"{"headRefOid": "abc123"}"#).unwrap();
+        assert_eq!(checks.head_oid, "abc123");
+        assert!(checks.checks.is_empty());
+        let null_checks =
+            parse_github_pr_checks(r#"{"headRefOid": "abc123", "statusCheckRollup": null}"#)
+                .unwrap();
+        assert!(null_checks.checks.is_empty());
+    }
+
+    #[test]
+    fn parse_github_pr_checks_fills_missing_check_data() {
+        let json = r#"{
+            "headRefOid": "abc123",
+            "statusCheckRollup": [
+                {"__typename": "CheckRun", "status": "COMPLETED"},
+                {"__typename": "CheckRun", "name": "legacy", "conclusion": "SUCCESS"},
+                {"context": "fallback/status", "state": "SUCCESS"}
+            ]
+        }"#;
+        let checks = parse_github_pr_checks(json).unwrap();
+        let bare = &checks.checks[0];
+        assert_eq!(bare.name, "");
+        assert_eq!(bare.workflow, "");
+        assert_eq!(bare.state, "unknown");
+        assert_eq!(bare.url, None);
+        assert_eq!(bare.started_at, None);
+        assert_eq!(bare.completed_at, None);
+        assert_eq!(checks.checks[1].state, "pass");
+        let fallback = &checks.checks[2];
+        assert_eq!(fallback.name, "fallback/status");
+        assert_eq!(fallback.state, "pass");
+        assert_eq!(fallback.workflow, "");
+    }
+
+    #[test]
+    fn parse_github_pr_checks_rejects_invalid_responses() {
+        assert!(parse_github_pr_checks("not json").is_err());
+        assert!(parse_github_pr_checks(r#"{"statusCheckRollup": []}"#).is_err());
+        assert!(parse_github_pr_checks(r#"{"headRefOid": "", "statusCheckRollup": []}"#).is_err());
+        assert!(
+            parse_github_pr_checks(r#"{"headRefOid": "abc", "statusCheckRollup": ["nope"]}"#)
+                .is_err()
         );
     }
 

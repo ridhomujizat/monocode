@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { iconByName } from "./registry";
-import * as icons from "../chrome/icons";
+import * as icons from "../shared/ui/icons";
 
 describe("iconByName", () => {
   it("resolves export names, including forwardRef components", () => {

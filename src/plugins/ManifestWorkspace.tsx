@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState, type ComponentType } from "react";
-import { LoaderCircle, RefreshCw, Settings } from "../chrome/icons";
+import { LoaderCircle, RefreshCw, Settings } from "../shared/ui/icons";
 import {
   itemBody,
   itemTitle,
