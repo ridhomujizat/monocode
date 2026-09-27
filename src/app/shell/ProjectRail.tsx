@@ -2,6 +2,7 @@ import {
   BellOff,
   ChevronDown,
   ChevronRight,
+  Folder,
   FolderPlus,
   Inbox,
   MoreHorizontal,
@@ -743,6 +744,7 @@ function ProjectGroupSection({
   );
   const countLabel = `${items.length} ${items.length === 1 ? "project" : "projects"}`;
   const expanded = !group.collapsed;
+  const logoPath = resolveTabGroupLogo(group.id, groupLogos);
   const openMenu = (target: HTMLElement, x?: number, y?: number) => {
     const rect = target.getBoundingClientRect();
     onOpenGroupMenu(x ?? rect.left, y ?? rect.bottom);
@@ -777,15 +779,25 @@ function ProjectGroupSection({
             {group.collapsed ? (
               <>
                 <span
-                  data-group-mascot
+                  data-group-icon
                   className="grid size-4 place-items-center group-hover:hidden group-has-[:focus-visible]:hidden"
                 >
-                  <ProjectMascot
-                    project={group.id}
-                    color={projectGroupColor(group)}
-                    name={group.mascot ?? null}
-                    className="size-3"
-                  />
+                  {logoPath ? (
+                    <ProjectLogoIcon path={logoPath} className="size-3.5" />
+                  ) : group.mascot ? (
+                    <ProjectMascot
+                      project={group.id}
+                      color={projectGroupColor(group)}
+                      name={group.mascot}
+                      className="size-3"
+                    />
+                  ) : (
+                    <Folder
+                      className="size-3.5"
+                      strokeWidth={1.5}
+                      style={{ color: projectGroupColor(group) }}
+                    />
+                  )}
                 </span>
                 <ChevronRight
                   data-group-chevron

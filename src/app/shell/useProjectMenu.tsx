@@ -460,6 +460,7 @@ export function useProjectMenu({
     if (!groupMenu) return null;
     const group = loadProjectGroups().find((item) => item.id === groupMenu.id);
     if (!group) return null;
+    const groupLogoPath = resolveTabGroupLogo(group.id, groupLogos);
     return (
       <TabGroupMenu
         x={groupMenu.x}
@@ -469,7 +470,15 @@ export function useProjectMenu({
         colorIndex={group.colorIndex ?? null}
         customColor={group.customColor ?? null}
         currentColor={projectGroupColor(group)}
-        logoPath={null}
+        logoPath={groupLogoPath}
+        logoProject={group.id}
+        logoPickDirectory={null}
+        logoLabel="Group logo"
+        logoHint={
+          groupLogoPath
+            ? "Shown in the project rail"
+            : "Optional — replaces folder icon"
+        }
         mascotName={group.mascot ?? null}
         mascotProject={group.id}
         onRename={(_, name) =>

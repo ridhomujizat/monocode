@@ -8,12 +8,12 @@ import {
   tabGroupLogoDisplayRevision,
 } from "../../workspace/model/tabGroups";
 
-export async function pickImageFile(directory: string): Promise<string | null> {
+export async function pickImageFile(directory?: string): Promise<string | null> {
   const selected = await open({
-    defaultPath: directory,
+    ...(directory ? { defaultPath: directory } : {}),
     multiple: false,
     directory: false,
-    title: "Choose project logo",
+    title: "Choose logo",
     filters: [
       {
         name: "Images",
@@ -52,10 +52,19 @@ async function forgetLogoFile(path: string | null): Promise<void> {
   await invoke("forget_logo_file", { path }).catch(() => undefined);
 }
 
-export async function pickAndSetProjectLogo(projectPath: string): Promise<string | null> {
-  const sourcePath = await pickImageFile(projectPath);
+/**
+ * `key` is the logo store key (project path or group id). `pickDirectory` is the
+ * dialog start folder; pass `null` when the key is not a filesystem path.
+ */
+export async function pickAndSetProjectLogo(
+  key: string,
+  pickDirectory?: string | null,
+): Promise<string | null> {
+  const sourcePath = await pickImageFile(
+    pickDirectory === null ? undefined : (pickDirectory ?? key),
+  );
   if (!sourcePath) return null;
-  const project = projectKey(projectPath);
+  const project = projectKey(key);
   const logos = loadTabGroupLogos();
   const path = await invoke<string>("save_project_logo", {
     project,
