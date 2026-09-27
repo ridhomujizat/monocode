@@ -56,8 +56,12 @@ type Props = {
   customColor: string | null;
   currentColor: string;
   logoPath: string | null;
-  /** Original project directory for the logo picker. */
+  /** Logo store key (project path or group id). When set, logo controls show. */
   logoProject?: string | null;
+  /** Dialog start folder. `null` when `logoProject` is not a filesystem path. */
+  logoPickDirectory?: string | null;
+  logoLabel?: string;
+  logoHint?: string;
   /** Explicit mascot pick; null means the one hashed from `mascotProject`. */
   mascotName: string | null;
   /** Key the fallback mascot is hashed from — same one the icon uses. */
@@ -131,6 +135,9 @@ export function TabGroupMenu({
   currentColor,
   logoPath,
   logoProject,
+  logoPickDirectory,
+  logoLabel = "Project logo",
+  logoHint,
   mascotName,
   mascotProject,
   onRename,
@@ -239,16 +246,19 @@ export function TabGroupMenu({
           <div className="mb-2 flex items-center gap-2 px-0.5">
             <button
               type="button"
-              title={logoPath ? "Change project logo" : "Add project logo"}
-              aria-label={logoPath ? "Change project logo" : "Add project logo"}
+              title={logoPath ? `Change ${logoLabel.toLowerCase()}` : `Add ${logoLabel.toLowerCase()}`}
+              aria-label={logoPath ? `Change ${logoLabel.toLowerCase()}` : `Add ${logoLabel.toLowerCase()}`}
               onMouseDown={(e) => e.preventDefault()}
               onClick={() => {
                 void (async () => {
                   try {
-                    const path = await pickAndSetProjectLogo(logoProject);
+                    const path = await pickAndSetProjectLogo(
+                      logoProject,
+                      logoPickDirectory,
+                    );
                     if (path) onLogoChange();
                   } catch (error) {
-                    console.error("Failed to save project logo:", error);
+                    console.error("Failed to save logo:", error);
                   } finally {
                     onClose();
                   }
@@ -265,16 +275,19 @@ export function TabGroupMenu({
               />
             </button>
             <div className="min-w-0 flex-1">
-              <p className="text-[11px] text-content/50">Project logo</p>
+              <p className="text-[11px] text-content/50">{logoLabel}</p>
               <p className="truncate text-[12px] text-content/70">
-                {logoPath ? "Shown in tabs and composer" : "Optional — replaces folder icon"}
+                {logoHint ??
+                  (logoPath
+                    ? "Shown in tabs and composer"
+                    : "Optional — replaces folder icon")}
               </p>
             </div>
             {logoPath ? (
               <button
                 type="button"
-                title="Remove project logo"
-                aria-label="Remove project logo"
+                title={`Remove ${logoLabel.toLowerCase()}`}
+                aria-label={`Remove ${logoLabel.toLowerCase()}`}
                 onMouseDown={(e) => e.preventDefault()}
                 onClick={() => {
                   void clearProjectLogo(projectKey(logoProject)).then(onLogoChange);

@@ -105,7 +105,7 @@ it("renders assigned projects in persistent collapsible groups", async () => {
     group.querySelector("[data-project-group-items]")?.classList,
   ).toContain("p-1");
   expect(group.querySelector("[data-group-chevron]")).not.toBeNull();
-  expect(group.querySelector("[data-group-mascot]")).toBeNull();
+  expect(group.querySelector("[data-group-icon]")).toBeNull();
 
   act(() => header.click());
   expect(document.querySelector('button[aria-label="client"]')).toBeNull();
@@ -116,7 +116,7 @@ it("renders assigned projects in persistent collapsible groups", async () => {
   expect(collapsedGroup.classList).not.toContain("bg-content/5");
   expect(collapsedGroup.querySelector("[data-project-group-items]")).toBeNull();
   expect(
-    collapsedGroup.querySelector("[data-group-mascot]")?.classList,
+    collapsedGroup.querySelector("[data-group-icon]")?.classList,
   ).toContain("group-hover:hidden");
   expect(
     collapsedGroup.querySelector("[data-group-chevron]")?.classList,
