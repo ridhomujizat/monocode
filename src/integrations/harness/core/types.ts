@@ -22,6 +22,8 @@ export type HarnessEvent =
       modelSettings?: Record<string, string>;
     }
   | { type: "status"; text: string }
+  /** The provider refused the turn until its usage window resets (epoch ms). */
+  | { type: "usage.limited"; resetsAt?: number }
   /**
    * The agent has yielded but the turn is not over: work it started is still
    * running and will wake it again. Empty once it is back at work.
@@ -30,6 +32,22 @@ export type HarnessEvent =
   | ({ type: "interjection"; text: string } & InterjectionMeta)
   | { type: "message.delta"; text: string }
   | { type: "message.completed" }
+  | {
+      type: "image.generated";
+      itemId: string;
+      data: string;
+      name: string;
+      alt?: string;
+    }
+  | {
+      type: "image.generated";
+      itemId: string;
+      path: string;
+      name: string;
+      mimeType: string;
+      size: number;
+      alt?: string;
+    }
   | { type: "reasoning.delta"; text: string }
   | { type: "reasoning.completed" }
   | {
@@ -145,6 +163,8 @@ export type HarnessSessionInput = {
    * that socket cannot supervise its agents at all.
    */
   controlsAgents?: boolean;
+  /** Grants this normal turn access to MonoCode's scoped app CLI. */
+  appAccess?: boolean;
   onEvent: (event: HarnessEvent) => void;
 };
 

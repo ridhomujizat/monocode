@@ -27,21 +27,24 @@ import {
   useState,
   type CSSProperties,
   type ReactNode,
+  type RefObject,
 } from "react";
 import { flushSync } from "react-dom";
 import { AttachmentChip } from "./AttachmentChip";
+import { GeneratedImage } from "./GeneratedImage";
+import { MonocodeSparkles } from "./MonocodeSparkles";
+import { OrchestratorConstellation } from "./OrchestratorConstellation";
+import { PlanStepsBurst } from "./PlanStepsBurst";
 import { FilePreview } from "../../files/ui/FilePreview";
 import { FileTypeIcon } from "../../files/ui/FileTypeIcon";
 import { ToolDiffPreview } from "./ToolDiffPreview";
 import { PlanPreview } from "./PlanPreview";
 import { OrchestrationPreview } from "../../orchestration/ui/OrchestrationPreview";
 import { TaskListPreview } from "./TaskListPreview";
-import {
-  HandoffButton,
-  SecondOpinionButton,
-} from "./SecondOpinionButton";
+import { HandoffButton, SecondOpinionButton } from "./SecondOpinionButton";
 import { SecondOpinionCard } from "./SecondOpinionCard";
-import { NoteMiniCard } from "../../notes/ui";
+import { NoteMiniCard } from "../../notes/ui/NoteMiniCard";
+
 import { TerminalSpinner } from "./TerminalSpinner";
 import { Popover } from "../../../shared/ui/Popover";
 import { ProjectMascot } from "../../projects/ui/ProjectMascot";
@@ -121,8 +124,18 @@ import {
 } from "../model/transcriptActivity";
 import { lastUserTurnBlock } from "../model/editLastTurn";
 import {
+  monoCodeToolCall,
+  monoCodeWorkSummary,
+  type MonoCodeToolCall,
+} from "../model/monocodeToolCall";
+import {
+  isOperatorUserTurn,
+  operatorUserPrompt,
+} from "../model/operatorCommand";
+import {
   clearTranscriptHighlights,
   paintTranscriptHighlights,
+  transcriptMutationNeedsRepaint,
   transcriptWordRanges,
 } from "../model/transcriptHighlights";
 
@@ -167,11 +180,13 @@ type Props = {
   onOpenDiff?: (path: string) => void;
   onOpenPlan?: (blockId: string) => void;
   onBuildPlan?: (blockId: string, target?: PlanBuildTarget) => void;
+  planBuildTargets?: boolean;
   onSecondOpinion?: (target: ModelTarget, turn: Block[]) => void;
   onHandoff?: (target: ModelTarget, turn: Block[]) => void;
   onEditLastTurn?: () => void;
   editingLastTurn?: boolean;
   onJumpToBottomChange?: (show: boolean) => void;
+
   onJumpToBottomReady?: (jump: () => void) => void;
   /** Passes a function that renders the turn that holds a block. The render completes before the function returns. */
   onRevealReady?: (reveal: (blockId: string) => boolean) => void;
@@ -208,6 +223,7 @@ function AgentTranscriptComponent({
   onOpenDiff,
   onOpenPlan,
   onBuildPlan,
+  planBuildTargets = true,
   onSecondOpinion,
   onHandoff,
   onEditLastTurn,
@@ -217,6 +233,7 @@ function AgentTranscriptComponent({
   onRevealReady,
   onNavigateReady,
   latestTurnAccessory,
+
   visible = true,
   parked = false,
   onScrollerChange,
@@ -259,7 +276,7 @@ function AgentTranscriptComponent({
   }, []);
   // Stretch the last turn after a send while this tab stays open. Closing
   // the tab is a new visit: the remount uses the true transcript height so
-  // the latest reply sits on the composer instead of a hole of empty space.
+  // the latest reply sits near the composer instead of a hole of empty space.
   const [anchorTurn, setAnchorTurn] = useState(!!busy);
   // Parking detaches the scroller, which drops its scroll offset.
   const restoreScroll = useRef(false);
@@ -306,10 +323,14 @@ function AgentTranscriptComponent({
 
   const syncPinned = useCallback(
     (el: HTMLElement) => {
-      const near = isNearBottom(el);
+      const distance = el.scrollHeight - el.scrollTop - el.clientHeight;
+      // Scrolling up inside the bottom margin is the reader leaving. Pinning
+      // again here would snap each streamed chunk back down under the wheel.
+      const leaving =
+        !stickToBottom.current && distance > distanceFromBottom.current;
+      const near = isNearBottom(el) && !leaving;
       stickToBottom.current = near;
-      distanceFromBottom.current =
-        el.scrollHeight - el.scrollTop - el.clientHeight;
+      distanceFromBottom.current = distance;
       setShowJump(!near);
     },
     [setShowJump],
@@ -447,6 +468,8 @@ function AgentTranscriptComponent({
     onResize();
     return () => observer.disconnect();
   }, [scrollerEl, setShowJump, visible]);
+
+  useTurnScrollAnchor(scrollerEl, visible, stickToBottom);
 
   const turns = groupTurns(blocks, managed);
   const firstVisibleTurn = Math.max(0, turns.length - visibleTurnCount);
@@ -594,13 +617,20 @@ function AgentTranscriptComponent({
       return;
     }
     let frame = 0;
+    let pending: MutationRecord[] = [];
     const paint = () => {
-      frame = 0;
       const { matches, current } = transcriptWordRanges(el, searchQuery);
       paintTranscriptHighlights(owner, matches, current);
     };
-    const observer = new MutationObserver(() => {
-      if (!frame) frame = requestAnimationFrame(paint);
+    const observer = new MutationObserver((records) => {
+      for (const record of records) pending.push(record);
+      if (frame) return;
+      frame = requestAnimationFrame(() => {
+        frame = 0;
+        const changed = pending;
+        pending = [];
+        if (transcriptMutationNeedsRepaint(changed, searchQuery)) paint();
+      });
     });
     observer.observe(el, {
       childList: true,
@@ -620,7 +650,7 @@ function AgentTranscriptComponent({
       ref={setScroller}
       className="agent-transcript h-full overflow-y-auto overscroll-none [overflow-anchor:none] font-mono text-[13px] leading-5"
     >
-      <div className="mx-auto flex w-full min-w-0 max-w-4xl flex-col gap-1 pb-1">
+      <div className="mx-auto flex w-full min-w-0 max-w-4xl flex-col gap-1 pb-8">
         {firstVisibleTurn > 0 ? (
           <div className="flex justify-center px-4 py-3">
             <button
@@ -770,7 +800,7 @@ function AgentTranscriptComponent({
                 onOpenPlan={onOpenPlan}
                 onBuildPlan={onBuildPlan}
                 planBusy={!!busy}
-                planHarness={harness}
+                planHarness={planBuildTargets ? harness : undefined}
                 planModel={model}
                 planModelSettings={modelSettings}
                 cwd={cwd}
@@ -928,6 +958,7 @@ function AgentTranscriptComponent({
                   onSaveNote={onSaveNote}
                   harness={turnHarness}
                   fromHarness={turnHarness}
+                  fromModel={turnModel?.id}
                   onSecondOpinion={
                     onSecondOpinion
                       ? (target) => onSecondOpinion(target, turn)
@@ -961,9 +992,17 @@ export const AgentTranscript = memo(
 );
 
 /** Placeholder for private reasoning before the first assistant text arrives. */
-function InitialThinking({ live }: { live: boolean }) {
+function InitialThinking({
+  live,
+  embedded = false,
+}: {
+  live: boolean;
+  embedded?: boolean;
+}) {
   return (
-    <div className="min-w-0 px-4 pt-3 pb-1 font-sans text-sm text-content/50">
+    <div
+      className={`min-w-0 pt-3 pb-1 font-sans text-sm text-content/50 ${embedded ? "" : "px-4"}`}
+    >
       {live ? <Shimmer duration={1.6}>Thinking…</Shimmer> : "Thinking…"}
     </div>
   );
@@ -1031,6 +1070,7 @@ function TurnDuration({
   copyText: output,
   onSaveNote,
   fromHarness,
+  fromModel,
   onSecondOpinion,
   onHandoff,
 }: {
@@ -1044,6 +1084,8 @@ function TurnDuration({
   copyText?: string;
   onSaveNote?: (text: string) => void | Promise<void>;
   fromHarness?: HarnessId;
+  /** The turn's own model, so a same-harness second opinion can hide it. */
+  fromModel?: string;
   onSecondOpinion?: (target: ModelTarget) => void;
   onHandoff?: (target: ModelTarget) => void;
 }) {
@@ -1057,7 +1099,7 @@ function TurnDuration({
   return (
     <div
       aria-label={label}
-      className="flex min-w-0 items-center gap-2.5 px-4 pt-1 pb-3 font-sans text-sm text-content/40"
+      className="flex w-full min-w-0 max-w-full items-center gap-2.5 overflow-hidden px-4 pt-1 pb-3 font-sans text-sm text-content/40"
     >
       <span className="flex shrink-0 items-center gap-1">
         {output ? (
@@ -1074,13 +1116,18 @@ function TurnDuration({
           <HandoffButton from={fromHarness} onPick={onHandoff} />
         ) : null}
         {fromHarness && onSecondOpinion ? (
-          <SecondOpinionButton from={fromHarness} onPick={onSecondOpinion} />
+          <SecondOpinionButton
+            from={fromHarness}
+            fromModel={fromModel}
+            onPick={onSecondOpinion}
+            includeCurrent
+            excludeFromModel
+          />
         ) : null}
         <TurnMetricsBadge metrics={metrics} elapsedMs={elapsedMs} />
       </span>
-
       {labelHidden ? null : (
-        <>
+        <span className="flex min-w-0 items-center gap-2.5">
           {dot}
           <span className="flex min-w-0 items-center gap-1.5">
             {harness ? (
@@ -1090,16 +1137,15 @@ function TurnDuration({
               {label}
             </span>
           </span>
-        </>
+        </span>
       )}
-
       {completedAt != null ? (
-        <>
+        <span className="flex shrink-0 items-center gap-2.5">
           {dot}
           <span className="shrink-0 text-content/35">
             {formatClockTime(completedAt)}
           </span>
-        </>
+        </span>
       ) : null}
     </div>
   );
@@ -1149,7 +1195,7 @@ function TurnMetricsBadge({
   return (
     <div
       ref={root}
-      className="relative shrink-0 pl-1"
+      className="relative shrink-0"
       onMouseEnter={() => setHovered(true)}
       onMouseLeave={() => setHovered(false)}
       onFocus={() => setHovered(true)}
@@ -1160,9 +1206,9 @@ function TurnMetricsBadge({
         tabIndex={0}
         aria-label={`Turn metrics: ${label}`}
         title="Turn metrics"
-        className="grid rounded-sm p-1 outline-none hover:text-content focus-visible:ring-1 focus-visible:ring-accent"
+        className="grid rounded-md p-1 text-content/40 outline-none hover:bg-content/8 hover:text-content/70 focus-visible:ring-1 focus-visible:ring-accent"
       >
-        <ChartBreakoutSquare className="size-3.5" strokeWidth={1.6} />
+        <ChartBreakoutSquare className="size-3.5" strokeWidth={1.75} />
       </span>
       {hovered ? (
         <Popover
@@ -1367,6 +1413,7 @@ const TranscriptBlock = memo(function TranscriptBlock({
   layout,
   stickyIndex,
   underLine = false,
+  embedded = false,
   cwd,
   onApproval,
   onSaveNote,
@@ -1388,6 +1435,8 @@ const TranscriptBlock = memo(function TranscriptBlock({
   stickyIndex: number;
   /** True when something already sits directly above this in the turn. */
   underLine?: boolean;
+  /** True when the parent surface already provides the horizontal gutter. */
+  embedded?: boolean;
   cwd?: string;
   onApproval?: (requestId: number, decision: ApprovalDecision) => void;
   onSaveNote?: (text: string) => void | Promise<void>;
@@ -1420,11 +1469,16 @@ const TranscriptBlock = memo(function TranscriptBlock({
     );
   }
 
+  if (block.role === "image") {
+    return block.image ? <GeneratedImage image={block.image} /> : null;
+  }
+
   if (block.role === "tool") {
     return (
       <ToolCall
         block={block}
         cwd={cwd}
+        embedded={embedded}
         onApproval={onApproval}
         onOpenFile={onOpenFile}
         onOpenDiff={onOpenDiff}
@@ -1439,7 +1493,7 @@ const TranscriptBlock = memo(function TranscriptBlock({
   if (block.role === "tasks") {
     if (!block.taskList?.items.length) return null;
     return (
-      <div className="px-4 py-1">
+      <div className={embedded ? "py-1" : "px-4 py-1"}>
         <TaskListPreview
           items={block.taskList.items}
           explanation={block.taskList.explanation}
@@ -1453,13 +1507,13 @@ const TranscriptBlock = memo(function TranscriptBlock({
     const legacyTasks = legacyTaskListFromText(block.text);
     if (legacyTasks) {
       return (
-        <div className="px-4 py-1">
+        <div className={embedded ? "py-1" : "px-4 py-1"}>
           <TaskListPreview items={legacyTasks} />
         </div>
       );
     }
     return (
-      <div className="px-4 py-1">
+      <div className={embedded ? "py-1" : "px-4 py-1"}>
         <PlanPreview
           text={block.text}
           streaming={block.streaming}
@@ -1482,6 +1536,7 @@ const TranscriptBlock = memo(function TranscriptBlock({
       <ToolCall
         block={block}
         cwd={cwd}
+        embedded={embedded}
         onApproval={onApproval}
         onOpenFile={onOpenFile}
         onOpenDiff={onOpenDiff}
@@ -1498,7 +1553,7 @@ const TranscriptBlock = memo(function TranscriptBlock({
       return <InterjectionDivider block={block} />;
     }
     return (
-      <div className="px-4 py-2 text-content/50">
+      <div className={`${embedded ? "" : "px-4"} py-2 text-content/50`}>
         <pre className="min-w-0 whitespace-pre-wrap break-words">
           {block.text}
         </pre>
@@ -1511,7 +1566,7 @@ const TranscriptBlock = memo(function TranscriptBlock({
   return (
     <div
       data-selectable-agent-response={block.streaming ? undefined : block.id}
-      className={`min-w-0 px-4 pb-1 text-content ${underLine ? "pt-1" : "pt-3"}`}
+      className={`min-w-0 pb-1 text-content ${embedded ? "" : "px-4"} ${underLine ? "pt-1" : "pt-3"}`}
     >
       <AgentMarkdown
         text={block.text}
@@ -1550,8 +1605,11 @@ function UserMessageBlock({
   const textRef = useRef<HTMLElement>(null);
   const card = block.secondOpinion;
   const note = block.noteCard;
+  const monocode = isOperatorUserTurn(block);
   const text =
-    card && card.kind !== "handoff" ? "" : visibleUserPrompt(block.text);
+    card && card.kind !== "handoff"
+      ? ""
+      : visibleUserPrompt(monocode ? operatorUserPrompt(block) : block.text);
   const messageLink = text ? parseUserMessageLink(text) : null;
   const displayText = messageLink
     ? `${messageLink.beforeText}${messageLink.afterText}`
@@ -1622,13 +1680,12 @@ function UserMessageBlock({
       >
         <div
           data-draft={block.draft ? "true" : undefined}
+          data-monocode={monocode ? "true" : undefined}
           className={`user-message-bubble relative min-w-0 px-3 py-2 font-sans text-content transition-[background-color] duration-200 ${
             block.draft
               ? "border border-dashed border-content/30 bg-content/4"
               : "bg-content/10"
-          } ${
-            editing ? "edit-last-turn-bubble" : ""
-          } ${
+          } ${editing ? "edit-last-turn-bubble" : ""} ${
             chat
               ? `w-fit max-w-xl ${singleLine ? "rounded-full" : "rounded-xl"}`
               : "rounded-lg border border-content/10"
@@ -1733,6 +1790,16 @@ function UserMessageBlock({
                 </button>
               </span>
             </div>
+          ) : null}
+          {monocode ? (
+            <MonocodeSparkles blockId={block.id} startedAt={block.startedAt} />
+          ) : block.intent === "plan" ? (
+            <PlanStepsBurst blockId={block.id} startedAt={block.startedAt} />
+          ) : block.intent === "orchestrate" ? (
+            <OrchestratorConstellation
+              blockId={block.id}
+              startedAt={block.startedAt}
+            />
           ) : null}
         </div>
         {text ||
@@ -1993,6 +2060,67 @@ function sameActivity(a: ActivityPhasesProps, b: ActivityPhasesProps): boolean {
 }
 
 /**
+ * Hold the reader's place while turns above the viewport change height. An
+ * off-screen turn keeps its content-visibility placeholder until it is first
+ * laid out, and the scroller opts out of native scroll anchoring, so scrolling
+ * up through a freshly opened chat would otherwise shove the view down by
+ * each turn's correction.
+ */
+function useTurnScrollAnchor(
+  el: HTMLDivElement | null,
+  enabled: boolean,
+  stickToBottom: RefObject<boolean>,
+) {
+  useLayoutEffect(() => {
+    const inner = el?.firstElementChild;
+    if (!enabled || !el || !inner) return;
+    const heights = new WeakMap<Element, number>();
+    const resize = new ResizeObserver((entries) => {
+      // A parked transcript's scroller is detached and measures zero.
+      if (!el.isConnected) return;
+      const viewportTop = el.getBoundingClientRect().top;
+      let shift = 0;
+      for (const entry of entries) {
+        const height =
+          entry.borderBoxSize?.[0]?.blockSize ?? entry.contentRect.height;
+        const previous = heights.get(entry.target);
+        heights.set(entry.target, height);
+        if (previous === undefined || stickToBottom.current) continue;
+        // Only turns that sat wholly above the view. A turn the reader is
+        // looking at grows downward from where they are reading.
+        const top = entry.target.getBoundingClientRect().top;
+        if (top + previous <= viewportTop) shift += height - previous;
+      }
+      if (shift) el.scrollTop += shift;
+    });
+    let observed = new WeakSet<Element>();
+    const observeTurns = () => {
+      for (const turn of inner.children) {
+        if (observed.has(turn) || !turn.classList.contains("transcript-turn"))
+          continue;
+        observed.add(turn);
+        resize.observe(turn);
+      }
+    };
+    const mutations = new MutationObserver((records) => {
+      // Removal is rare (a rewind or edit), so start over rather than hold
+      // detached turns. Re-observed turns report the height already stored.
+      if (records.some((record) => record.removedNodes.length > 0)) {
+        resize.disconnect();
+        observed = new WeakSet();
+      }
+      observeTurns();
+    });
+    mutations.observe(inner, { childList: true });
+    observeTurns();
+    return () => {
+      mutations.disconnect();
+      resize.disconnect();
+    };
+  }, [el, enabled, stickToBottom]);
+}
+
+/**
  * Keep a live phase body on its newest step. Pinning happens in layout
  * before paint so the window follows without a visible hitch; only a real
  * wheel away from the bottom pauses that.
@@ -2024,8 +2152,14 @@ function useLivePhaseScroll(
     const pin = () => {
       if (stickToBottom.current) el.scrollTop = el.scrollHeight;
     };
+    let lastDistance = 0;
     const onScroll = () => {
-      if (isNearBottom(el)) stickToBottom.current = true;
+      // Only a scroll toward the end re-pins; one leaving it must not.
+      const distance = el.scrollHeight - el.scrollTop - el.clientHeight;
+      if (isNearBottom(el) && distance <= lastDistance) {
+        stickToBottom.current = true;
+      }
+      lastDistance = distance;
     };
     const onWheel = (e: WheelEvent) => {
       if (!nestedScrollAbsorbsWheel(el, e.deltaY)) return;
@@ -2084,6 +2218,7 @@ function ActivityPhaseGroup({
   }, [phase.steps]);
   const turnFor = useStepQueue();
   const title = activityPhaseTitle(phase, active);
+  const monoCodePhase = !!monoCodeWorkSummary(phase.steps, active);
   // Opening a group on purpose is also how you read the line that titled it,
   // whole. The auto-open while it runs is a live view, not a reading one, and
   // a one-line note the header already shows in full has nothing to add.
@@ -2098,7 +2233,9 @@ function ActivityPhaseGroup({
   if (!phase.headline && phase.steps.length === 1) {
     return (
       <div className="flex min-w-0 items-start gap-1.5">
-        <ActivityPhaseIcon kind={phase.kind} className="mt-[7px]" />
+        {monoCodePhase ? null : (
+          <ActivityPhaseIcon kind={phase.kind} className="mt-[7px]" />
+        )}
         <div className="min-w-0 flex-1">
           <ActivityRow
             block={phase.steps[0]}
@@ -2151,10 +2288,14 @@ function ActivityPhaseGroup({
          * between them leaves both half-drawn on top of each other.
          */}
         <span className="relative flex size-3.5 shrink-0 items-center justify-center">
-          <ActivityPhaseIcon
-            kind={phase.kind}
-            className="group-hover:opacity-0"
-          />
+          {monoCodePhase ? (
+            <MonoCodeMark className="size-3.5 group-hover:opacity-0" />
+          ) : (
+            <ActivityPhaseIcon
+              kind={phase.kind}
+              className="group-hover:opacity-0"
+            />
+          )}
           <ChevronRight
             className={`absolute size-3.5 text-content/45 opacity-0 transition-transform duration-200 group-hover:opacity-100 ${
               open ? "rotate-90" : ""
@@ -2310,17 +2451,19 @@ function SubagentStack({
   blocks,
   cwd,
   live = false,
+  embedded = false,
   onOpenFile,
   onOpenDiff,
 }: {
   blocks: Block[];
   cwd?: string;
   live?: boolean;
+  embedded?: boolean;
   onOpenFile?: (path: string) => void;
   onOpenDiff?: (path: string) => void;
 }) {
   return (
-    <div className="flex min-w-0 flex-col px-4">
+    <div className={`flex min-w-0 flex-col ${embedded ? "" : "px-4"}`}>
       {blocks.map((block) => (
         <SubagentRow
           key={block.id}
@@ -2927,6 +3070,16 @@ function ActivityToolRow({
   onOpenDiff?: (path: string) => void;
 }) {
   const [errorOpen, setErrorOpen] = useState(false);
+  const appCall = monoCodeToolCall(block);
+  if (appCall) {
+    return (
+      <MonoCodeCallRow
+        block={block}
+        call={appCall}
+        onApproval={onApproval}
+      />
+    );
+  }
   const label = toolCallLabel(block, cwd);
   const state = toolCallState(block);
   const pending = needsApproval(block);
@@ -2993,6 +3146,86 @@ function ActivityToolRow({
           {errorDetail}
         </pre>
       ) : null}
+    </div>
+  );
+}
+
+function MonoCodeMark({ className = "size-4" }: { className?: string }) {
+  return <img src="/monocode.png" alt="" className={`shrink-0 ${className}`} />;
+}
+
+/** MonoCode commands read like the other activity rows; failures expose their output. */
+function MonoCodeCallRow({
+  block,
+  call,
+  onApproval,
+}: {
+  block: Block;
+  call: MonoCodeToolCall;
+  onApproval?: (requestId: number, decision: ApprovalDecision) => void;
+}) {
+  const state = toolCallState(block);
+  const output = block.tool?.detail?.trim() || block.tool?.preview?.output?.trim();
+  const [errorOpen, setErrorOpen] = useState(false);
+  const hasError = state === "rejected" && !!output;
+  const pendingApproval = needsApproval(block);
+  const command = `monocode app ${call.action}`;
+  const verb = pendingApproval
+    ? "Run"
+    : state === "pending"
+      ? "Running"
+      : "Ran";
+  const summary = (
+    <>
+      <span
+        className={`shrink-0 font-sans text-sm ${state === "rejected" ? "text-red-400" : "text-content/50"}`}
+      >
+        {verb}
+      </span>
+      <span
+        className={`flex min-w-0 max-w-full items-center gap-1 rounded bg-content/6 px-1 font-mono text-[13px] ${state === "rejected" ? "text-red-400" : "text-content/70"}`}
+        title={command}
+      >
+        <MonoCodeMark className="size-3.5" />
+        <span className="min-w-0 truncate">{command}</span>
+      </span>
+      <ToolCallStatusIcon state={state} />
+      {hasError ? (
+        <ChevronRight
+          className={`size-3.5 shrink-0 text-red-400/60 transition-transform ${errorOpen ? "rotate-90" : ""}`}
+          strokeWidth={1.75}
+        />
+      ) : null}
+    </>
+  );
+  return (
+    <div data-monocode-tool-call={call.action} className="min-w-0">
+      {hasError ? (
+        <button
+          type="button"
+          aria-expanded={errorOpen}
+          aria-label={`${errorOpen ? "Hide" : "Show"} error details for MonoCode: ${call.label}`}
+          onClick={() => setErrorOpen((value) => !value)}
+          className="flex w-full min-w-0 items-center gap-1.5 py-1 text-left"
+        >
+          {summary}
+        </button>
+      ) : (
+        <div className="flex min-w-0 items-center gap-1.5 py-1">
+          {summary}
+        </div>
+      )}
+      {errorOpen && hasError ? (
+        <pre className="min-w-0 whitespace-pre-wrap break-words py-1 pl-5 font-mono text-[12px] leading-5 text-red-400/80">
+          {output}
+        </pre>
+      ) : null}
+      {pendingApproval ? (
+        <pre className="max-h-32 min-w-0 overflow-auto whitespace-pre-wrap break-all py-1 pl-5 font-mono text-[12px] leading-5 text-content/70">
+          {call.command}
+        </pre>
+      ) : null}
+      <ApprovalControls block={block} onApproval={onApproval} />
     </div>
   );
 }
@@ -3130,6 +3363,19 @@ function ToolCall({
 
   const frame = embedded ? "py-0.5" : "px-4 py-1";
 
+  const appCall = monoCodeToolCall(block);
+  if (appCall) {
+    return (
+      <div className={frame}>
+        <MonoCodeCallRow
+          block={block}
+          call={appCall}
+          onApproval={onApproval}
+        />
+      </div>
+    );
+  }
+
   if (editTool) {
     return (
       <div className={frame}>
@@ -3239,6 +3485,7 @@ function ToolCallSummary({
         className={`min-w-0 flex-1 truncate font-mono text-[13px] ${
           failed ? "text-red-400" : chip ? "text-content/65" : "text-content/80"
         }`}
+        title={label}
       >
         {label}
       </span>
