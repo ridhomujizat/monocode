@@ -130,12 +130,14 @@ import type { LiveAgent } from "../../features/sessions/model/liveAgents";
 import type { SessionSummary } from "../../features/sessions/data/sessionStore";
 import type { SettingsSectionId } from "../../features/settings/model/settings";
 import type { InstalledUpdate } from "../model/updateNotice";
+import { TAB_GROUP_COLORS } from "../../features/workspace/model/tabGroups";
 import { useDragResize } from "../../shared/hooks/useDragResize";
 import { useGitFileStatuses } from "../../features/source-control/hooks/useGitFileStatuses";
 import { useLockOverscroll } from "../../shared/hooks/useLockOverscroll";
 import { useProjectDiffStats } from "../../features/source-control/hooks/useProjectDiffStats";
 import { useSortable } from "../../shared/hooks/useSortable";
 import { useAnimatedReorder } from "../../shared/hooks/useAnimatedReorder";
+import { normalizeHex } from "../../shared/lib/colorUtils";
 import {
   collectRailProjects,
   looksLikeProject,
@@ -144,13 +146,16 @@ import {
   type RecentProject,
 } from "../../features/projects/model/recents";
 import {
+  ColorPickerPopover,
+  ColorSwatchRow,
+} from "../../shared/ui/ColorPickerPopover";
+import {
   ExplorerMenu,
   type ExplorerMenuItem,
 } from "../../features/files/ui/ExplorerMenu";
 import { FileTree } from "../../features/files/ui/FileTree";
 import { HarnessIcon } from "../../features/sessions/ui/HarnessIcon";
 import { LiveAgentsPreview } from "../../features/sessions/ui/LiveAgentsPreview";
-import { FolderColorSwatches } from "./FolderColorSwatches";
 import { ProjectRail } from "./ProjectRail";
 import { InboxNotificationMenu } from "../../features/inbox/ui/InboxNotificationMenu";
 import { RailAction } from "./RailAction";
@@ -2909,6 +2914,36 @@ function sessionListDropFromPoint(
   if (cardId) return { kind: "session", id: cardId };
   if (folderId) return { kind: "folder", id: folderId };
   return null;
+}
+
+function FolderColorSwatches({
+  colorIndex,
+  customColor,
+  onChange,
+  onCustomChange,
+}: {
+  colorIndex: number | undefined;
+  customColor: string | undefined;
+  onChange: (index: number | null) => void;
+  onCustomChange: (color: string) => void;
+}) {
+  const paletteColor =
+    colorIndex != null ? TAB_GROUP_COLORS[colorIndex] : TAB_GROUP_COLORS[0];
+  const pickerValue =
+    customColor ?? normalizeHex(paletteColor ?? TAB_GROUP_COLORS[0]);
+  return (
+    <div className="px-1 py-1">
+      <ColorSwatchRow
+        colors={TAB_GROUP_COLORS}
+        colorIndex={colorIndex}
+        customColor={customColor}
+        customPickerOpen
+        customHighlighted={customColor != null}
+        onPickIndex={(index) => onChange(index === 0 ? null : index)}
+      />
+      <ColorPickerPopover value={pickerValue} onChange={onCustomChange} />
+    </div>
+  );
 }
 
 function FolderRow({
