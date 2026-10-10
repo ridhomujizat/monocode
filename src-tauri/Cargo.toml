@@ -33,7 +33,6 @@ ureq = { version = "2.12.1", default-features = false, features = ["tls", "gzip"
 url = "2.5"
 time = { version = "0.3", features = ["parsing"] }
 tauri-plugin-process = "2"
-percent-encoding = "2"
 arboard = { version = "3.6", features = ["wayland-data-control"] }
 png = "0.18"
 

@@ -12,7 +12,6 @@ import {
   Palette,
   SlidersHorizontal,
   Sparkles,
-  Wrench,
   type IconComponent,
 } from "../../shared/ui/icons";
 import { useLockOverscroll } from "../../shared/hooks/useLockOverscroll";
@@ -30,7 +29,6 @@ const SECTION_ICONS: Record<SettingsSectionId, IconComponent> = {
   providers: Bot,
   mcp: Globe,
   skills: Sparkles,
-  plugins: Wrench,
   monos: Ghost,
   inbox: Inbox,
   worktrees: FolderTree,

@@ -25,7 +25,6 @@ export type SettingsSectionId =
   | "chat"
   | "providers"
   | "mcp"
-  | "plugins"
   | "skills"
   | "monos"
   | "inbox"
@@ -109,14 +108,6 @@ export const SETTINGS_SECTIONS: SettingsSection[] = [
       "Find MCP servers across providers and manage their connections.",
     keywords:
       "tools servers connections oauth authenticate login claude codex cursor opencode",
-  },
-  {
-    id: "plugins",
-    group: "workspace",
-    label: "Plugins",
-    description:
-      "Workspaces on the project rail, built in or installed from a plugin.json manifest.",
-    keywords: "plugin workspace rail manifest install",
   },
   {
     id: "skills",

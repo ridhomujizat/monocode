@@ -90,8 +90,6 @@ import {
 } from "../../features/connections/model/connections";
 import { remoteProjectFor } from "../../features/connections/model/remoteProjects";
 import { useProjectMenu } from "./useProjectMenu";
-import { usePlugins } from "../../plugins/registry";
-import { PluginCards } from "./PluginCards";
 import { MonoRailSection, type MonoRailProps } from "./MonoRailSection";
 
 type Props = {
@@ -112,8 +110,6 @@ type Props = {
   onOpenNotes?: () => void;
   notesActive?: boolean;
   onOpenAutomations?: () => void;
-  activePluginId?: string | null;
-  onOpenPlugin?: (id: string) => void;
   automationsActive?: boolean;
   onTogglePanel?: () => void;
   onSelectProject: (path: string) => void;
@@ -153,8 +149,6 @@ export function ProjectRail({
   onOpenNotes,
   notesActive = false,
   onOpenAutomations,
-  activePluginId = null,
-  onOpenPlugin,
   automationsActive = false,
   onTogglePanel,
   onSelectProject,
@@ -182,7 +176,6 @@ export function ProjectRail({
     initial: loadProjectRailWidth(),
     onCommit: saveProjectRailWidth,
   });
-  const railPlugins = usePlugins();
   const [railOrder, setRailOrder] = useState(loadProjectRailOrder);
   const [pinnedPaths, setPinnedPaths] = useState(loadPinnedProjects);
   const [groupLabels, setGroupLabels] = useState(loadTabGroupLabels);
@@ -343,7 +336,6 @@ export function ProjectRail({
     inboxActive ||
     notesActive ||
     automationsActive ||
-    !!activePluginId ||
     !!monos?.activeId;
   const pinnedIds = sections.pinned.map((item) => item.path);
   const projectIds = groupedProjectSections.ungrouped.map((item) => item.path);
@@ -421,18 +413,6 @@ export function ProjectRail({
               active={automationsActive}
               ariaLabel="Automations"
             />
-            {railPlugins.map((plugin) => (
-              <RailAction
-                key={plugin.id}
-                label={plugin.label}
-                icon={plugin.icon}
-                onClick={
-                  onOpenPlugin ? () => onOpenPlugin(plugin.id) : undefined
-                }
-                active={activePluginId === plugin.id}
-                ariaLabel={plugin.label}
-              />
-            ))}
           </div>
 
           <div
@@ -541,7 +521,6 @@ export function ProjectRail({
               groupMascots={groupMascots}
             />
           </div>
-          <PluginCards />
           <LiveAgentsPreview
             agents={liveAgents}
             activeSessionId={activeSessionId}

@@ -675,9 +675,6 @@ import { AddRemoteProjectDialog } from "../features/connections/ui/AddRemoteProj
 import type { ConnectableInboxSource } from "../features/inbox/model/inboxFilters";
 import type { InboxSessionPortal } from "../features/inbox/ui/InboxDiscussionPanel";
 import { inboxAskKey, inboxAskPrompt } from "../features/inbox/model/inboxAsk";
-import { PluginSurface } from "./ui/PluginSurface";
-import { usePlugins } from "../plugins/registry";
-import { setPluginProjectCwd } from "../plugins/process";
 import {
   githubWorkItemThread,
   inboxComposerCard,
@@ -1228,7 +1225,6 @@ function Workspace({
     useState<InboxSessionPortal | null>(null);
   const openingInboxSessions = useRef(new Map<string, Promise<string>>());
   const [notesViewOpen, setNotesViewOpen] = useState(false);
-  const [pluginId, setPluginId] = useState<string | null>(null);
   const [automationsViewOpen, setAutomationsViewOpen] = useState(false);
   const [inspectedWorkerId, setInspectedWorkerId] = useState<string | null>(
     null,
@@ -1257,7 +1253,6 @@ function Workspace({
   const [collapsedProjectRailMode, setCollapsedProjectRailMode] =
     useState<CollapsedProjectRailMode>(loadCollapsedProjectRailMode);
   const [settingsOpen, setSettingsOpen] = useState(false);
-  const activePlugin = usePlugins().find((plugin) => plugin.id === pluginId);
   const settingsReturnViewRef = useRef({
     search: false,
     inbox: false,
@@ -2658,7 +2653,6 @@ function Workspace({
     setSearchViewOpen(false);
     setInboxViewOpen(false);
     setNotesViewOpen(false);
-    setPluginId(null);
     setAutomationsViewOpen(false);
     const cwd = sidebarCwd;
     const session = newWorkspaceSession(cwd, sessionDefaults?.runtimeMode);
@@ -2707,7 +2701,6 @@ function Workspace({
       const start = (description?: string) => {
         setInboxViewOpen(false);
         setNotesViewOpen(false);
-        setPluginId(null);
         setAutomationsViewOpen(false);
         const cwd =
           item.projectPath || active?.cwd || sessionDefaults?.cwd || projectCwd;
@@ -2747,7 +2740,6 @@ function Workspace({
       setSearchViewOpen(false);
       setInboxViewOpen(false);
       setNotesViewOpen(false);
-      setPluginId(null);
       setAutomationsViewOpen(false);
       const cwd =
         (card.sourceCwd && looksLikeProject(card.sourceCwd)
@@ -2777,11 +2769,6 @@ function Workspace({
       projectCwd,
     ],
   );
-
-  // Process plugins get the active project in their environment.
-  useEffect(() => {
-    setPluginProjectCwd(projectCwd);
-  }, [projectCwd]);
 
   useEffect(() => {
     const onAdd = (event: Event) => {
@@ -6007,7 +5994,6 @@ function Workspace({
       setSearchViewOpen(false);
       setInboxViewOpen(false);
       setNotesViewOpen(false);
-      setPluginId(null);
       setAutomationsViewOpen(false);
 
       // At most one folder can take the blank session, and it keeps the
@@ -11168,7 +11154,6 @@ function Workspace({
       setSearchViewOpen(false);
       setInboxViewOpen(false);
       setNotesViewOpen(false);
-      setPluginId(null);
       setAutomationsViewOpen(false);
       onOpenApprovalSession(sessionId);
     },
@@ -11311,7 +11296,6 @@ function Workspace({
     setSearchViewOpen(false);
     setInboxViewOpen(false);
     setNotesViewOpen(false);
-    setPluginId(null);
     setAutomationsViewOpen(false);
     setFilePickerInitialQuery("");
     setFilePickerResetToken((token) => token + 1);
@@ -11337,7 +11321,6 @@ function Workspace({
     setSearchViewOpen(false);
     setInboxViewOpen(false);
     setNotesViewOpen(false);
-    setPluginId(null);
     setAutomationsViewOpen(false);
     setSidebarTab("files");
     setFilesSearchOpen(true);
@@ -11351,7 +11334,6 @@ function Workspace({
       setSettingsOpen(false);
       setInboxViewOpen(false);
       setNotesViewOpen(false);
-      setPluginId(null);
       setAutomationsViewOpen(false);
       setSearchViewOpen(true);
       setSearchViewFocusToken((token) => token + 1);
@@ -11369,7 +11351,6 @@ function Workspace({
       setSettingsOpen(false);
       setSearchViewOpen(false);
       setNotesViewOpen(false);
-      setPluginId(null);
       setAutomationsViewOpen(false);
       setInboxViewOpen(true);
     });
@@ -11385,7 +11366,6 @@ function Workspace({
       setNotesViewOpen(false);
       setAutomationsViewOpen(false);
       setInboxViewOpen(false);
-      setPluginId(null);
       const cwd =
         sessionsRef.current.find((session) => session.id === sessionId)?.cwd ??
         history.find((session) => session.id === sessionId)?.cwd ??
@@ -11487,7 +11467,6 @@ function Workspace({
       setSettingsOpen(false);
       setSearchViewOpen(false);
       setInboxViewOpen(false);
-      setPluginId(null);
       setAutomationsViewOpen(false);
       setNotesViewOpen(true);
     });
@@ -11495,17 +11474,6 @@ function Workspace({
 
   const onLeaveNotes = useCallback(() => {
     setNotesViewOpen(false);
-    setPluginId(null);
-  }, []);
-
-  const onOpenPlugin = useCallback((id: string) => {
-    setFilePickerOpen(false);
-    setSettingsOpen(false);
-    setSearchViewOpen(false);
-    setInboxViewOpen(false);
-    setNotesViewOpen(false);
-    setAutomationsViewOpen(false);
-    setPluginId(id);
   }, []);
 
   const onOpenAutomations = useCallback(() => {
@@ -11516,7 +11484,6 @@ function Workspace({
       setSearchViewOpen(false);
       setInboxViewOpen(false);
       setNotesViewOpen(false);
-      setPluginId(null);
       setAutomationsViewOpen(true);
     });
   }, []);
@@ -11560,7 +11527,6 @@ function Workspace({
         setSearchViewOpen(false);
         setInboxViewOpen(false);
         setNotesViewOpen(false);
-        setPluginId(null);
         setAutomationsViewOpen(false);
         if (section) {
           setSettingsSection(section);
@@ -11652,10 +11618,6 @@ function Workspace({
       setAutomationsViewOpen(false);
       return;
     }
-    if (activePlugin) {
-      setPluginId(null);
-      return;
-    }
     if (monoViewIdRef.current) {
       closeMonoView();
       setComposerFocused(true);
@@ -11671,7 +11633,6 @@ function Workspace({
     inboxViewOpen,
     notesViewOpen,
     automationsViewOpen,
-    activePlugin,
   ]);
 
   const onRailForward = useCallback(() => {
@@ -11679,7 +11640,6 @@ function Workspace({
     setSettingsOpen(false);
     setInboxViewOpen(false);
     setNotesViewOpen(false);
-    setPluginId(null);
     setAutomationsViewOpen(false);
     onVisitForward();
   }, [onVisitForward]);
@@ -12457,8 +12417,7 @@ function Workspace({
     settingsOpen ||
     inboxViewOpen ||
     notesViewOpen ||
-    automationsViewOpen ||
-    !!activePlugin;
+    automationsViewOpen;
   const compactProjectRail = collapsedProjectRailMode === "compact";
   const compactRailActive = compactProjectRail && !projectRailOpen;
   const compactTitleNavigation =
@@ -12580,8 +12539,7 @@ function Workspace({
                 settingsOpen ||
                 inboxViewOpen ||
                 notesViewOpen ||
-                automationsViewOpen ||
-                !!activePlugin
+                automationsViewOpen
               }
               canGoForward={tabVisitNav.canForward}
               onGoBack={onRailBack}
@@ -12636,8 +12594,6 @@ function Workspace({
               inboxActive={inboxViewOpen}
               notesActive={notesViewOpen}
               automationsActive={automationsViewOpen}
-              activePluginId={pluginId}
-              onOpenPlugin={onOpenPlugin}
               notesEnabled={notesEnabled}
               projectRailOpen={projectRailOpen}
               compactProjectRail={compactProjectRail}
@@ -12664,8 +12620,7 @@ function Workspace({
                   settingsOpen ||
                   inboxViewOpen ||
                   notesViewOpen ||
-                  automationsViewOpen ||
-                  !!activePlugin
+                  automationsViewOpen
                     ? "hidden"
                     : "flex min-h-0 min-w-0 flex-1 flex-col"
                 }
@@ -12674,8 +12629,7 @@ function Workspace({
                   settingsOpen ||
                   inboxViewOpen ||
                   notesViewOpen ||
-                  automationsViewOpen ||
-                  !!activePlugin
+                  automationsViewOpen
                 }
                 inert={
                   searchViewOpen ||
@@ -12683,7 +12637,6 @@ function Workspace({
                   inboxViewOpen ||
                   notesViewOpen ||
                   automationsViewOpen ||
-                  !!activePlugin ||
                   undefined
                 }
               >
@@ -12908,7 +12861,6 @@ function Workspace({
                             !notesViewOpen &&
                             !automationsViewOpen &&
                             !monoViewId &&
-                            !activePlugin &&
                             activeLinkedWorkItemPanel?.sessionId ===
                               panel.sessionId
                           }
@@ -13041,15 +12993,6 @@ function Workspace({
                   onOpenSession={onOpenAutomationSession}
                 />
               ) : null}
-              {activePlugin ? (
-                <PluginSurface
-                  plugin={activePlugin}
-                  cwd={projectCwd}
-                  besideRail={projectRailOpen || compactProjectRail}
-                  onClose={() => setPluginId(null)}
-                  onToggleSidebar={onToggleSidebar}
-                />
-              ) : null}
               {settingsOpen ? (
                 <SettingsView
                   section={settingsSection}
@@ -13082,7 +13025,6 @@ function Workspace({
               inboxViewOpen ||
               notesViewOpen ||
               automationsViewOpen ||
-              !!activePlugin ||
               settingsOpen ||
               monoCovers ? null : (
                 <UsageFooter

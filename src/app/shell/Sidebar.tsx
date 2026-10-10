@@ -318,8 +318,6 @@ type Props = {
   notesActive?: boolean;
   automationsActive?: boolean;
   notesEnabled?: boolean;
-  activePluginId?: string | null;
-  onOpenPlugin?: (id: string) => void;
   onToggleProjectRail?: () => void;
   projectRailOpen?: boolean;
   compactProjectRail?: boolean;
@@ -416,8 +414,6 @@ function SidebarComponent({
   notesActive = false,
   automationsActive = false,
   notesEnabled = true,
-  activePluginId = null,
-  onOpenPlugin,
   onToggleProjectRail,
   projectRailOpen = true,
   compactProjectRail = true,
@@ -786,7 +782,6 @@ function SidebarComponent({
     searchActive ||
     inboxActive ||
     notesActive ||
-    !!activePluginId ||
     automationsActive ||
     settingsOpen;
   // A remembered Mono sits underneath these views; select it only while visible.
@@ -2280,8 +2275,6 @@ function SidebarComponent({
           notesEnabled={notesEnabled}
           onOpenNotes={onOpenNotes}
           notesActive={notesActive}
-          activePluginId={activePluginId}
-          onOpenPlugin={onOpenPlugin}
           onOpenAutomations={onOpenAutomations}
           automationsActive={automationsActive}
           onTogglePanel={onToggleProjectRail}

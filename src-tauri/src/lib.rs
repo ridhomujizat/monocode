@@ -36,8 +36,6 @@ mod notes;
 mod notifications;
 mod pasteboard;
 mod pi_usage;
-mod plugin_ui;
-mod plugins;
 mod project_logo;
 mod pty;
 #[cfg(target_os = "macos")]
@@ -236,18 +234,6 @@ pub fn run() {
     #[cfg(windows)]
     windows::initialize().expect("Failed to initialize Windows process safety");
     let app = tauri::Builder::default()
-        .register_asynchronous_uri_scheme_protocol(plugin_ui::SCHEME, |ctx, request, responder| {
-            // Blocking file IO off the main thread; responses are tiny.
-            let app = ctx.app_handle().clone();
-            std::thread::spawn(move || {
-                let (method, path) = (
-                    request.method().to_string(),
-                    request.uri().path().to_string(),
-                );
-                let root = plugins::plugins_root(&app).unwrap_or_default();
-                responder.respond(plugin_ui::serve(&root, &method, &path));
-            });
-        })
         .plugin(tauri_plugin_process::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_opener::init())
@@ -258,7 +244,6 @@ pub fn run() {
                 .build(),
         )
         .manage(harness::HarnessHost::new())
-        .manage(plugins::PluginProcs::new())
         .manage(pty::PtyHost::new())
         .manage(remote::RemoteConnections::default())
         .manage(window_transfer::WindowTransferState::new())
@@ -529,16 +514,6 @@ pub fn run() {
             notes::notes_delete,
             notes::notes_save_image,
             notes::notes_image_path,
-            plugins::plugin_fetch,
-            plugins::plugin_config_get,
-            plugins::plugin_config_set,
-            plugins::plugins_list,
-            plugins::plugins_dir,
-            plugins::plugin_install,
-            plugins::plugin_uninstall,
-            plugins::plugin_run,
-            plugins::plugin_stop,
-            plugins::plugin_stop_all,
             mono::mono_load,
             mono::mono_read,
             mono::mono_save,
