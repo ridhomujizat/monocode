@@ -6,9 +6,6 @@ import {
   Check,
   CheckCheck,
   CheckCircle,
-  CircleDashed,
-  Clock,
-  Eye,
   ChevronDown,
   CircleDot,
   CircleX,
@@ -158,7 +155,11 @@ import {
   type JiraIssueThread,
   type JiraProject,
 } from "../model/jira";
-import { KerjanTicketActions } from "./KerjanTicketActions";
+import {
+  KerjanStoryContext,
+  KerjanTicketActions,
+  kerjanStatusMark,
+} from "./KerjanTicketActions";
 import {
   KERJAN_CHANGE_EVENT,
   kerjanConnected,
@@ -167,6 +168,7 @@ import {
   kerjanTicketThread,
   peekKerjanTicketDetails,
   peekKerjanTicketThread,
+  kerjanTicketToIssue,
   type KerjanTicketThread,
 } from "../model/kerjan";
 import {
@@ -848,6 +850,22 @@ export function InboxView({
     !!targetSelectionKey && selectedKey === targetSelectionKey;
   const selected =
     selectedByKey ?? (waitingForTarget ? null : visibleItems[0]) ?? null;
+  // An item opened from inside the detail pane that the list may not show.
+  const [openedItem, setOpenedItem] = useState<InboxItem | null>(null);
+  const detailItem = openedItem ?? selected;
+  const openDetailItem = useCallback(
+    (next: InboxItem) => {
+      const key = inboxItemKey(next);
+      if (visibleItems.some((entry) => inboxItemKey(entry) === key)) {
+        setSelectedKey(key);
+        setOpenedItem(null);
+        return;
+      }
+      setOpenedItem(next);
+    },
+    [visibleItems],
+  );
+  useEffect(() => setOpenedItem(null), [source]);
   const updateInboxItem = useCallback((next: InboxItem) => {
     const key = inboxItemKey(next);
     setItems((current) =>
@@ -1096,7 +1114,9 @@ export function InboxView({
                 <li key={key}>
                   <InboxCard
                     item={item}
-                    active={selected != null && key === inboxItemKey(selected)}
+                    active={
+                      detailItem != null && key === inboxItemKey(detailItem)
+                    }
                     logoPath={resolveTabGroupLogo(projectId, logos)}
                     mascotName={resolveTabGroupMascot(projectId, groupMascots)}
                     mascotColor={resolveTabGroupColor(
@@ -1112,6 +1132,7 @@ export function InboxView({
                         updatedAt: item.updatedAt,
                       });
                       setSelectedKey(key);
+                      setOpenedItem(null);
                     }}
                   />
                 </li>
@@ -1197,12 +1218,14 @@ export function InboxView({
         <div className="relative flex min-h-0 min-w-0 flex-1">
           <div className="min-h-0 min-w-0 flex-1">
             <InboxDetailBody
-              item={selected}
+              item={detailItem}
               cwd={cwd}
               projects={projectOptions}
               revision={refresh}
               relatedSessions={
-                selected ? relatedSessionsForInboxItem(selected, sessions) : []
+                detailItem
+                  ? relatedSessionsForInboxItem(detailItem, sessions)
+                  : []
               }
               onDiscuss={() => setDiscussionOpen(true)}
               onStart={onStart}
@@ -1210,15 +1233,16 @@ export function InboxView({
               onRepairChecks={onRepairChecks}
               onOpenSession={onOpenSession}
               onItemChange={updateInboxItem}
+              onOpenItem={openDetailItem}
             />
           </div>
-          {discussionOpen && selected ? (
+          {discussionOpen && detailItem ? (
             <InboxDiscussionPanel
               onOpen={onAsk}
               onRestart={onAskRestart}
               onMount={onAskMount}
-              key={inboxAskKey(selected)}
-              item={selected}
+              key={inboxAskKey(detailItem)}
+              item={detailItem}
               onClose={() => setDiscussionOpen(false)}
             />
           ) : null}
@@ -1449,6 +1473,7 @@ function InboxDetailBody({
   onRepairChecks,
   onOpenSession,
   onItemChange,
+  onOpenItem,
 }: {
   item: InboxItem | null;
   cwd: string;
@@ -1461,6 +1486,8 @@ function InboxDetailBody({
   onRepairChecks?: CiRepairProps["onRepairChecks"];
   onOpenSession?: (sessionId: string) => void | Promise<void>;
   onItemChange?: (item: InboxItem) => void;
+  /** Opens another item in the detail pane, such as a Kerjan Story's Task. */
+  onOpenItem?: (item: InboxItem) => void;
 }) {
   if (!item) {
     return (
@@ -1484,6 +1511,7 @@ function InboxDetailBody({
       onRepairChecks={onRepairChecks}
       onOpenSession={onOpenSession}
       onItemChange={onItemChange}
+      onOpenItem={onOpenItem}
     />
   );
 }
@@ -1495,22 +1523,9 @@ type InboxStatusMark = {
 };
 
 /** Status reads from the glyph first and the color second, so it survives color blindness. */
-const KERJAN_STATUS_MARKS: Record<
-  string,
-  Pick<InboxStatusMark, "Icon" | "className">
-> = {
-  todo: { Icon: CircleDashed, className: "text-content/50" },
-  in_progress: { Icon: Clock, className: "text-amber-400/90" },
-  ready_for_qa: { Icon: Eye, className: "text-sky-400/90" },
-  done: { Icon: CheckCircle, className: "text-emerald-400/90" },
-  canceled: { Icon: CircleX, className: "text-rose-400/90" },
-};
-
 export function inboxStatusMark(item: InboxItem): InboxStatusMark {
   if (item.provider === "kerjan") {
-    const mark =
-      KERJAN_STATUS_MARKS[item.stateType ?? ""] ?? KERJAN_STATUS_MARKS.todo!;
-    return { ...mark, label: item.state };
+    return { ...kerjanStatusMark(item.stateType ?? ""), label: item.state };
   }
   const label = inboxItemStatus(item);
   const pr = item.kind === "pr";
@@ -2055,6 +2070,7 @@ export function InboxDetail({
   onRepairChecks,
   onOpenSession,
   onItemChange,
+  onOpenItem,
 }: {
   item: InboxItem;
   cwd: string;
@@ -2069,6 +2085,8 @@ export function InboxDetail({
   onRepairChecks?: CiRepairProps["onRepairChecks"];
   onOpenSession?: (sessionId: string) => void | Promise<void>;
   onItemChange?: (item: InboxItem) => void;
+  /** Opens another item in the detail pane, such as a Kerjan Story's Task. */
+  onOpenItem?: (item: InboxItem) => void;
 }) {
   const detailLock = useLockOverscroll<HTMLDivElement>();
   const panel = mode === "panel";
@@ -2958,11 +2976,7 @@ export function InboxDetail({
                   </button>
                 ) : null}
                 {kerjan ? (
-                  <KerjanTicketActions
-                    item={item}
-                    revision={revision}
-                    onAddStoryToChat={onStart ? startWith : undefined}
-                  />
+                  <KerjanTicketActions item={item} revision={revision} />
                 ) : null}
                 {panel || kerjan ? null : (
                   <button
@@ -3139,6 +3153,31 @@ export function InboxDetail({
                 ) : (
                   <p className="text-[13px] text-content/45">No description</p>
                 )}
+                {kerjan ? (
+                  <KerjanStoryContext
+                    item={item}
+                    revision={revision}
+                    cwd={markdownCwd}
+                    onAddToChat={onStart ? startWith : undefined}
+                    onOpenTask={
+                      onOpenItem
+                        ? (task, members) =>
+                            onOpenItem(
+                              kerjanTicketToIssue(
+                                task,
+                                new Map(
+                                  members.map((member) => [
+                                    member.id,
+                                    member.name,
+                                  ]),
+                                ),
+                                new Map(),
+                              ),
+                            )
+                        : undefined
+                    }
+                  />
+                ) : null}
                 {panel && isPr ? (
                   <InboxPrChangesGlance
                     diff={prDiff}

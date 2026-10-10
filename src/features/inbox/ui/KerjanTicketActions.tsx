@@ -1,5 +1,14 @@
 import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
-import { ChevronDown } from "../../../shared/ui/icons";
+import {
+  CheckCircle,
+  ChevronDown,
+  CircleDashed,
+  CircleX,
+  Clock,
+  Eye,
+} from "../../../shared/ui/icons";
+import { AgentMarkdown } from "../../sessions/ui/AgentMarkdown";
+import { CollapsibleBody } from "./InboxComments";
 import type { InboxItem } from "../model/githubTasks";
 import {
   KERJAN_STATUS_LABELS,
@@ -18,15 +27,13 @@ const CHIP =
 const OPTION =
   "flex w-full items-center rounded-md px-2 py-1.5 text-left text-[12px] text-content/80 hover:bg-content/10 hover:text-content";
 
-/** Status, assignee and story actions for a Kerjan ticket in the detail pane. */
+/** Status and assignee actions for a Kerjan ticket in the detail pane. */
 export function KerjanTicketActions({
   item,
   revision,
-  onAddStoryToChat,
 }: {
   item: InboxItem;
   revision: number;
-  onAddStoryToChat?: (body: string) => void;
 }) {
   const key = item.identifier ?? "";
   const [ticket, setTicket] = useState<KerjanTicket | null>(null);
@@ -63,20 +70,6 @@ export function KerjanTicketActions({
     try {
       await action();
       setTicket((await kerjanTicketDetails(key)).ticket);
-    } catch (err: unknown) {
-      setError(errorMessage(err));
-    } finally {
-      setBusy(false);
-    }
-  };
-
-  const addStory = async () => {
-    if (!ticket?.story_key || !onAddStoryToChat) return;
-    setBusy(true);
-    setError(null);
-    try {
-      const story = await kerjanTicketDetails(ticket.story_key);
-      onAddStoryToChat(kerjanStoryChatBody(story.ticket));
     } catch (err: unknown) {
       setError(errorMessage(err));
     } finally {
@@ -135,21 +128,199 @@ export function KerjanTicketActions({
           onPick={(id) => void run(() => setKerjanAssignee(item, id))}
         />
       ) : null}
-      {task && ticket.story_key && onAddStoryToChat ? (
-        <button
-          type="button"
-          disabled={busy}
-          onClick={() => void addStory()}
-          title={`${ticket.story_key} ${ticket.story_title ?? ""}`.trim()}
-          className={CHIP}
-        >
-          Add story to chat
-        </button>
-      ) : null}
       {error ? (
         <span className="basis-full text-[12px] text-red-400/90">{error}</span>
       ) : null}
     </>
+  );
+}
+
+const STATUS_MARKS: Record<
+  string,
+  { Icon: typeof CircleDashed; className: string }
+> = {
+  todo: { Icon: CircleDashed, className: "text-content/50" },
+  in_progress: { Icon: Clock, className: "text-amber-400/90" },
+  ready_for_qa: { Icon: Eye, className: "text-sky-400/90" },
+  done: { Icon: CheckCircle, className: "text-emerald-400/90" },
+  canceled: { Icon: CircleX, className: "text-rose-400/90" },
+};
+
+export function kerjanStatusMark(status: string) {
+  return STATUS_MARKS[status] ?? STATUS_MARKS.todo!;
+}
+
+/**
+ * For a Task, its parent Story and that Story's Tasks; for a Story, its own
+ * Tasks. Clicking a Task opens it in the detail pane.
+ */
+export function KerjanStoryContext({
+  item,
+  revision,
+  cwd,
+  onAddToChat,
+  onOpenTask,
+}: {
+  item: InboxItem;
+  revision: number;
+  cwd: string;
+  onAddToChat?: (body: string) => void;
+  onOpenTask?: (task: KerjanTicket, members: readonly KerjanMember[]) => void;
+}) {
+  const key = item.identifier ?? "";
+  const [ticket, setTicket] = useState<KerjanTicket | null>(null);
+  const [story, setStory] = useState<KerjanTicket | null>(null);
+  const [members, setMembers] = useState<KerjanMember[]>([]);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    setError(null);
+    void Promise.all([
+      kerjanTicketDetails(key, { force: true }),
+      listKerjanMembers().catch(() => []),
+    ])
+      .then(async ([{ ticket: next }, nextMembers]) => {
+        const parent =
+          next.kind === "story"
+            ? next
+            : next.story_key
+              ? (await kerjanTicketDetails(next.story_key, { force: true }))
+                  .ticket
+              : null;
+        if (cancelled) return;
+        setTicket(next);
+        setStory(parent);
+        setMembers(nextMembers);
+      })
+      .catch((err: unknown) => {
+        if (!cancelled) setError(errorMessage(err));
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [key, revision]);
+
+  if (error) {
+    return <p className="text-[12px] text-red-400/90">{error}</p>;
+  }
+  if (!ticket || !story) return null;
+  const ownStory = ticket.kind === "story";
+  const description = story.description?.trim() ?? "";
+  const tasks = story.tasks ?? [];
+
+  return (
+    <section className="flex flex-col gap-2 rounded-lg border border-stroke px-3 py-2.5">
+      {ownStory ? null : (
+        <>
+          <header className="flex min-w-0 items-center gap-2 text-[12px] text-content/50">
+            <span className="shrink-0 text-content/70">Parent story</span>
+            <span aria-hidden>·</span>
+            <span className="min-w-0 truncate">
+              {story.key} {story.title}
+            </span>
+            <span className="shrink-0">
+              · {KERJAN_STATUS_LABELS[story.status] ?? story.status}
+            </span>
+            {onAddToChat ? (
+              <button
+                type="button"
+                onClick={() => onAddToChat(kerjanStoryChatBody(story))}
+                className="ml-auto shrink-0 hover:text-content"
+              >
+                Add to chat
+              </button>
+            ) : null}
+          </header>
+          {description ? (
+            <CollapsibleBody>
+              <AgentMarkdown
+                className="inbox-comment-md"
+                text={description}
+                cwd={cwd}
+                allowRemoteMedia
+              />
+            </CollapsibleBody>
+          ) : (
+            <p className="text-[12px] text-content/45">No description</p>
+          )}
+        </>
+      )}
+      {tasks.length > 0 ? (
+        <div className={ownStory ? "" : "border-t border-stroke pt-2"}>
+          <p className="mb-1 text-[12px] text-content/70">
+            Tasks{" "}
+            <span className="text-content/45">
+              {tasks.filter((task) => task.status === "done").length}/
+              {tasks.length} done
+            </span>
+          </p>
+          <ul className="flex flex-col">
+            {tasks.map((task) => (
+              <li key={task.key}>
+                <KerjanTaskRow
+                  task={task}
+                  current={task.key === ticket.key}
+                  assignee={
+                    members.find((member) => member.id === task.assignee_id)
+                      ?.name ?? ""
+                  }
+                  onOpen={
+                    onOpenTask ? () => onOpenTask(task, members) : undefined
+                  }
+                />
+              </li>
+            ))}
+          </ul>
+        </div>
+      ) : null}
+    </section>
+  );
+}
+
+function KerjanTaskRow({
+  task,
+  current,
+  assignee,
+  onOpen,
+}: {
+  task: KerjanTicket;
+  current: boolean;
+  assignee: string;
+  onOpen?: () => void;
+}) {
+  const mark = kerjanStatusMark(task.status);
+  const label = KERJAN_STATUS_LABELS[task.status] ?? task.status;
+  return (
+    <button
+      type="button"
+      disabled={current || !onOpen}
+      onClick={onOpen}
+      title={`${label} · ${task.key} ${task.title}`}
+      className={`flex w-full min-w-0 items-center gap-2 rounded-md px-1.5 py-1 text-left text-[12px] ${
+        current
+          ? "bg-content/5 text-content"
+          : "text-content/75 hover:bg-content/5 hover:text-content"
+      }`}
+    >
+      <mark.Icon
+        className={`size-3 shrink-0 ${mark.className}`}
+        strokeWidth={1.75}
+      />
+      <span className="shrink-0 tabular-nums text-content/45">{task.key}</span>
+      <span
+        className={`min-w-0 flex-1 truncate ${
+          task.status === "canceled" ? "line-through text-content/45" : ""
+        }`}
+      >
+        {task.title}
+      </span>
+      {assignee ? (
+        <span className="max-w-28 shrink-0 truncate text-content/45">
+          {assignee}
+        </span>
+      ) : null}
+    </button>
   );
 }
 

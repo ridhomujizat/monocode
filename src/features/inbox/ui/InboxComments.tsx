@@ -528,7 +528,7 @@ function InboxComment({
 const CLAMPED_BODY_PX = 180;
 
 /** Bot reviews and long write-ups start clamped so the timeline stays scannable. */
-function CollapsibleBody({ children }: { children: ReactNode }) {
+export function CollapsibleBody({ children }: { children: ReactNode }) {
   const inner = useRef<HTMLDivElement>(null);
   const [overflows, setOverflows] = useState(false);
   const [expanded, setExpanded] = useState(false);
