@@ -21,11 +21,13 @@ export function InboxMiniCard({ card, onDismiss }: Props) {
       ? "Linear"
       : card.provider === "jira"
         ? "Jira"
-        : card.provider === "gitlab"
-          ? "GitLab"
-          : card.provider === "azuredevops"
-            ? "ADO"
-            : "GitHub";
+        : card.provider === "kerjan"
+          ? "Kerjan"
+          : card.provider === "gitlab"
+            ? "GitLab"
+            : card.provider === "azuredevops"
+              ? "ADO"
+              : "GitHub";
 
   return (
     <div className="px-3 pt-2">

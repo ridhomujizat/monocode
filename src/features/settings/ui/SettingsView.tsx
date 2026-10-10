@@ -41,6 +41,7 @@ import {
 import { Popover } from "../../../shared/ui/Popover";
 import { SecondaryButton } from "../../../shared/ui/SecondaryButton";
 import { JiraSettings } from "./JiraSettings";
+import { KerjanSettings } from "./KerjanSettings";
 import { GradientBlurBackground } from "./GradientBlurBackground";
 import { McpSettings } from "./McpSettings";
 import { InboxProviderMark } from "../../inbox/ui/InboxProviderMark";
@@ -1260,6 +1261,19 @@ function InboxPage({
         description="Jira Cloud issues from the projects you pick."
       >
         <JiraSettings />
+      </Group>
+
+      <Group
+        id="kerjan"
+        title={
+          <span className="flex items-center gap-2">
+            <InboxProviderMark provider="kerjan" className="size-4 shrink-0" />
+            Kerjan
+          </span>
+        }
+        description="Your Kerjan tasks and the Stories of active Sprints."
+      >
+        <KerjanSettings />
       </Group>
 
       <Group

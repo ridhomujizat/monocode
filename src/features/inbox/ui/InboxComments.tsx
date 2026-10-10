@@ -114,6 +114,8 @@ type Props = {
   provider: InboxProvider;
   replyMode?: "thread" | "parent";
   onReply?: (target: InboxReplyTarget) => void;
+  /** Starts a chat seeded with one comment. */
+  onAddToChat?: (comment: InboxComment) => void;
 };
 
 export function InboxComments({
@@ -124,6 +126,7 @@ export function InboxComments({
   provider,
   replyMode,
   onReply,
+  onAddToChat,
 }: Props) {
   const commitCount = thread?.commits?.length ?? 0;
   if (
@@ -157,11 +160,13 @@ export function InboxComments({
       ? "Linear"
       : provider === "jira"
         ? "Jira"
-        : provider === "gitlab"
-          ? "GitLab"
-          : provider === "azuredevops"
-            ? "ADO"
-            : "GitHub";
+        : provider === "kerjan"
+          ? "Kerjan"
+          : provider === "gitlab"
+            ? "GitLab"
+            : provider === "azuredevops"
+              ? "ADO"
+              : "GitHub";
 
   return (
     <section className="flex flex-col gap-3 border-t border-stroke pt-5">
@@ -224,6 +229,7 @@ export function InboxComments({
                 provider={provider}
                 replyMode={replyMode}
                 onReply={onReply}
+                onAddToChat={onAddToChat}
               />
             </li>
           ))}
@@ -350,6 +356,7 @@ function InboxComment({
   timeline = false,
   replyMode,
   onReply,
+  onAddToChat,
 }: {
   comment: InboxComment;
   cwd: string;
@@ -359,6 +366,7 @@ function InboxComment({
   timeline?: boolean;
   replyMode?: "thread" | "parent";
   onReply?: (target: InboxReplyTarget) => void;
+  onAddToChat?: (comment: InboxComment) => void;
 }) {
   const time = formatRelativeTime(comment.createdAt);
   const review = githubReviewStateLabel(comment.state);
@@ -452,6 +460,18 @@ function InboxComment({
             </button>
           </span>
         ) : null}
+        {onAddToChat && hasBody ? (
+          <span className="flex items-center gap-2">
+            <span aria-hidden>·</span>
+            <button
+              type="button"
+              onClick={() => onAddToChat(comment)}
+              className="hover:text-content"
+            >
+              Add to chat
+            </button>
+          </span>
+        ) : null}
       </header>
       {hasBody ? (
         <div className={nested ? "mt-2" : "px-3 py-2.5"}>
@@ -488,6 +508,7 @@ function InboxComment({
                 nested
                 replyMode={replyMode}
                 onReply={onReply}
+                onAddToChat={onAddToChat}
               />
             </div>
           ))}

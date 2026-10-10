@@ -61,6 +61,7 @@ export class InboxNotificationTracker {
       "gitlab",
       "linear",
       "jira",
+      "kerjan",
       "azuredevops",
     ] as const) {
       if (!failed.has(provider)) this.primed.add(provider);

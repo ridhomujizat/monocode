@@ -17,6 +17,7 @@ import {
   loadHiddenJiraProjectIds,
   type JiraIssue,
 } from "./jira";
+import { clearKerjanCache, kerjanConnected, listKerjanIssues } from "./kerjan";
 import {
   clearGitlabCache,
   gitlabConnected,
@@ -44,7 +45,7 @@ import { recordInboxSelfActivity } from "./inboxSelfActivity";
 export type GithubTaskKind = "issue" | "pr";
 export type GithubPrAction =
   "merge" | "squash" | "rebase" | "draft" | "ready" | "close" | "reopen";
-export type InboxKind = GithubTaskKind | "linear" | "jira";
+export type InboxKind = GithubTaskKind | "linear" | "jira" | "kerjan";
 
 export type GithubLabel = {
   name: string;
@@ -73,7 +74,14 @@ export type GithubWorkItem = {
 };
 
 export type InboxProvider =
-  "github" | "linear" | "jira" | "gitlab" | "azuredevops";
+  "github" | "linear" | "jira" | "kerjan" | "gitlab" | "azuredevops";
+
+/** Providers whose items are tracker tickets rather than repository issues. */
+export function isTrackerProvider(
+  provider: InboxProvider | undefined,
+): boolean {
+  return provider === "linear" || provider === "jira" || provider === "kerjan";
+}
 
 export type InboxItem = Omit<GithubWorkItem, "kind"> & {
   kind: InboxKind;
@@ -157,6 +165,8 @@ export type GithubWorkItemQuery = {
 export type InboxQuery = Omit<GithubWorkItemQuery, "kind"> & {
   linearHiddenTeamIds?: string[];
   jiraHiddenProjectIds?: string[];
+  /** Kerjan keeps its own default: the member's Tasks. */
+  kerjanAssignedToMe?: boolean;
 };
 
 export type InboxProviderErrors = Partial<Record<InboxProvider, string>>;
@@ -212,6 +222,7 @@ function freshEnough(key: string, maxAgeMs: number | undefined): boolean {
 export function clearInboxCache() {
   inboxCacheGeneration += 1;
   clearJiraCache();
+  clearKerjanCache();
   clearKnownInboxItems();
   inboxListCache = null;
   inboxListInflight.clear();
@@ -240,7 +251,8 @@ export function inboxListCacheKey(
     .join("|");
   const teams = [...(query.linearHiddenTeamIds ?? [])].sort().join(",");
   const jiraProjects = [...(query.jiraHiddenProjectIds ?? [])].sort().join(",");
-  return `${query.assignedToMe ? 1 : 0}:${query.state}:${paths}:${teams}:${jiraProjects}`;
+  const kerjan = (query.kerjanAssignedToMe ?? query.assignedToMe) ? 1 : 0;
+  return `${query.assignedToMe ? 1 : 0}:${query.state}:${paths}:${teams}:${jiraProjects}:${kerjan}`;
 }
 
 export function peekInboxList(
@@ -790,6 +802,19 @@ async function fetchInboxItems(
     errors.jira = inboxErrorMessage(error);
   }
 
+  let kerjanItems: InboxItem[] = [];
+  try {
+    const kerjan = await kerjanConnected();
+    if (kerjan.connected) {
+      kerjanItems = await listKerjanIssues({
+        assignedToMe: query.kerjanAssignedToMe ?? query.assignedToMe,
+        memberId: kerjan.memberId,
+      });
+    }
+  } catch (error) {
+    errors.kerjan = inboxErrorMessage(error);
+  }
+
   let gitlabItems: InboxItem[] = [];
   if ((await gitlabConnected()).connected) {
     const gitlab = await fetchRepositoryInboxItems(
@@ -820,6 +845,7 @@ async function fetchInboxItems(
         ...github.items,
         ...linearItems,
         ...jiraItems,
+        ...kerjanItems,
         ...gitlabItems,
         ...azureDevOpsItems,
       ],
@@ -1087,6 +1113,11 @@ export function inboxIdentityKey(item: {
     if (identity) return identity.toLowerCase();
     return `linear:${item.number}`;
   }
+  if (item.provider === "kerjan") {
+    const identity = item.identifier?.trim() || item.id?.trim();
+    if (identity) return identity.toLowerCase();
+    return `kerjan:${item.number}`;
+  }
   if (item.provider === "jira") {
     // The numeric id survives an issue moving projects; its key does not.
     const identity = item.id?.trim() || item.identifier?.trim();
@@ -1168,6 +1199,10 @@ export function inboxItemStatus(item: {
   if (item.kind === "jira") {
     return item.stateType?.trim().toLowerCase() === "done" ? "Closed" : "Open";
   }
+  if (item.kind === "kerjan") {
+    const type = item.stateType?.trim().toLowerCase();
+    return type === "done" || type === "canceled" ? "Closed" : "Open";
+  }
   if (item.draft) return "Draft";
   if (item.state === "merged") return "Merged";
   if (item.state === "closed") return "Closed";
@@ -1186,7 +1221,9 @@ export function matchesInboxQuery(item: InboxItem, query: string): boolean {
         ? "linear issue"
         : item.kind === "jira"
           ? "jira issue"
-          : "issue";
+          : item.kind === "kerjan"
+            ? "kerjan ticket task story"
+            : "issue";
   const haystack = [
     item.title,
     item.repo,
@@ -1218,18 +1255,24 @@ export function inboxItemRef(item: {
   number: number;
   identifier?: string;
 }): string {
-  if (item.provider === "linear" || item.provider === "jira") {
+  if (isTrackerProvider(item.provider)) {
     return item.identifier?.trim() || `#${item.number}`;
   }
   return `#${item.number}`;
 }
 
 export function inboxStartDraft(item: InboxItem, body?: string): string {
-  if (item.provider === "linear" || item.provider === "jira") {
-    const provider = item.provider === "jira" ? "Jira" : "Linear";
+  if (isTrackerProvider(item.provider)) {
+    const provider =
+      item.provider === "jira"
+        ? "Jira"
+        : item.provider === "kerjan"
+          ? "Kerjan"
+          : "Linear";
+    const noun = item.provider === "kerjan" ? "ticket" : "issue";
     const id = item.identifier?.trim() || `${provider} #${item.number}`;
     const title = item.title.trim() || id;
-    const lines = [`Work on this ${provider} issue:`, "", `${id} ${title}`];
+    const lines = [`Work on this ${provider} ${noun}:`, "", `${id} ${title}`];
     const url = item.url.trim();
     if (url) lines.push(url);
     const description = body?.trim();
@@ -1275,7 +1318,7 @@ export function inboxComposerCard(
   item: InboxItem,
   body?: string,
 ): InboxComposerCard {
-  const tracker = item.provider === "linear" || item.provider === "jira";
+  const tracker = isTrackerProvider(item.provider);
   return {
     provider: item.provider,
     kind: item.kind,

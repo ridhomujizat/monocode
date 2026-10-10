@@ -20,6 +20,7 @@ mod harness_updates;
 mod inbox_media;
 mod jira;
 mod jsonc;
+mod kerjan;
 mod linear;
 mod link_preview;
 #[cfg(target_os = "macos")]
@@ -397,6 +398,9 @@ pub fn run() {
             jira::jira_issue_details,
             jira::jira_issue_thread,
             jira::jira_issue_comment,
+            kerjan::kerjan_status,
+            kerjan::kerjan_set_config,
+            kerjan::kerjan_call,
             link_preview::fetch_link_preview,
             fs::git_branches,
             fs::git_checkout,

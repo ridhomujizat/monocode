@@ -678,6 +678,8 @@ import { inboxAskKey, inboxAskPrompt } from "../features/inbox/model/inboxAsk";
 import {
   githubWorkItemThread,
   inboxComposerCard,
+  inboxItemRef,
+  isTrackerProvider,
   type InboxItem,
 } from "../features/inbox/model/githubTasks";
 import {
@@ -2705,10 +2707,7 @@ function Workspace({
         const cwd =
           item.projectPath || active?.cwd || sessionDefaults?.cwd || projectCwd;
         setSidebarTab("sessions", cwd);
-        const ref =
-          item.provider === "linear" || item.provider === "jira"
-            ? item.identifier?.trim() || `#${item.number}`
-            : `#${item.number}`;
+        const ref = inboxItemRef(item);
         const linkedWorkItem = linkedWorkItemFromInboxItem(item);
         const session = {
           ...newDefaultSession(cwd, sessionDefaults?.runtimeMode),
@@ -4518,7 +4517,7 @@ function Workspace({
               ? candidate
               : await invoke<string>("default_cwd");
           const description =
-            item.provider === "linear" || item.provider === "jira"
+            isTrackerProvider(item.provider)
               ? await inboxTrackerDescription(item)
               : item.provider === "gitlab" &&
                   (item.kind === "issue" || item.kind === "pr")

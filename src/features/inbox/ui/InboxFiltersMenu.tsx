@@ -11,6 +11,7 @@ import {
   type LinearProjectOption,
 } from "../model/inboxFilters";
 import type { JiraProject } from "../model/jira";
+import { KERJAN_STATUS_LABELS } from "../model/kerjan";
 import type { LinearTeam } from "../model/linear";
 import { Popover } from "../../../shared/ui/Popover";
 import { ProjectLogoIcon } from "../../projects/ui/ProjectLogoIcon";
@@ -28,6 +29,7 @@ type Props = {
   y: number;
   projects: ProjectOption[];
   linearProjects: LinearProjectOption[];
+  kerjanSprints: LinearProjectOption[];
   linearTeams: LinearTeam[];
   hiddenLinearTeamIds: string[];
   jiraProjects: JiraProject[];
@@ -71,6 +73,7 @@ export function InboxFiltersMenu({
   y,
   projects,
   linearProjects,
+  kerjanSprints,
   linearTeams,
   hiddenLinearTeamIds,
   jiraProjects,
@@ -93,6 +96,10 @@ export function InboxFiltersMenu({
   const tracker = isTrackerSource(source);
 
   const toggleAssigned = () => {
+    if (source === "kerjan") {
+      onChange({ ...filters, kerjanEveryone: !filters.kerjanEveryone });
+      return;
+    }
     onChange({ ...filters, assignedToMe: !filters.assignedToMe });
   };
 
@@ -131,6 +138,16 @@ export function InboxFiltersMenu({
     onChange({ ...filters, hiddenLinearProjects: [...next] });
   };
 
+  const toggleKerjan = (
+    key: "kerjanStatuses" | "kerjanSprints",
+    id: string,
+  ) => {
+    const next = new Set(filters[key]);
+    if (next.has(id)) next.delete(id);
+    else next.add(id);
+    onChange({ ...filters, [key]: [...next] });
+  };
+
   const setTime = (time: InboxTimeFilter) => {
     onChange({ ...filters, time });
   };
@@ -160,16 +177,29 @@ export function InboxFiltersMenu({
             ? "Needs attention"
             : "Assigned to me"
         }
-        checked={filters.assignedToMe}
+        checked={
+          source === "kerjan" ? !filters.kerjanEveryone : filters.assignedToMe
+        }
         onClick={toggleAssigned}
       />
 
       <SectionLabel>Status</SectionLabel>
-      <FilterItem
-        label="Open"
-        checked={filters.status.open}
-        onClick={() => toggleStatus("open")}
-      />
+      {source === "kerjan" ? (
+        Object.entries(KERJAN_STATUS_LABELS).map(([status, label]) => (
+          <FilterItem
+            key={status}
+            label={label}
+            checked={filters.kerjanStatuses.includes(status)}
+            onClick={() => toggleKerjan("kerjanStatuses", status)}
+          />
+        ))
+      ) : (
+        <FilterItem
+          label="Open"
+          checked={filters.status.open}
+          onClick={() => toggleStatus("open")}
+        />
+      )}
       {!tracker ? (
         <FilterItem
           label="Draft"
@@ -177,11 +207,13 @@ export function InboxFiltersMenu({
           onClick={() => toggleStatus("draft")}
         />
       ) : null}
-      <FilterItem
-        label="Closed"
-        checked={filters.status.closed}
-        onClick={() => toggleStatus("closed")}
-      />
+      {source !== "kerjan" ? (
+        <FilterItem
+          label="Closed"
+          checked={filters.status.closed}
+          onClick={() => toggleStatus("closed")}
+        />
+      ) : null}
       {!tracker ? (
         <FilterItem
           label="Merged"
@@ -242,6 +274,20 @@ export function InboxFiltersMenu({
               label={project.name}
               checked={!hiddenLinearProjects.has(project.id)}
               onClick={() => toggleLinearProject(project.id)}
+            />
+          ))}
+        </>
+      ) : null}
+
+      {source === "kerjan" && kerjanSprints.length > 0 ? (
+        <>
+          <SectionLabel>Sprints</SectionLabel>
+          {kerjanSprints.map((sprint) => (
+            <FilterItem
+              key={sprint.id}
+              label={sprint.name}
+              checked={filters.kerjanSprints.includes(sprint.id)}
+              onClick={() => toggleKerjan("kerjanSprints", sprint.id)}
             />
           ))}
         </>

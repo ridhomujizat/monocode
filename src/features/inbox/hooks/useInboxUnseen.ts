@@ -179,6 +179,7 @@ export function useInboxActivity(
       const filters = pruneInboxFilters(loadInboxFilters(), projectPaths);
       const query: InboxQuery = {
         assignedToMe: filters.assignedToMe,
+        kerjanAssignedToMe: !filters.kerjanEveryone,
         state: inboxFetchState(filters),
         search: "",
         linearHiddenTeamIds: loadHiddenLinearTeamIds(),
