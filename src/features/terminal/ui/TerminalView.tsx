@@ -113,11 +113,18 @@ function terminalTheme(light: boolean) {
   };
 }
 
+/**
+ * Nerd fonts go first so powerline/CLI prompt glyphs render (Ghostty-style);
+ * machines without one installed fall through to the --font-terminal stack.
+ */
+const NERD_FONTS = ['"Hack Nerd Font Mono"', '"0xProto Nerd Font Mono"'];
+
 function terminalFont(): string {
   const fromCss = getComputedStyle(document.documentElement)
     .getPropertyValue("--font-terminal")
     .trim();
-  return fromCss || "ui-monospace, SFMono-Regular, Menlo, Monaco, monospace";
+  const base = fromCss || "ui-monospace, SFMono-Regular, Menlo, Monaco, monospace";
+  return `${NERD_FONTS.join(", ")}, ${base}`;
 }
 
 /**

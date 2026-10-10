@@ -182,7 +182,7 @@ it("does not hold a different terminal behind another one's teardown", async () 
   }
 });
 
-it("uses the terminal-specific font stack", async () => {
+it("puts the local Nerd Fonts ahead of the terminal-specific font stack", async () => {
   const { host, root } = setup();
   const stack = '"Test Nerd Font", monospace';
   document.documentElement.style.setProperty("--font-terminal", stack);
@@ -192,7 +192,9 @@ it("uses the terminal-specific font stack", async () => {
         createElement(TerminalView, { id: "font", cwd: "/tmp", active: true }),
       );
     });
-    expect(xterm.options[0]?.fontFamily).toBe(stack);
+    expect(xterm.options[0]?.fontFamily).toBe(
+      `"Hack Nerd Font Mono", "0xProto Nerd Font Mono", ${stack}`,
+    );
   } finally {
     await act(async () => {
       root.unmount();
