@@ -6,7 +6,10 @@ import {
   type InboxProvider,
 } from "./githubTasks";
 import { normalizeProjectPath } from "../../projects/model/recents";
-import { timeFilterStart, type SessionTimeFilter } from "../../sessions/model/sessionFilters";
+import {
+  timeFilterStart,
+  type SessionTimeFilter,
+} from "../../sessions/model/sessionFilters";
 
 export type InboxTimeFilter = SessionTimeFilter;
 
@@ -22,6 +25,12 @@ export type InboxFilters = {
   hiddenProjects: string[];
   /** Linear project ids to hide. `LINEAR_NO_PROJECT` stands for issues outside every project. */
   hiddenLinearProjects: string[];
+  /** Kerjan lists the member's own Tasks unless this is set. */
+  kerjanEveryone: boolean;
+  /** Kerjan Sprint ids to show; empty shows every Sprint. `LINEAR_NO_PROJECT` is the Backlog. */
+  kerjanSprints: string[];
+  /** Kerjan statuses to show; empty shows all but Canceled. Kerjan ignores `status`. */
+  kerjanStatuses: string[];
   hiddenKinds: InboxKind[];
   time: InboxTimeFilter;
   status: InboxStatusFilter;
@@ -49,6 +58,9 @@ export const DEFAULT_INBOX_FILTERS: InboxFilters = {
   assignedToMe: false,
   hiddenProjects: [],
   hiddenLinearProjects: [],
+  kerjanEveryone: false,
+  kerjanSprints: [],
+  kerjanStatuses: [],
   hiddenKinds: [],
   time: "all",
   status: DEFAULT_INBOX_STATUS_FILTER,
@@ -68,6 +80,7 @@ export const INBOX_SOURCE_LABELS: Record<InboxSource, string> = {
   github: "GitHub",
   linear: "Linear",
   jira: "Jira",
+  kerjan: "Kerjan",
   gitlab: "GitLab",
   azuredevops: "ADO",
 };
@@ -79,6 +92,7 @@ export function visibleInboxSources(
   if (connections.github !== false) sources.push("github");
   if (connections.linear !== false) sources.push("linear");
   if (connections.jira !== false) sources.push("jira");
+  if (connections.kerjan !== false) sources.push("kerjan");
   if (connections.gitlab !== false) sources.push("gitlab");
   if (connections.azuredevops !== false) sources.push("azuredevops");
   return sources;
@@ -91,6 +105,7 @@ export function connectableInboxSources(
   if (connections.github === false) sources.push("github");
   if (connections.linear === false) sources.push("linear");
   if (connections.jira === false) sources.push("jira");
+  if (connections.kerjan === false) sources.push("kerjan");
   if (connections.gitlab === false) sources.push("gitlab");
   if (connections.azuredevops === false) sources.push("azuredevops");
   return sources;
@@ -98,7 +113,7 @@ export function connectableInboxSources(
 
 /** Account-wide issue trackers: no local repos, no PRs, no draft/merged states. */
 export function isTrackerSource(source?: InboxSource): boolean {
-  return source === "linear" || source === "jira";
+  return source === "linear" || source === "jira" || source === "kerjan";
 }
 
 export function resolveInboxSource(
@@ -117,6 +132,7 @@ const UNKNOWN_CONNECTIONS: InboxSourceConnections = {
   github: null,
   linear: null,
   jira: null,
+  kerjan: null,
   gitlab: null,
   azuredevops: null,
 };
@@ -126,6 +142,7 @@ export function loadInboxSource(): InboxSource {
     const raw = localStorage.getItem(SOURCE_KEY);
     return raw === "linear" ||
       raw === "jira" ||
+      raw === "kerjan" ||
       raw === "gitlab" ||
       raw === "azuredevops"
       ? raw
@@ -161,6 +178,7 @@ export function loadInboxConnections(): InboxSourceConnections {
       github: connectFlag(record.github),
       linear: connectFlag(record.linear),
       jira: connectFlag(record.jira),
+      kerjan: connectFlag(record.kerjan),
       gitlab: connectFlag(record.gitlab),
       azuredevops: connectFlag(record.azuredevops),
     };
@@ -195,6 +213,9 @@ export function loadInboxFilters(): InboxFilters {
             (id): id is string => typeof id === "string" && id.length > 0,
           )
         : [],
+      kerjanEveryone: parsed.kerjanEveryone === true,
+      kerjanSprints: stringList(parsed.kerjanSprints),
+      kerjanStatuses: stringList(parsed.kerjanStatuses),
       hiddenKinds: Array.isArray(parsed.hiddenKinds)
         ? parsed.hiddenKinds.filter(isGithubInboxKind)
         : [],
@@ -241,6 +262,14 @@ export function hasActiveInboxFilters(
   /** Same for Jira projects. */
   hiddenJiraProjectIds: readonly string[] = [],
 ): boolean {
+  if (source === "kerjan") {
+    return (
+      filters.kerjanEveryone ||
+      filters.kerjanSprints.length > 0 ||
+      filters.kerjanStatuses.length > 0 ||
+      filters.time !== "all"
+    );
+  }
   const statusActive = isTrackerSource(source)
     ? filters.status.open || filters.status.closed
     : filters.status.open ||
@@ -253,11 +282,37 @@ export function hasActiveInboxFilters(
     (source === "jira" && hiddenJiraProjectIds.length > 0) ||
     (source === "linear"
       ? filters.hiddenLinearProjects.length > 0
-      : source !== "jira" && filters.hiddenProjects.length > 0) ||
+      : !isTrackerSource(source) && filters.hiddenProjects.length > 0) ||
     (isTrackerSource(source) ? false : filters.hiddenKinds.length > 0) ||
     filters.time !== "all" ||
     statusActive
   );
+}
+
+function stringList(value: unknown): string[] {
+  return Array.isArray(value)
+    ? value.filter(
+        (id): id is string => typeof id === "string" && id.length > 0,
+      )
+    : [];
+}
+
+/** Selected Sprints and statuses narrow the list; nothing selected hides only Canceled. */
+export function filterKerjanItems(
+  items: readonly InboxItem[],
+  filters: Pick<InboxFilters, "kerjanSprints" | "kerjanStatuses">,
+): InboxItem[] {
+  const sprints = new Set(filters.kerjanSprints);
+  const statuses = new Set(filters.kerjanStatuses);
+  return items.filter((item) => {
+    if (item.provider !== "kerjan") return true;
+    const status = item.stateType ?? "";
+    if (statuses.size > 0 ? !statuses.has(status) : status === "canceled") {
+      return false;
+    }
+    if (sprints.size === 0) return true;
+    return sprints.has(item.projectId?.trim() || LINEAR_NO_PROJECT);
+  });
 }
 
 /** No status box checked means "no restriction", so the fetch has to widen with it. */
@@ -289,11 +344,13 @@ export function filterInboxByProject(
  */
 export function linearProjectOptions(
   items: readonly InboxItem[],
+  /** Kerjan keeps its Sprint in the same fields. */
+  provider: "linear" | "kerjan" = "linear",
 ): LinearProjectOption[] {
   const byId = new Map<string, string>();
   let unassigned = false;
   for (const item of items) {
-    if (item.provider !== "linear") continue;
+    if (item.provider !== provider) continue;
     const id = item.projectId?.trim() ?? "";
     if (!id) {
       unassigned = true;
@@ -304,7 +361,12 @@ export function linearProjectOptions(
   const options = [...byId]
     .map(([id, name]) => ({ id, name }))
     .sort((a, b) => a.name.localeCompare(b.name));
-  if (unassigned) options.push({ id: LINEAR_NO_PROJECT, name: "No project" });
+  if (unassigned) {
+    options.push({
+      id: LINEAR_NO_PROJECT,
+      name: provider === "kerjan" ? "No sprint" : "No project",
+    });
+  }
   return options;
 }
 
@@ -384,9 +446,12 @@ export function applyInboxFilters(
     filterInboxByStatus(
       filterInboxByTime(
         filterInboxByKind(
-          filterInboxByLinearProject(
-            filterInboxByProject(scoped, hiddenProjects),
-            filters.hiddenLinearProjects,
+          filterKerjanItems(
+            filterInboxByLinearProject(
+              filterInboxByProject(scoped, hiddenProjects),
+              filters.hiddenLinearProjects,
+            ),
+            filters,
           ),
           hiddenKinds,
         ),
@@ -404,6 +469,8 @@ export function statusFilterForSource(
   source?: InboxSource,
 ): InboxStatusFilter {
   if (!isTrackerSource(source)) return status;
+  // Kerjan filters on its own statuses through `kerjanStatuses`.
+  if (source === "kerjan") return DEFAULT_INBOX_STATUS_FILTER;
   return {
     open: status.open,
     closed: status.closed,

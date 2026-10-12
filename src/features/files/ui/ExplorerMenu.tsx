@@ -20,6 +20,8 @@ type MenuAction = {
   disabled?: boolean;
   danger?: boolean;
   checked?: boolean;
+  /** Submenu affordance: chevron pushed to the trailing edge. */
+  arrow?: boolean;
 };
 
 export type ExplorerMenuItem =
@@ -36,6 +38,14 @@ type Props = (
   header?: ReactNode;
   width?: number;
   onPick: (id: string) => void;
+  /**
+   * Pick on press instead of release. Submenus nested beside another menu
+   * need this: the parent's outside-press dismissal would otherwise unmount
+   * the item before its click fires.
+   */
+  pickOnMouseDown?: boolean;
+  /** Hover on an item; used by callers that cascade submenus themselves. */
+  onItemHover?: (id: string) => void;
   onClose: () => void;
   onMouseEnter?: () => void;
   onMouseLeave?: () => void;
@@ -68,6 +78,8 @@ export function ExplorerMenu({
   header,
   width = MENU_WIDTH,
   onPick,
+  pickOnMouseDown,
+  onItemHover,
   onClose,
   onMouseEnter,
   onMouseLeave,
@@ -204,9 +216,19 @@ export function ExplorerMenu({
             : undefined
         }
         disabled={item.disabled}
+        onPointerDown={(e) => {
+          // Pick before any outer menu's pointerdown dismissal can
+          // unmount a nested submenu out from under the press.
+          if (pickOnMouseDown && !item.disabled && !item.submenu?.length) {
+            e.preventDefault();
+            onPick(item.id);
+            onClose();
+          }
+        }}
         onMouseDown={(e) => e.preventDefault()}
         onMouseEnter={(e) => {
           cancelClose();
+          onItemHover?.(item.id);
           if (inSubmenu) {
             setSubmenuActive(index);
             submenuRef.current?.focus();
@@ -227,7 +249,7 @@ export function ExplorerMenu({
             setSubmenu({ index, anchor: e.currentTarget });
             setSubmenuActive(0);
             submenuRef.current?.focus();
-          } else {
+          } else if (!pickOnMouseDown) {
             onPick(item.id);
           }
         }}
@@ -251,7 +273,7 @@ export function ExplorerMenu({
             </span>
           ) : null}
         </span>
-        {hasSubmenu ? (
+        {hasSubmenu || item.arrow ? (
           <ChevronRight
             className="size-3.5 shrink-0 text-content/50"
             strokeWidth={1.75}

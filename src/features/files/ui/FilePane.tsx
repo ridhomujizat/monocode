@@ -1,3 +1,4 @@
+import { lazySurface } from "../../../shared/ui/lazySurface";
 import type { PointerEvent as ReactPointerEvent } from "react";
 import { memo, useSyncExternalStore } from "react";
 import {
@@ -17,27 +18,49 @@ import {
   type EditorPane,
   type FilePaneTab,
 } from "../../workspace/model/layout";
-import { isImagePath } from "../model/filePreview";
+import { isImagePath, isVideoPath } from "../model/filePreview";
 import type { TerminalMetaPatch } from "../../terminal/model/terminalTab";
 import type { EditorNavigationTarget } from "../../search/model/search";
 import { editorPathsEqual } from "../../search/model/search";
 import type { PlanBuildTarget, Session } from "../../sessions/model/session";
 import { Play } from "../../../shared/ui/icons";
 import { BuildTargetButton } from "../../sessions/ui/SecondOpinionButton";
-import { loadDiffViewer, subscribeDiffViewer } from "../../settings/model/settings";
+import {
+  loadDiffViewer,
+  subscribeDiffViewer,
+} from "../../settings/model/settings";
 import { AgentTabView } from "../../sessions/ui/AgentTabView";
 import { MarkdownPreview } from "../../sessions/ui/AgentMarkdown";
 import { BinaryFileView } from "./BinaryFileView";
-import { CommitDiff } from "../../source-control/ui/CommitDiff";
-import { FileEditor } from "./FileEditor";
 import { ReleaseNotesSurface } from "../../../app/ui/ReleaseNotesSurface";
-import { SessionChangesDiff } from "../../source-control/ui/SessionChangesDiff";
-import { TerminalView } from "../../terminal/ui/TerminalView";
-import { WorkingTreeDiff } from "../../source-control/ui/WorkingTreeDiff";
+import { isRemoteProjectPath } from "../../projects/model/recents";
+
+const CommitDiff = lazySurface(async () => {
+  const module = await import("../../source-control/ui/CommitDiff");
+  return { default: module.CommitDiff };
+});
+const FileEditor = lazySurface(async () => {
+  const module = await import("./FileEditor");
+  return { default: module.FileEditor };
+});
+const SessionChangesDiff = lazySurface(async () => {
+  const module = await import("../../source-control/ui/SessionChangesDiff");
+  return { default: module.SessionChangesDiff };
+});
+const TerminalView = lazySurface(async () => {
+  const module = await import("../../terminal/ui/TerminalView");
+  return { default: module.TerminalView };
+});
+const WorkingTreeDiff = lazySurface(async () => {
+  const module = await import("../../source-control/ui/WorkingTreeDiff");
+  return { default: module.WorkingTreeDiff };
+});
 
 type Props = {
   pane: EditorPane;
   focused: boolean;
+  /** The containing workspace tab can stay mounted while hidden. */
+  visible?: boolean;
   /** The title bar already names a standalone file, so avoid repeating it. */
   showTabs?: boolean;
   dirtyFileIds: Set<string>;
@@ -66,6 +89,7 @@ type Props = {
 function FilePaneComponent({
   pane,
   focused,
+  visible = true,
   showTabs = true,
   dirtyFileIds,
   fileErrorCounts,
@@ -188,8 +212,12 @@ function FilePaneComponent({
                     onTerminalMetaChange?.(file.id, patch)
                   }
                 />
-              ) : isImagePath(file.path) ? (
-                <BinaryFileView path={file.path} cwd={file.cwd} />
+              ) : isImagePath(file.path) || isVideoPath(file.path) ? (
+                <BinaryFileView
+                  path={file.path}
+                  cwd={file.cwd}
+                  visible={visible && file.id === pane.activeFileId}
+                />
               ) : (
                 <FileEditor
                   path={file.path}
@@ -223,6 +251,7 @@ export const FilePane = memo(FilePaneComponent, (previous, next) => {
   if (
     previous.pane !== next.pane ||
     previous.focused !== next.focused ||
+    previous.visible !== next.visible ||
     previous.showTabs !== next.showTabs ||
     previous.dirtyFileIds !== next.dirtyFileIds ||
     previous.fileErrorCounts !== next.fileErrorCounts ||
@@ -282,6 +311,7 @@ function PlanSurface({
   const block = plan
     ? session?.blocks.find((entry) => entry.id === plan.blockId)
     : undefined;
+  const remote = !!session && isRemoteProjectPath(session.cwd);
 
   if (!block || !plan) {
     return (
@@ -332,7 +362,7 @@ function PlanSurface({
               <Play className="size-3" />
               {buildLabel}
             </button>
-            {session ? (
+            {session && !remote ? (
               <BuildTargetButton
                 from={session.harness}
                 model={session.model}
@@ -351,6 +381,7 @@ function PlanSurface({
             spellCheck={false}
             value={block.text}
             disabled={
+              remote ||
               block.plan?.status === "streaming" ||
               block.plan?.status === "building" ||
               block.plan?.status === "built"

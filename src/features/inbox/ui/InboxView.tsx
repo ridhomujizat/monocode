@@ -5,6 +5,7 @@ import { openUrl } from "@tauri-apps/plugin-opener";
 import {
   Check,
   CheckCheck,
+  CheckCircle,
   ChevronDown,
   CircleDot,
   CircleX,
@@ -34,10 +35,7 @@ import {
   useState,
   type MouseEvent as ReactMouseEvent,
 } from "react";
-import {
-  InboxFiltersMenu,
-  INBOX_FILTER_MENU_WIDTH,
-} from "./InboxFiltersMenu";
+import { InboxFiltersMenu, INBOX_FILTER_MENU_WIDTH } from "./InboxFiltersMenu";
 import { InboxConnectMenu } from "./InboxConnectMenu";
 import { InboxProviderMark } from "./InboxProviderMark";
 import { ProjectLogoIcon } from "../../projects/ui/ProjectLogoIcon";
@@ -71,9 +69,11 @@ import {
   peekInboxList,
   formatRelativeTime,
   inboxPersonAvatarUrl,
+  isTrackerProvider,
   type GithubLabel,
   type GithubPrAction,
   type GithubPrDiff,
+  GITHUB_WORK_ITEM_FRESH_MS,
   type GithubWorkItemDetails,
   type GithubWorkItemThread,
   type InboxItem,
@@ -105,8 +105,14 @@ import { copyText } from "../../../platform/tauri/clipboard";
 import { projectKey, projectName } from "../../../shared/lib/paths";
 import { IS_MAC } from "../../../platform/tauri/platform";
 import { playCue } from "../../settings/model/sounds";
-import { sameProjectPath, type RecentProject } from "../../projects/model/recents";
-import { sessionDisplayTitle, type LinkedWorkItem } from "../../sessions/model/session";
+import {
+  sameProjectPath,
+  type RecentProject,
+} from "../../projects/model/recents";
+import {
+  sessionDisplayTitle,
+  type LinkedWorkItem,
+} from "../../sessions/model/session";
 import type { SessionSummary } from "../../sessions/data/sessionStore";
 import {
   inboxItemMatchesLinkedWorkItem,
@@ -150,6 +156,22 @@ import {
   type JiraProject,
 } from "../model/jira";
 import {
+  KerjanStoryContext,
+  KerjanTicketActions,
+  kerjanStatusMark,
+} from "./KerjanTicketActions";
+import {
+  KERJAN_CHANGE_EVENT,
+  kerjanConnected,
+  kerjanTicketComment,
+  kerjanTicketDetails,
+  kerjanTicketThread,
+  peekKerjanTicketDetails,
+  peekKerjanTicketThread,
+  kerjanTicketToIssue,
+  type KerjanTicketThread,
+} from "../model/kerjan";
+import {
   GITLAB_CHANGE_EVENT,
   gitlabConnected,
   gitlabMrDiff,
@@ -189,9 +211,10 @@ import {
 } from "./InboxComments";
 import { InboxPrDiff } from "./InboxPrDiff";
 import {
-  InboxPrChecks,
-  PrChecksTab,
-} from "./InboxPrChecks";
+  InboxDescriptionSummary,
+  InboxPrChangesGlance,
+} from "./InboxPrOverview";
+import { InboxPrChecks, PrChecksTab } from "./InboxPrChecks";
 import {
   InboxDiscussionPanel,
   type InboxSessionPortal,
@@ -322,10 +345,12 @@ function InboxSourceTab({
 
 function InboxDetailTab({
   label,
+  count,
   selected,
   onSelect,
 }: {
   label: string;
+  count?: number;
   selected: boolean;
   onSelect: () => void;
 }) {
@@ -340,6 +365,11 @@ function InboxDetailTab({
       }`}
     >
       {label}
+      {count ? (
+        <span className="ml-1.5 rounded-full bg-content/10 px-1.5 py-0.5 text-[10px] tabular-nums text-content/60">
+          {count}
+        </span>
+      ) : null}
       {selected ? (
         <span className="absolute inset-x-0 bottom-0 h-0.5 bg-content" />
       ) : null}
@@ -461,6 +491,10 @@ export function InboxView({
     [logos, projects],
   );
   const linearProjects = useMemo(() => linearProjectOptions(items), [items]);
+  const kerjanSprints = useMemo(
+    () => linearProjectOptions(items, "kerjan"),
+    [items],
+  );
   const activeFilters = useMemo(
     () =>
       pruneInboxFilters(
@@ -479,6 +513,7 @@ export function InboxView({
   const fetchQuery = useMemo<InboxQuery>(
     () => ({
       assignedToMe: activeFilters.assignedToMe,
+      kerjanAssignedToMe: !activeFilters.kerjanEveryone,
       state: fetchState,
       search: "",
       linearHiddenTeamIds,
@@ -486,6 +521,7 @@ export function InboxView({
     }),
     [
       activeFilters.assignedToMe,
+      activeFilters.kerjanEveryone,
       fetchState,
       linearHiddenTeamIds,
       jiraHiddenProjectIds,
@@ -549,9 +585,11 @@ export function InboxView({
     const onChange = () => setRefresh((value) => value + 1);
     window.addEventListener(GITLAB_CHANGE_EVENT, onChange);
     window.addEventListener(AZUREDEVOPS_CHANGE_EVENT, onChange);
+    window.addEventListener(KERJAN_CHANGE_EVENT, onChange);
     return () => {
       window.removeEventListener(GITLAB_CHANGE_EVENT, onChange);
       window.removeEventListener(AZUREDEVOPS_CHANGE_EVENT, onChange);
+      window.removeEventListener(KERJAN_CHANGE_EVENT, onChange);
     };
   }, []);
 
@@ -567,9 +605,10 @@ export function InboxView({
         githubStatus(),
         linearConnected(),
         jiraConnected(),
+        kerjanConnected(),
         gitlabConnected(),
         azureDevOpsConnected(),
-      ]).then(([github, linear, jira, gitlab, azuredevops]) => {
+      ]).then(([github, linear, jira, kerjan, gitlab, azuredevops]) => {
         if (cancelled || generation !== latest) return;
         setConnections((prev) => ({
           github:
@@ -581,6 +620,10 @@ export function InboxView({
               ? linear.value.connected
               : prev.linear,
           jira: jira.status === "fulfilled" ? jira.value.connected : prev.jira,
+          kerjan:
+            kerjan.status === "fulfilled"
+              ? kerjan.value.connected
+              : prev.kerjan,
           gitlab:
             gitlab.status === "fulfilled"
               ? gitlab.value.connected
@@ -595,12 +638,14 @@ export function InboxView({
     read();
     window.addEventListener(LINEAR_CHANGE_EVENT, read);
     window.addEventListener(JIRA_CHANGE_EVENT, read);
+    window.addEventListener(KERJAN_CHANGE_EVENT, read);
     window.addEventListener(GITLAB_CHANGE_EVENT, read);
     window.addEventListener(AZUREDEVOPS_CHANGE_EVENT, read);
     return () => {
       cancelled = true;
       window.removeEventListener(LINEAR_CHANGE_EVENT, read);
       window.removeEventListener(JIRA_CHANGE_EVENT, read);
+      window.removeEventListener(KERJAN_CHANGE_EVENT, read);
       window.removeEventListener(GITLAB_CHANGE_EVENT, read);
       window.removeEventListener(AZUREDEVOPS_CHANGE_EVENT, read);
     };
@@ -699,6 +744,7 @@ export function InboxView({
           github: message,
           linear: message,
           jira: message,
+          kerjan: message,
           gitlab: message,
           azuredevops: message,
         });
@@ -768,11 +814,13 @@ export function InboxView({
 
   const inboxSeenTick = useInboxSeenTick();
   useEffect(() => {
-    rememberInboxItems(items.map((item) => ({
-      key: inboxItemKey(item),
-      updatedAt: item.updatedAt,
-      projectPath: item.projectPath,
-    })));
+    rememberInboxItems(
+      items.map((item) => ({
+        key: inboxItemKey(item),
+        updatedAt: item.updatedAt,
+        projectPath: item.projectPath,
+      })),
+    );
   }, [items]);
   const sourceEntries = useMemo(
     () =>
@@ -802,6 +850,22 @@ export function InboxView({
     !!targetSelectionKey && selectedKey === targetSelectionKey;
   const selected =
     selectedByKey ?? (waitingForTarget ? null : visibleItems[0]) ?? null;
+  // An item opened from inside the detail pane that the list may not show.
+  const [openedItem, setOpenedItem] = useState<InboxItem | null>(null);
+  const detailItem = openedItem ?? selected;
+  const openDetailItem = useCallback(
+    (next: InboxItem) => {
+      const key = inboxItemKey(next);
+      if (visibleItems.some((entry) => inboxItemKey(entry) === key)) {
+        setSelectedKey(key);
+        setOpenedItem(null);
+        return;
+      }
+      setOpenedItem(next);
+    },
+    [visibleItems],
+  );
+  useEffect(() => setOpenedItem(null), [source]);
   const updateInboxItem = useCallback((next: InboxItem) => {
     const key = inboxItemKey(next);
     setItems((current) =>
@@ -962,11 +1026,13 @@ export function InboxView({
             title="Mark all as read"
             aria-label="Mark all as read"
             disabled={!sourceHasUnseen}
-            onClick={() => setReadStatusError(
-              markInboxItemsSeen(sourceEntries)
-                ? null
-                : "Could not save read status. Please try again.",
-            )}
+            onClick={() =>
+              setReadStatusError(
+                markInboxItemsSeen(sourceEntries)
+                  ? null
+                  : "Could not save read status. Please try again.",
+              )
+            }
             className="grid size-6 shrink-0 place-items-center rounded-md text-content/45 hover:bg-content/10 hover:text-content disabled:cursor-default disabled:opacity-30 disabled:hover:bg-transparent disabled:hover:text-content/45"
           >
             <CheckCheck className="size-3.5" strokeWidth={1.75} />
@@ -1048,7 +1114,9 @@ export function InboxView({
                 <li key={key}>
                   <InboxCard
                     item={item}
-                    active={selected != null && key === inboxItemKey(selected)}
+                    active={
+                      detailItem != null && key === inboxItemKey(detailItem)
+                    }
                     logoPath={resolveTabGroupLogo(projectId, logos)}
                     mascotName={resolveTabGroupMascot(projectId, groupMascots)}
                     mascotColor={resolveTabGroupColor(
@@ -1064,6 +1132,7 @@ export function InboxView({
                         updatedAt: item.updatedAt,
                       });
                       setSelectedKey(key);
+                      setOpenedItem(null);
                     }}
                   />
                 </li>
@@ -1094,6 +1163,7 @@ export function InboxView({
       y={filterMenu.y}
       projects={projectOptions}
       linearProjects={linearProjects}
+      kerjanSprints={kerjanSprints}
       linearTeams={linearTeams}
       hiddenLinearTeamIds={linearHiddenTeamIds}
       jiraProjects={jiraProjects}
@@ -1148,12 +1218,14 @@ export function InboxView({
         <div className="relative flex min-h-0 min-w-0 flex-1">
           <div className="min-h-0 min-w-0 flex-1">
             <InboxDetailBody
-              item={selected}
+              item={detailItem}
               cwd={cwd}
               projects={projectOptions}
               revision={refresh}
               relatedSessions={
-                selected ? relatedSessionsForInboxItem(selected, sessions) : []
+                detailItem
+                  ? relatedSessionsForInboxItem(detailItem, sessions)
+                  : []
               }
               onDiscuss={() => setDiscussionOpen(true)}
               onStart={onStart}
@@ -1161,15 +1233,16 @@ export function InboxView({
               onRepairChecks={onRepairChecks}
               onOpenSession={onOpenSession}
               onItemChange={updateInboxItem}
+              onOpenItem={openDetailItem}
             />
           </div>
-          {discussionOpen && selected ? (
+          {discussionOpen && detailItem ? (
             <InboxDiscussionPanel
               onOpen={onAsk}
               onRestart={onAskRestart}
               onMount={onAskMount}
-              key={inboxAskKey(selected)}
-              item={selected}
+              key={inboxAskKey(detailItem)}
+              item={detailItem}
               onClose={() => setDiscussionOpen(false)}
             />
           ) : null}
@@ -1277,6 +1350,23 @@ export function LinkedWorkItemPanel({
     return () => window.removeEventListener("keydown", onKey, true);
   }, [visible]);
 
+  // The pane takes its full width up front so the sessions reflow once, then
+  // the sheet slides in on a transform. Animating the width instead would
+  // rewrap the transcript and resize terminals on every frame.
+  const [opening, setOpening] = useState(
+    () =>
+      visible &&
+      !(
+        typeof window !== "undefined" &&
+        window.matchMedia?.("(prefers-reduced-motion: reduce)").matches
+      ),
+  );
+  useEffect(() => {
+    if (!visible) setOpening(false);
+  }, [visible]);
+  const contentKey = item ? inboxItemKey(item) : error ? "error" : "loading";
+  const [revealedKey, setRevealedKey] = useState<string | null>(null);
+
   const kindLabel = target.kind === "pr" ? "Pull request" : "Issue";
   return (
     <aside
@@ -1286,9 +1376,12 @@ export function LinkedWorkItemPanel({
       aria-hidden={!visible}
       inert={!visible || undefined}
       data-linked-work-item-panel
-      className={`@container/linked relative min-h-0 max-w-full shrink-0 flex-col border-l border-stroke text-content max-[950px]:absolute max-[950px]:inset-y-0 max-[950px]:right-0 max-[950px]:z-30 max-[950px]:shadow-2xl ${
+      onAnimationEnd={(event) => {
+        if (event.animationName === "linked-panel-slide") setOpening(false);
+      }}
+      className={`relative min-h-0 max-w-full shrink-0 flex-col text-content max-[950px]:absolute max-[950px]:inset-y-0 max-[950px]:right-0 max-[950px]:z-30 max-[950px]:shadow-2xl ${
         visible ? "flex" : "hidden"
-      }`}
+      } ${opening ? "overflow-hidden" : ""}`}
     >
       <div
         role="separator"
@@ -1300,50 +1393,69 @@ export function LinkedWorkItemPanel({
           resize.dragging ? "bg-content/15" : "hover:bg-content/10"
         }`}
       />
-      <div className="absolute top-[5px] right-2 z-30">
-        <IconButton
-          label={`Close ${kindLabel.toLowerCase()} panel`}
-          onClick={onClose}
+      <div
+        className={`relative flex min-h-0 flex-1 flex-col border-l border-stroke ${
+          opening ? "linked-panel-slide" : ""
+        }`}
+      >
+        <div className="absolute top-[5px] right-2 z-30">
+          <IconButton
+            label={`Close ${kindLabel.toLowerCase()} panel`}
+            onClick={onClose}
+          >
+            <PanelLeft className="size-3.5" strokeWidth={1.75} />
+          </IconButton>
+        </div>
+        <div
+          key={contentKey}
+          onAnimationEnd={(event) => {
+            if (event.animationName === "linked-panel-reveal") {
+              setRevealedKey(contentKey);
+            }
+          }}
+          className={`@container/linked min-h-0 min-w-0 flex-1 ${
+            revealedKey === contentKey ? "" : "linked-panel-reveal"
+          }`}
         >
-          <PanelLeft className="size-3.5" strokeWidth={1.75} />
-        </IconButton>
-      </div>
-      <div className="min-h-0 min-w-0 flex-1">
-        {item ? (
-          <InboxDetail
-            key={inboxItemKey(item)}
-            item={item}
-            cwd={cwd}
-            projects={projectOptions}
-            revision={0}
-            relatedSessions={[]}
-            mode="panel"
-            visible={visible}
-            repairSessions={repairSessions}
-            onRepairChecks={onRepairChecks}
-            onOpenSession={onOpenSession}
-            onItemChange={setItem}
-          />
-        ) : error ? (
-          <div className="flex h-full flex-col items-center justify-center gap-3 px-8 text-center">
-            <CircleX className="size-5 text-rose-400/90" strokeWidth={1.75} />
-            <p role="alert" className="max-w-sm text-[12px] text-content/55">
-              {error}
-            </p>
-            <button
-              type="button"
-              onClick={() => void openUrl(target.url)}
-              className={ACTION_OUTLINE}
-            >
-              <ExternalLink className="size-3.5" strokeWidth={1.75} />
-              Open on GitHub
-            </button>
-          </div>
-        ) : (
-          <div className="flex h-full items-center justify-center text-content/40">
-            <LoaderCircle className="size-4 animate-spin" strokeWidth={1.75} />
-          </div>
-        )}
+          {item ? (
+            <InboxDetail
+              key={inboxItemKey(item)}
+              item={item}
+              cwd={cwd}
+              projects={projectOptions}
+              revision={0}
+              relatedSessions={[]}
+              mode="panel"
+              visible={visible}
+              repairSessions={repairSessions}
+              onRepairChecks={onRepairChecks}
+              onOpenSession={onOpenSession}
+              onItemChange={setItem}
+            />
+          ) : error ? (
+            <div className="flex h-full flex-col items-center justify-center gap-3 px-8 text-center">
+              <CircleX className="size-5 text-rose-400/90" strokeWidth={1.75} />
+              <p role="alert" className="max-w-sm text-[12px] text-content/55">
+                {error}
+              </p>
+              <button
+                type="button"
+                onClick={() => void openUrl(target.url)}
+                className={ACTION_OUTLINE}
+              >
+                <ExternalLink className="size-3.5" strokeWidth={1.75} />
+                Open on GitHub
+              </button>
+            </div>
+          ) : (
+            <div className="flex h-full items-center justify-center text-content/40">
+              <LoaderCircle
+                className="size-4 animate-spin"
+                strokeWidth={1.75}
+              />
+            </div>
+          )}
+        </div>
       </div>
     </aside>
   );
@@ -1361,6 +1473,7 @@ function InboxDetailBody({
   onRepairChecks,
   onOpenSession,
   onItemChange,
+  onOpenItem,
 }: {
   item: InboxItem | null;
   cwd: string;
@@ -1373,6 +1486,8 @@ function InboxDetailBody({
   onRepairChecks?: CiRepairProps["onRepairChecks"];
   onOpenSession?: (sessionId: string) => void | Promise<void>;
   onItemChange?: (item: InboxItem) => void;
+  /** Opens another item in the detail pane, such as a Kerjan Story's Task. */
+  onOpenItem?: (item: InboxItem) => void;
 }) {
   if (!item) {
     return (
@@ -1396,6 +1511,7 @@ function InboxDetailBody({
       onRepairChecks={onRepairChecks}
       onOpenSession={onOpenSession}
       onItemChange={onItemChange}
+      onOpenItem={onOpenItem}
     />
   );
 }
@@ -1407,7 +1523,10 @@ type InboxStatusMark = {
 };
 
 /** Status reads from the glyph first and the color second, so it survives color blindness. */
-function inboxStatusMark(item: InboxItem): InboxStatusMark {
+export function inboxStatusMark(item: InboxItem): InboxStatusMark {
+  if (item.provider === "kerjan") {
+    return { ...kerjanStatusMark(item.stateType ?? ""), label: item.state };
+  }
   const label = inboxItemStatus(item);
   const pr = item.kind === "pr";
   if (label === "Draft") {
@@ -1421,6 +1540,13 @@ function inboxStatusMark(item: InboxItem): InboxStatusMark {
     return { Icon: GitMerge, className: "text-violet-400/90", label };
   }
   if (label === "Closed") {
+    if (
+      item.provider === "github" &&
+      item.kind === "issue" &&
+      item.stateReason?.trim().toLowerCase() === "completed"
+    ) {
+      return { Icon: CheckCircle, className: "text-violet-400/90", label };
+    }
     return {
       Icon: pr ? GitPullRequestClosed : CircleX,
       className: "text-rose-400/90",
@@ -1454,14 +1580,16 @@ function InboxCard({
   useInboxSeenTick();
   const status = inboxStatusMark(item);
   const kindLabel =
-    item.kind === "pr"
-      ? item.provider === "gitlab"
-        ? "Merge request"
-        : "Pull request"
-      : "Issue";
+    item.provider === "kerjan"
+      ? status.label
+      : item.kind === "pr"
+        ? item.provider === "gitlab"
+          ? "Merge request"
+          : "Pull request"
+        : "Issue";
   const time = formatRelativeTime(item.updatedAt);
   const name = projectName(item.projectPath);
-  const tracker = item.provider === "linear" || item.provider === "jira";
+  const tracker = isTrackerProvider(item.provider);
   const source = tracker ? item.teamName || item.repo : item.repo || name;
   const attentionLabel =
     item.provider === "gitlab" || item.provider === "azuredevops"
@@ -1477,7 +1605,7 @@ function InboxCard({
       type="button"
       title={item.title}
       aria-current={active ? "true" : undefined}
-      aria-label={`${status.label} ${kindLabel.toLowerCase()} ${inboxItemRef(
+      aria-label={`${status.label} ${item.provider === "kerjan" ? "ticket" : kindLabel.toLowerCase()} ${inboxItemRef(
         item,
       )}: ${item.title}${attentionLabel ? `, ${attentionLabel}` : ""}${unseen ? ", new" : ""}${relatedSessionCount > 0 ? `, ${relatedSessionCount} related ${relatedSessionCount === 1 ? "thread" : "threads"}` : ""}`}
       onClick={onSelect}
@@ -1942,6 +2070,7 @@ export function InboxDetail({
   onRepairChecks,
   onOpenSession,
   onItemChange,
+  onOpenItem,
 }: {
   item: InboxItem;
   cwd: string;
@@ -1956,13 +2085,17 @@ export function InboxDetail({
   onRepairChecks?: CiRepairProps["onRepairChecks"];
   onOpenSession?: (sessionId: string) => void | Promise<void>;
   onItemChange?: (item: InboxItem) => void;
+  /** Opens another item in the detail pane, such as a Kerjan Story's Task. */
+  onOpenItem?: (item: InboxItem) => void;
 }) {
   const detailLock = useLockOverscroll<HTMLDivElement>();
   const panel = mode === "panel";
   const linear = item.provider === "linear";
   const jira = item.provider === "jira";
-  const tracker = linear || jira;
+  const kerjan = item.provider === "kerjan";
+  const tracker = linear || jira || kerjan;
   const jiraKey = jira ? (item.identifier ?? "") : "";
+  const kerjanKey = kerjan ? (item.identifier ?? "") : "";
   const gitlab = item.provider === "gitlab";
   const azuredevops = item.provider === "azuredevops";
   const isPr = !tracker && item.kind === "pr";
@@ -1996,17 +2129,19 @@ export function InboxDetail({
     ? peekLinearIssueDetails(item.id ?? "")
     : jira
       ? peekJiraIssueDetails(jiraKey)
-      : gitlabKind
-        ? peekGitlabWorkItemDetails(item.repo, gitlabKind, item.number)
-        : azureDevOpsKind
-          ? peekAzureDevOpsWorkItemDetails(
-              item.repo,
-              azureDevOpsKind,
-              item.number,
-            )
-          : githubKind
-            ? peekGithubWorkItemDetails(item.repo, githubKind, item.number)
-            : null;
+      : kerjan
+        ? peekKerjanTicketDetails(kerjanKey)
+        : gitlabKind
+          ? peekGitlabWorkItemDetails(item.repo, gitlabKind, item.number)
+          : azureDevOpsKind
+            ? peekAzureDevOpsWorkItemDetails(
+                item.repo,
+                azureDevOpsKind,
+                item.number,
+              )
+            : githubKind
+              ? peekGithubWorkItemDetails(item.repo, githubKind, item.number)
+              : null;
   const cachedDiff = isPr
     ? gitlab
       ? peekGitlabMrDiff(item.repo, item.number)
@@ -2018,22 +2153,30 @@ export function InboxDetail({
     ? peekLinearIssueThread(item.id ?? "")
     : jira
       ? peekJiraIssueThread(jiraKey)
-      : gitlabKind
-        ? peekGitlabWorkItemThread(item.repo, gitlabKind, item.number)
-        : azureDevOpsKind
-          ? peekAzureDevOpsWorkItemThread(
-              item.repo,
-              azureDevOpsKind,
-              item.number,
-            )
-          : githubKind
-            ? peekGithubWorkItemThread(item.repo, githubKind, item.number)
-            : null;
+      : kerjan
+        ? peekKerjanTicketThread(kerjanKey)
+        : gitlabKind
+          ? peekGitlabWorkItemThread(item.repo, gitlabKind, item.number)
+          : azureDevOpsKind
+            ? peekAzureDevOpsWorkItemThread(
+                item.repo,
+                azureDevOpsKind,
+                item.number,
+              )
+            : githubKind
+              ? peekGithubWorkItemThread(item.repo, githubKind, item.number)
+              : null;
   const [details, setDetails] = useState<GithubWorkItemDetails | null>(cached);
   const [loading, setLoading] = useState(cached == null);
   const [error, setError] = useState<string | null>(null);
   const [tab, setTab] = useState<"summary" | "code" | "checks">("summary");
   const [diffMode, setDiffMode] = useState<"hunks" | "full">("hunks");
+  // Reopening the side panel reuses recent GitHub data. Inbox keeps refetching
+  // so its explicit refresh stays live.
+  const panelMaxAge = panel ? GITHUB_WORK_ITEM_FRESH_MS : undefined;
+  const [diffFocusPath, setDiffFocusPath] = useState<string | undefined>();
+  // The panel summary lists changed files, so it shares the Code tab's fetch.
+  const diffWanted = tab === "code" || (panel && tab === "summary");
   const fullFile = inboxShowsFullFileDiff(item) && diffMode === "full";
   const [prDiff, setPrDiff] = useState<GithubPrDiff | null>(cachedDiff);
   const [diffLoading, setDiffLoading] = useState(isPr && cachedDiff == null);
@@ -2042,6 +2185,7 @@ export function InboxDetail({
     | GithubWorkItemThread
     | LinearIssueThread
     | JiraIssueThread
+    | KerjanTicketThread
     | GitlabWorkItemThread
     | AzureDevOpsWorkItemThread
     | null
@@ -2106,7 +2250,7 @@ export function InboxDetail({
     number: item.number,
     enabled: prChecksEnabled,
     open: isPr && item.state.trim().toLowerCase() === "open",
-    poll: visible,
+    poll: visible && tab === "checks",
     revision,
   });
   const prChecksOverall = prChecksEnabled
@@ -2123,17 +2267,19 @@ export function InboxDetail({
       ? peekLinearIssueDetails(item.id ?? "")
       : jira
         ? peekJiraIssueDetails(jiraKey)
-        : gitlabKind
-          ? peekGitlabWorkItemDetails(item.repo, gitlabKind, item.number)
-          : azureDevOpsKind
-            ? peekAzureDevOpsWorkItemDetails(
-                item.repo,
-                azureDevOpsKind,
-                item.number,
-              )
-            : githubKind
-              ? peekGithubWorkItemDetails(item.repo, githubKind, item.number)
-              : null;
+        : kerjan
+          ? peekKerjanTicketDetails(kerjanKey)
+          : gitlabKind
+            ? peekGitlabWorkItemDetails(item.repo, gitlabKind, item.number)
+            : azureDevOpsKind
+              ? peekAzureDevOpsWorkItemDetails(
+                  item.repo,
+                  azureDevOpsKind,
+                  item.number,
+                )
+              : githubKind
+                ? peekGithubWorkItemDetails(item.repo, githubKind, item.number)
+                : null;
     if (cachedDetails) {
       setDetails(cachedDetails);
       setLoading(false);
@@ -2151,22 +2297,27 @@ export function InboxDetail({
         ? jiraKey
           ? jiraIssueDetails(jiraKey)
           : Promise.reject(new Error("Missing Jira issue"))
-        : gitlabKind
-        ? gitlabWorkItemDetails(item.repo, gitlabKind, item.number)
-        : azureDevOpsKind
-          ? azureDevOpsWorkItemDetails(
-              item.repo,
-              azureDevOpsKind,
-              item.number,
-            )
-          : githubKind
-            ? githubWorkItemDetails(
-                item.projectPath,
-                item.repo,
-                githubKind,
-                item.number,
-              )
-            : Promise.reject(new Error("Unknown inbox item"));
+        : kerjan
+          ? kerjanKey
+            ? kerjanTicketDetails(kerjanKey, { force: true })
+            : Promise.reject(new Error("Missing Kerjan ticket"))
+          : gitlabKind
+            ? gitlabWorkItemDetails(item.repo, gitlabKind, item.number)
+            : azureDevOpsKind
+              ? azureDevOpsWorkItemDetails(
+                  item.repo,
+                  azureDevOpsKind,
+                  item.number,
+                )
+              : githubKind
+                ? githubWorkItemDetails(
+                    item.projectPath,
+                    item.repo,
+                    githubKind,
+                    item.number,
+                    { maxAgeMs: panelMaxAge },
+                  )
+                : Promise.reject(new Error("Unknown inbox item"));
     void pending
       .then((next) => {
         if (cancelled) return;
@@ -2194,12 +2345,44 @@ export function InboxDetail({
     item.repo,
     jira,
     jiraKey,
+    kerjan,
+    kerjanKey,
     linear,
+    panelMaxAge,
     revision,
   ]);
 
   useEffect(() => {
     let cancelled = false;
+    if (kerjan) {
+      const cachedThread = peekKerjanTicketThread(kerjanKey);
+      if (cachedThread) {
+        setThread(cachedThread);
+        setThreadLoading(false);
+        setThreadError(null);
+      } else {
+        setThreadLoading(true);
+        setThreadError(null);
+        setThread(null);
+      }
+      void kerjanTicketThread(kerjanKey)
+        .then((next) => {
+          if (cancelled) return;
+          setThread(next);
+          setThreadError(null);
+        })
+        .catch((err: unknown) => {
+          if (cancelled) return;
+          if (cachedThread) return;
+          setThreadError(err instanceof Error ? err.message : String(err));
+        })
+        .finally(() => {
+          if (!cancelled) setThreadLoading(false);
+        });
+      return () => {
+        cancelled = true;
+      };
+    }
     if (linear) {
       const id = item.id ?? "";
       const cachedThread = peekLinearIssueThread(id);
@@ -2345,6 +2528,7 @@ export function InboxDetail({
       item.repo,
       githubKind,
       item.number,
+      { maxAgeMs: panelMaxAge },
     )
       .then((next) => {
         if (cancelled) return;
@@ -2372,12 +2556,15 @@ export function InboxDetail({
     item.repo,
     jira,
     jiraKey,
+    kerjan,
+    kerjanKey,
     linear,
+    panelMaxAge,
     revision,
   ]);
 
   useEffect(() => {
-    if (!isPr || tab !== "code") return;
+    if (!isPr || !diffWanted) return;
     let cancelled = false;
     const cachedDiff = gitlab
       ? peekGitlabMrDiff(item.repo, item.number)
@@ -2399,6 +2586,7 @@ export function InboxDetail({
         ? azureDevOpsMrDiff(item.repo, item.number)
         : githubPrDiff(item.projectPath, item.repo, item.number, {
             fullContext: fullFile,
+            maxAgeMs: panelMaxAge,
           });
     void pending
       .then((next) => {
@@ -2419,15 +2607,35 @@ export function InboxDetail({
     };
   }, [
     azuredevops,
+    diffWanted,
     fullFile,
     gitlab,
     isPr,
     item.number,
     item.projectPath,
     item.repo,
+    panelMaxAge,
     revision,
-    tab,
   ]);
+
+  // The side panel reveals its overview in one piece rather than letting the
+  // description, files and activity land and reshuffle one after another.
+  const overviewSettling =
+    panel && (loading || threadLoading || (isPr && diffLoading));
+
+  const startWith = (body?: string) => {
+    if (starting || !onStart) return;
+    setStarting(true);
+    setStartError(null);
+    const next = chooseStartProject
+      ? { ...item, projectPath: startProject }
+      : item;
+    void Promise.resolve(onStart(next, body))
+      .catch((err: unknown) => {
+        setStartError(err instanceof Error ? err.message : String(err));
+      })
+      .finally(() => setStarting(false));
+  };
 
   const postComment = async (body: string) => {
     setPosting(true);
@@ -2439,6 +2647,15 @@ export function InboxDetail({
         setReplyTo(null);
         try {
           setThread(await linearIssueThread(id, { force: true }));
+        } catch (err: unknown) {
+          setPostError(err instanceof Error ? err.message : String(err));
+        }
+        return;
+      }
+      if (kerjan) {
+        await kerjanTicketComment(item, body);
+        try {
+          setThread(await kerjanTicketThread(kerjanKey, { force: true }));
         } catch (err: unknown) {
           setPostError(err instanceof Error ? err.message : String(err));
         }
@@ -2724,26 +2941,9 @@ export function InboxDetail({
                             loading ||
                             !!error))
                       }
-                      onClick={() => {
-                        if (starting) return;
-                        setStarting(true);
-                        setStartError(null);
-                        const next = chooseStartProject
-                          ? { ...item, projectPath: startProject }
-                          : item;
-                        void Promise.resolve(
-                          onStart(
-                            next,
-                            tracker ? details?.body : undefined,
-                          ),
-                        )
-                          .catch((err: unknown) => {
-                            setStartError(
-                              err instanceof Error ? err.message : String(err),
-                            );
-                          })
-                          .finally(() => setStarting(false));
-                      }}
+                      onClick={() =>
+                        startWith(tracker ? details?.body : undefined)
+                      }
                       className={`${ACTION_FILLED} disabled:cursor-default disabled:opacity-40`}
                     >
                       {starting ? "Sending..." : "Send to agent"}
@@ -2775,7 +2975,10 @@ export function InboxDetail({
                     Ask
                   </button>
                 ) : null}
-                {panel ? null : (
+                {kerjan ? (
+                  <KerjanTicketActions item={item} revision={revision} />
+                ) : null}
+                {panel || kerjan ? null : (
                   <button
                     type="button"
                     title={item.url ? externalActionLabel : "No link available"}
@@ -2808,8 +3011,12 @@ export function InboxDetail({
                   />
                   <InboxDetailTab
                     label="Code"
+                    count={panel ? prDiff?.files.length : undefined}
                     selected={tab === "code"}
-                    onSelect={() => setTab("code")}
+                    onSelect={() => {
+                      setDiffFocusPath(undefined);
+                      setTab("code");
+                    }}
                   />
                   {prChecksOverall ? (
                     <PrChecksTab
@@ -2866,7 +3073,7 @@ export function InboxDetail({
         >
           <div
             className={`mx-auto flex w-full max-w-5xl flex-col ${
-              panel ? "gap-4 px-4 py-4" : "gap-5 px-8 py-5"
+              panel ? "gap-6 px-4 py-5" : "gap-5 px-8 py-5"
             }`}
           >
             {item.labels.length > 0 ? (
@@ -2891,6 +3098,7 @@ export function InboxDetail({
                   key={`${item.projectPath}:${item.number}:${revision}:${diffMode}`}
                   diff={prDiff}
                   fullFile={fullFile}
+                  focusPath={diffFocusPath}
                 />
               ) : (
                 <p className="text-[13px] text-content/45">No file changes</p>
@@ -2920,7 +3128,7 @@ export function InboxDetail({
                     : undefined
                 }
               />
-            ) : loading ? (
+            ) : loading || overviewSettling ? (
               <div className="flex justify-center py-10 text-content/40">
                 <LoaderCircle
                   className="size-4 animate-spin"
@@ -2931,7 +3139,12 @@ export function InboxDetail({
               <p className="text-[13px] text-content/50">{error}</p>
             ) : (
               <>
-                {details?.body.trim() ? (
+                {panel ? (
+                  <InboxDescriptionSummary
+                    body={details?.body ?? ""}
+                    cwd={markdownCwd}
+                  />
+                ) : details?.body.trim() ? (
                   <AgentMarkdown
                     text={details.body}
                     cwd={markdownCwd}
@@ -2940,6 +3153,42 @@ export function InboxDetail({
                 ) : (
                   <p className="text-[13px] text-content/45">No description</p>
                 )}
+                {kerjan ? (
+                  <KerjanStoryContext
+                    item={item}
+                    revision={revision}
+                    cwd={markdownCwd}
+                    onAddToChat={onStart ? startWith : undefined}
+                    onOpenTask={
+                      onOpenItem
+                        ? (task, members) =>
+                            onOpenItem(
+                              kerjanTicketToIssue(
+                                task,
+                                new Map(
+                                  members.map((member) => [
+                                    member.id,
+                                    member.name,
+                                  ]),
+                                ),
+                                new Map(),
+                              ),
+                            )
+                        : undefined
+                    }
+                  />
+                ) : null}
+                {panel && isPr ? (
+                  <InboxPrChangesGlance
+                    diff={prDiff}
+                    loading={diffLoading}
+                    error={diffError}
+                    onOpenFile={(path) => {
+                      setDiffFocusPath(path);
+                      setTab("code");
+                    }}
+                  />
+                ) : null}
                 <InboxComments
                   thread={thread}
                   loading={threadLoading}
@@ -2949,11 +3198,19 @@ export function InboxDetail({
                   replyMode={
                     linear
                       ? "parent"
-                      : jira || gitlab || azuredevops
+                      : jira || kerjan || gitlab || azuredevops
                         ? undefined
                         : "thread"
                   }
                   onReply={setReplyTo}
+                  onAddToChat={
+                    kerjan && onStart
+                      ? (comment) =>
+                          startWith(
+                            `Comment by ${comment.author || "unknown"} on ${kerjanKey}:\n\n${comment.body.trim()}`,
+                          )
+                      : undefined
+                  }
                 />
                 <InboxCommentForm
                   replyTo={replyTo}

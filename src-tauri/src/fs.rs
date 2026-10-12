@@ -2,16 +2,31 @@ use std::collections::{HashMap, HashSet};
 use std::io::{BufRead, BufReader, ErrorKind, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{mpsc, Mutex};
+use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
+use tauri::{AppHandle, Manager};
+use uuid::Uuid;
 
 use crate::dirs_home;
 
 pub(crate) const MAX_TEXT_FILE_BYTES: u64 = 8 * 1024 * 1024;
 pub(crate) const MAX_ATTACHMENT_EMBED_BYTES: u64 = 20 * 1024 * 1024;
 pub(crate) const MAX_PREVIEW_BYTES: u64 = 25 * 1024 * 1024;
+const MAX_GENERATED_IMAGE_BYTES: u64 = 25 * 1024 * 1024;
+const MAX_GENERATED_IMAGE_DATA_BYTES: u64 = MAX_GENERATED_IMAGE_BYTES * 4 / 3 + 4;
+const GENERATED_IMAGE_DIR: &str = "generated-images";
+
+#[derive(Serialize, Debug, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct GeneratedImageAsset {
+    path: String,
+    mime_type: String,
+    size: u64,
+}
 
 #[derive(Serialize, Debug, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
@@ -167,6 +182,91 @@ pub fn omp_active_assistant_texts(
         return Ok(Vec::new());
     };
     active_omp_assistant_texts(&path)
+}
+
+/// Recover Bash commands that older UI builds saved as a bare "Shell" row.
+/// Claude's own transcript retains the complete tool input by tool-use id.
+#[tauri::command(async)]
+pub fn claude_shell_commands(
+    app: AppHandle,
+    provider_session_id: String,
+    provider_account_id: Option<String>,
+    tool_ids: Vec<String>,
+) -> Result<HashMap<String, String>, String> {
+    if provider_session_id.is_empty()
+        || !provider_session_id
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_')
+    {
+        return Err("Invalid Claude provider session id".into());
+    }
+    if tool_ids.is_empty() {
+        return Ok(HashMap::new());
+    }
+    let config_dir = match provider_account_id.as_deref() {
+        Some(id) if id != "default" => crate::harness::provider_account_path(&app, "claude", id)?,
+        _ => match std::env::var_os("CLAUDE_CONFIG_DIR") {
+            Some(path) => PathBuf::from(path),
+            None => {
+                PathBuf::from(dirs_home().ok_or("Home directory is unavailable")?).join(".claude")
+            }
+        },
+    };
+    let transcript_name = format!("{provider_session_id}.jsonl");
+    let root = config_dir.join("projects");
+    let Some(path) = std::fs::read_dir(root).ok().and_then(|projects| {
+        projects.flatten().find_map(|project| {
+            let candidate = project.path().join(&transcript_name);
+            candidate.is_file().then_some(candidate)
+        })
+    }) else {
+        return Ok(HashMap::new());
+    };
+    claude_shell_commands_from_file(&path, &tool_ids)
+}
+
+fn claude_shell_commands_from_file(
+    path: &Path,
+    tool_ids: &[String],
+) -> Result<HashMap<String, String>, String> {
+    let wanted: HashSet<&str> = tool_ids.iter().map(String::as_str).collect();
+    let file = std::fs::File::open(path).map_err(|error| error.to_string())?;
+    let mut commands = HashMap::new();
+    for line in BufReader::new(file).lines() {
+        let line = line.map_err(|error| error.to_string())?;
+        let Ok(record) = serde_json::from_str::<serde_json::Value>(&line) else {
+            continue;
+        };
+        if record.get("type").and_then(serde_json::Value::as_str) != Some("assistant") {
+            continue;
+        }
+        let Some(content) = record
+            .pointer("/message/content")
+            .and_then(serde_json::Value::as_array)
+        else {
+            continue;
+        };
+        for block in content {
+            let Some(id) = block.get("id").and_then(serde_json::Value::as_str) else {
+                continue;
+            };
+            if wanted.contains(id)
+                && block.get("name").and_then(serde_json::Value::as_str) == Some("Bash")
+            {
+                if let Some(command) = block
+                    .pointer("/input/command")
+                    .and_then(serde_json::Value::as_str)
+                    .filter(|command| !command.trim().is_empty())
+                {
+                    commands.insert(id.to_owned(), command.to_owned());
+                }
+            }
+        }
+        if commands.len() == wanted.len() {
+            break;
+        }
+    }
+    Ok(commands)
 }
 
 fn omp_session_path(provider_session_id: &str) -> Result<Option<PathBuf>, String> {
@@ -542,6 +642,19 @@ pub async fn list_project_files(cwd: String) -> Result<Vec<ProjectFile>, String>
 }
 
 pub(crate) fn list_project_files_sync(cwd: &str) -> Result<Vec<ProjectFile>, String> {
+    list_project_files_sync_cancellable(cwd, None)
+}
+
+/// Same listing, but aborts as soon as `cancel` is set.
+///
+/// Both halves of the enumeration can outlast a cancelled search on their own,
+/// so both take the flag: `git ls-files` and the walk it falls back to. The
+/// walk is the one that can run for minutes, but the listing is the one that
+/// can hold a hundred megabytes, so neither is left uninterruptible.
+pub(crate) fn list_project_files_sync_cancellable(
+    cwd: &str,
+    cancel: Option<&AtomicBool>,
+) -> Result<Vec<ProjectFile>, String> {
     let root = expand_home(cwd);
     if !root.is_dir() {
         return Err(format!("{}: Not a directory", root.display()));
@@ -549,10 +662,19 @@ pub(crate) fn list_project_files_sync(cwd: &str) -> Result<Vec<ProjectFile>, Str
     if !is_indexable_root(&root) {
         return Ok(Vec::new());
     }
-    if let Some(files) = git_ls_files(&root) {
+    if cancel.is_some_and(|token| token.load(Ordering::Acquire)) {
+        return Ok(Vec::new());
+    }
+    if let Some(files) = git_ls_files(&root, cancel) {
         return Ok(files);
     }
-    Ok(walk_project_files(&root))
+    // `git_ls_files` returns `None` for "not a git repo", truncation, and
+    // cancel. The first two should walk; cancel must not, or a cancelled
+    // `ls-files` would start enumerating the tree it just avoided.
+    if cancel.is_some_and(|token| token.load(Ordering::Acquire)) {
+        return Ok(Vec::new());
+    }
+    Ok(walk_project_files(&root, cancel.into()))
 }
 
 const CHECK_IGNORE_SOME_MATCHED: i32 = 0;
@@ -602,19 +724,35 @@ fn git_ignored_names(dir: &Path, names: &[&str]) -> Option<HashSet<String>> {
     )
 }
 
-fn git_ls_files(root: &Path) -> Option<Vec<ProjectFile>> {
-    let output = git_cmd()
-        .arg("-C")
-        .arg(root)
-        .args(["ls-files", "-co", "--exclude-standard", "-z"])
-        .output()
-        .ok()?;
-    if !output.status.success() {
+/// Ceiling for one `git ls-files` listing. A 2M-file monorepo emits roughly
+/// 120 MB of NUL-separated paths; past this the walk takes over, which is
+/// bounded by `MAX_PROJECT_FILES` and cancellable.
+const MAX_LS_FILES_BYTES: usize = 8 * 1024 * 1024;
+
+fn git_ls_files(root: &Path, cancel: Option<&AtomicBool>) -> Option<Vec<ProjectFile>> {
+    // Routed through the bounded reader rather than `Command::output()`: this
+    // is the path a cancelled search actually takes, because a repository with
+    // a git index never reaches the walk. `output()` buffers the whole listing
+    // before anything can look at it, so on a large monorepo it held ~100 MB
+    // and ran to completion with no way to interrupt it — the exact cost the
+    // walk's cancel check was added to avoid, one function earlier.
+    let (raw, truncated) = git_output_capped(
+        root,
+        &["ls-files", "-co", "--exclude-standard", "-z"],
+        MAX_LS_FILES_BYTES,
+        cancel,
+    )?;
+    if truncated {
+        // A partial listing would silently hide files from search. Fall back to
+        // the walk, which is bounded by its own budget.
         return None;
     }
 
     let mut files = Vec::new();
-    for rel in output.stdout.split(|b| *b == 0) {
+    for rel in raw.split(|b| *b == 0) {
+        if cancel.is_some_and(|token| token.load(Ordering::Acquire)) {
+            return Some(Vec::new());
+        }
         if rel.is_empty() {
             continue;
         }
@@ -917,20 +1055,56 @@ pub struct GitStagedContext {
     pub patch: String,
 }
 
+#[derive(Serialize, Debug, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct GitFileLocation {
+    pub root: String,
+    pub relative: String,
+}
+
+/// Locate each file's own checkout, including files whose parents were deleted.
+#[tauri::command]
+pub async fn git_locate_files(paths: Vec<String>) -> Result<Vec<Option<GitFileLocation>>, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        paths
+            .iter()
+            .map(|path| git_locate_file(&expand_home(path)))
+            .collect()
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
 /// Staged diff (or unstaged vs HEAD if nothing is staged) for commit text generation.
 #[tauri::command]
-pub async fn git_staged_context(cwd: String) -> Result<GitStagedContext, String> {
-    tauri::async_runtime::spawn_blocking(move || git_staged_context_for(&expand_home(&cwd)))
-        .await
-        .map_err(|e| e.to_string())?
+pub async fn git_staged_context(
+    cwd: String,
+    paths: Option<Vec<String>>,
+) -> Result<GitStagedContext, String> {
+    tauri::async_runtime::spawn_blocking(move || match paths {
+        Some(paths) => git_selected_context_for(&expand_home(&cwd), &paths),
+        None => git_staged_context_for(&expand_home(&cwd)),
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 /// Create a commit from the current index, or rewrite HEAD with it when `amend` is set.
 #[tauri::command]
-pub async fn git_commit(cwd: String, message: String, amend: bool) -> Result<(), String> {
+pub async fn git_commit(
+    cwd: String,
+    message: String,
+    amend: bool,
+    paths: Option<Vec<String>>,
+) -> Result<(), String> {
     tauri::async_runtime::spawn_blocking(move || {
         let root = expand_home(&cwd);
-        if amend {
+        if let Some(paths) = paths {
+            if amend {
+                return Err("Selected-file commits cannot amend HEAD".into());
+            }
+            git_commit_selected_for(&root, &message, &paths)
+        } else if amend {
             git_commit_amend_for(&root, &message)
         } else {
             git_commit_for(&root, &message)
@@ -1063,6 +1237,7 @@ pub struct GitHubWorkItem {
     pub title: String,
     pub url: String,
     pub state: String,
+    pub state_reason: String,
     pub created_at: String,
     pub updated_at: String,
     pub labels: Vec<GitHubLabel>,
@@ -1663,13 +1838,22 @@ fn git_diff_index_with(root: &Path, include_sync: bool) -> GitDiffIndex {
 
     if let Some(text) = git_run(
         root,
-        &["diff", "--no-ext-diff", "--numstat", "HEAD", "--", "."],
+        &[
+            "diff",
+            "--relative",
+            "--no-ext-diff",
+            "--numstat",
+            "HEAD",
+            "--",
+            ".",
+        ],
     ) {
         add_numstat_map(&text, &mut files);
         if let Some(names) = git_run(
             root,
             &[
                 "diff",
+                "--relative",
                 "--no-ext-diff",
                 "--name-status",
                 "--no-renames",
@@ -1681,12 +1865,30 @@ fn git_diff_index_with(root: &Path, include_sync: bool) -> GitDiffIndex {
             add_name_status(&names, &mut statuses);
         }
     } else {
-        if let Some(text) = git_run(root, &["diff", "--no-ext-diff", "--numstat", "--", "."]) {
+        if let Some(text) = git_run(
+            root,
+            &[
+                "diff",
+                "--relative",
+                "--no-ext-diff",
+                "--numstat",
+                "--",
+                ".",
+            ],
+        ) {
             add_numstat_map(&text, &mut files);
         }
         if let Some(text) = git_run(
             root,
-            &["diff", "--no-ext-diff", "--cached", "--numstat", "--", "."],
+            &[
+                "diff",
+                "--relative",
+                "--no-ext-diff",
+                "--cached",
+                "--numstat",
+                "--",
+                ".",
+            ],
         ) {
             add_numstat_map(&text, &mut files);
         }
@@ -1694,6 +1896,7 @@ fn git_diff_index_with(root: &Path, include_sync: bool) -> GitDiffIndex {
             root,
             &[
                 "diff",
+                "--relative",
                 "--no-ext-diff",
                 "--name-status",
                 "--no-renames",
@@ -1707,6 +1910,7 @@ fn git_diff_index_with(root: &Path, include_sync: bool) -> GitDiffIndex {
             root,
             &[
                 "diff",
+                "--relative",
                 "--no-ext-diff",
                 "--cached",
                 "--name-status",
@@ -1868,7 +2072,15 @@ fn text_line_count(path: &Path) -> i64 {
 fn mark_cached_and_unstaged(root: &Path, files: &mut HashMap<String, FileAcc>) {
     if let Some(names) = git_run(
         root,
-        &["diff", "--cached", "--name-only", "--no-renames", "--", "."],
+        &[
+            "diff",
+            "--relative",
+            "--cached",
+            "--name-only",
+            "--no-renames",
+            "--",
+            ".",
+        ],
     ) {
         for line in names.lines() {
             let relative = normalize_diff_path(line);
@@ -1877,7 +2089,17 @@ fn mark_cached_and_unstaged(root: &Path, files: &mut HashMap<String, FileAcc>) {
             }
         }
     }
-    if let Some(names) = git_run(root, &["diff", "--name-only", "--no-renames", "--", "."]) {
+    if let Some(names) = git_run(
+        root,
+        &[
+            "diff",
+            "--relative",
+            "--name-only",
+            "--no-renames",
+            "--",
+            ".",
+        ],
+    ) {
         for line in names.lines() {
             let relative = normalize_diff_path(line);
             if !relative.is_empty() {
@@ -2237,7 +2459,7 @@ fn git_commit_file_diff_for(root: &Path, sha: &str, relative: &str) -> Result<Gi
 
 fn git_stage_file_for(root: &Path, relative: &str) -> Result<(), String> {
     let relative = resolve_repo_path(root, relative)?;
-    git_checked(root, &["add", "--", &relative])
+    git_checked(root, &["--literal-pathspecs", "add", "--", &relative])
 }
 
 fn git_stage_contents_for(root: &Path, relative: &str, contents: &[u8]) -> Result<(), String> {
@@ -2312,7 +2534,16 @@ fn git_hash_object(root: &Path, relative: &str, contents: &[u8]) -> Result<Strin
 
 fn git_unstage_file_for(root: &Path, relative: &str) -> Result<(), String> {
     let relative = resolve_repo_path(root, relative)?;
-    git_checked(root, &["restore", "--staged", "--", &relative])
+    git_checked(
+        root,
+        &[
+            "--literal-pathspecs",
+            "restore",
+            "--staged",
+            "--",
+            &relative,
+        ],
+    )
 }
 
 fn git_discard_file_for(root: &Path, relative: &str) -> Result<(), String> {
@@ -2373,6 +2604,192 @@ fn git_staged_context_for(root: &Path) -> Result<GitStagedContext, String> {
     })
 }
 
+fn git_locate_file(path: &Path) -> Result<Option<GitFileLocation>, String> {
+    if !path.is_absolute() || path.as_os_str().to_string_lossy().contains('\0') {
+        return Err("Invalid file path".into());
+    }
+    let mut parent = path.parent().ok_or("Invalid file path")?;
+    while !parent.is_dir() {
+        parent = parent.parent().ok_or("File has no existing parent")?;
+    }
+    // Canonicalize parents rather than the file: deleted files still have a
+    // location, and a tracked symlink belongs to the checkout holding the link.
+    let directory = std::fs::canonicalize(parent).map_err(|e| e.to_string())?;
+    let actual = directory.join(path.strip_prefix(parent).map_err(|e| e.to_string())?);
+    let output = git_cmd()
+        .args(["-C"])
+        .arg(&directory)
+        .args(["rev-parse", "--show-toplevel"])
+        .output()
+        .map_err(|e| e.to_string())?;
+    if !output.status.success() {
+        let error = String::from_utf8_lossy(&output.stderr);
+        return if error.contains("not a git repository") {
+            Ok(None)
+        } else {
+            Err(error.trim().into())
+        };
+    }
+    let top = String::from_utf8(output.stdout).map_err(|e| e.to_string())?;
+    let top = Path::new(top.trim_end_matches(['\r', '\n']));
+    let repo = std::fs::canonicalize(top).map_err(|e| e.to_string())?;
+    let relative = actual.strip_prefix(&repo).map_err(|e| e.to_string())?;
+    Ok(Some(GitFileLocation {
+        // Git supplies a usable Windows path without canonicalize's verbatim prefix.
+        root: path_to_js(top),
+        relative: path_to_js(relative),
+    }))
+}
+
+/// A selection names literal files in exactly one checkout, never a directory
+/// or a pathspec that can widen the commit to other files or repositories.
+fn git_selected_paths(root: &Path, paths: &[String]) -> Result<Vec<String>, String> {
+    if paths.is_empty() {
+        return Err("Select at least one file".into());
+    }
+    let canonical_root = std::fs::canonicalize(root).map_err(|e| e.to_string())?;
+    let mut selected = Vec::new();
+    for path in paths {
+        let relative = path_to_js(Path::new(path));
+        if relative.contains('\0')
+            || Path::new(&relative).is_absolute()
+            || Path::new(&relative)
+                .components()
+                .any(|part| !matches!(part, std::path::Component::Normal(_)))
+            || relative.split('/').any(|part| {
+                part.is_empty() || matches!(part, "." | "..") || part.eq_ignore_ascii_case(".git")
+            })
+        {
+            return Err("Invalid selected file path".into());
+        }
+        let target = canonical_root.join(&relative);
+        let exists = match std::fs::symlink_metadata(&target) {
+            Ok(entry) if entry.is_dir() => {
+                return Err("Select files rather than directories".into())
+            }
+            Ok(_) => true,
+            Err(error) if error.kind() == ErrorKind::NotFound => false,
+            Err(error) => return Err(error.to_string()),
+        };
+        let location = git_locate_file(&canonical_root.join(&relative))?
+            .ok_or("Selected file is outside Git")?;
+        if std::fs::canonicalize(&location.root).map_err(|e| e.to_string())? != canonical_root {
+            return Err("Selected files must belong to this repository".into());
+        }
+        let tracked = git_output(
+            root,
+            &["--literal-pathspecs", "ls-files", "-z", "--", &relative],
+        )
+        .ok_or("Could not validate selected files")?;
+        if tracked
+            .split(|byte| *byte == 0)
+            .any(|entry| !entry.is_empty() && entry != relative.as_bytes())
+        {
+            return Err("Select files rather than directories".into());
+        }
+        let head_type = git_stdout(root, &["cat-file", "-t", &format!("HEAD:{relative}")]);
+        if head_type.as_deref() == Some("tree") {
+            return Err("Select files rather than directories".into());
+        }
+        if !exists && tracked.is_empty() && head_type.as_deref() != Some("blob") {
+            return Err("Selected file does not exist in this repository".into());
+        }
+        if !selected.contains(&relative) {
+            selected.push(relative);
+        }
+    }
+    Ok(selected)
+}
+
+fn git_commit_selected_for(root: &Path, message: &str, paths: &[String]) -> Result<(), String> {
+    if message.trim().is_empty() {
+        return Err("Commit message cannot be empty".into());
+    }
+    let paths = git_selected_paths(root, paths)?;
+    let existing: Vec<&str> = paths
+        .iter()
+        .filter(|path| std::fs::symlink_metadata(root.join(path)).is_ok())
+        .map(String::as_str)
+        .collect();
+    let mut add = vec!["--literal-pathspecs", "add", "-A", "--"];
+    add.extend(existing);
+    if add.len() > 4 {
+        git_checked(root, &add)?;
+    }
+    // --only takes the chosen working-tree files and preserves every other
+    // staged entry. Add existing files to make new files eligible for --only;
+    // already-staged deletions no longer match `git add` but do match `commit`.
+    let mut args = vec![
+        "--literal-pathspecs",
+        "commit",
+        "--only",
+        "--cleanup=strip",
+        "-m",
+        message.trim(),
+        "--",
+    ];
+    args.extend(paths.iter().map(String::as_str));
+    git_checked(root, &args).map_err(with_signing_hint)
+}
+
+struct GitSelectionIndex(PathBuf);
+
+impl Drop for GitSelectionIndex {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
+fn git_selected_context_for(root: &Path, paths: &[String]) -> Result<GitStagedContext, String> {
+    let paths = git_selected_paths(root, paths)?;
+    let index_dir = std::env::temp_dir().join(format!("monocode-git-selection-{}", Uuid::new_v4()));
+    let directory = std::fs::DirBuilder::new();
+    #[cfg(unix)]
+    let directory = {
+        use std::os::unix::fs::DirBuilderExt;
+        let mut directory = directory;
+        directory.mode(0o700);
+        directory
+    };
+    directory.create(&index_dir).map_err(|e| e.to_string())?;
+    let index = GitSelectionIndex(index_dir);
+    let run = |args: &[&str]| -> Result<String, String> {
+        let output = git_cmd()
+            .arg("--literal-pathspecs")
+            .arg("-C")
+            .arg(root)
+            .args(args)
+            .env("GIT_INDEX_FILE", index.0.join("index"))
+            .env("GIT_TERMINAL_PROMPT", "0")
+            .env("PATH", crate::harness::gui_search_path())
+            .output()
+            .map_err(|e| e.to_string())?;
+        if !output.status.success() {
+            return Err(String::from_utf8_lossy(&output.stderr).trim().into());
+        }
+        String::from_utf8(output.stdout).map_err(|e| e.to_string())
+    };
+    if git_stdout(root, &["rev-parse", "--verify", "HEAD"]).is_some() {
+        run(&["read-tree", "HEAD"])?;
+    } else {
+        run(&["read-tree", "--empty"])?;
+    }
+    let mut add = vec!["add", "-A", "--"];
+    add.extend(paths.iter().map(String::as_str));
+    run(&add)?;
+    Ok(GitStagedContext {
+        branch: git_branch(root),
+        summary: run(&["diff", "--cached", "--stat", "--no-renames"])?,
+        patch: run(&[
+            "diff",
+            "--cached",
+            "--no-ext-diff",
+            "--no-textconv",
+            "--no-renames",
+        ])?,
+    })
+}
+
 fn git_commit_for(root: &Path, message: &str) -> Result<(), String> {
     git_commit_args(root, message, &[])
 }
@@ -2389,7 +2806,18 @@ fn git_commit_args(root: &Path, message: &str, extra: &[&str]) -> Result<(), Str
     let mut args = vec!["commit"];
     args.extend_from_slice(extra);
     args.extend(["--cleanup=strip", "-m", message]);
-    git_checked(root, &args)
+    git_checked(root, &args).map_err(with_signing_hint)
+}
+
+/// Explain why signing fails here when the same commit works in a terminal.
+fn with_signing_hint(error: String) -> String {
+    if !error.contains("failed to sign") && !error.contains("ssh-keygen") {
+        return error;
+    }
+    format!(
+        "{error}\n\nGit couldn't sign this commit. MonoCode runs git without a terminal, \
+         so your signer needs a GUI passphrase prompt (e.g. pinentry-mac) or an unlocked agent."
+    )
 }
 
 fn git_head_message_for(root: &Path) -> Result<String, String> {
@@ -2406,7 +2834,7 @@ fn git_push_for(root: &Path) -> Result<(), String> {
 
 fn git_sync_changes_for(root: &Path) -> Result<(), String> {
     if git_stdout(root, &["rev-parse", "--abbrev-ref", "@{upstream}"]).is_some() {
-        git_checked(root, &["pull", "--no-edit", "--ff"])?;
+        git_checked(root, &["pull", "--no-edit", "--ff"]).map_err(with_signing_hint)?;
         return git_checked(root, &["push"]);
     }
     git_push_for(root)
@@ -2545,7 +2973,7 @@ fn git_github_work_items_for(
     let fields = if kind == "pr" {
         "number,title,url,state,createdAt,updatedAt,labels,assignees,isDraft"
     } else {
-        "number,title,url,state,createdAt,updatedAt,labels,assignees"
+        "number,title,url,state,stateReason,createdAt,updatedAt,labels,assignees"
     };
     let mut args = vec![
         kind.to_string(),
@@ -2592,7 +3020,7 @@ fn git_github_work_item_for(
     let fields = if kind == "pr" {
         "number,title,url,state,createdAt,updatedAt,labels,assignees,isDraft"
     } else {
-        "number,title,url,state,createdAt,updatedAt,labels,assignees"
+        "number,title,url,state,stateReason,createdAt,updatedAt,labels,assignees"
     };
     let json = gh_checked(
         root,
@@ -3585,11 +4013,13 @@ fn git_diff_full_context(root: &Path, base: &str, head: &str) -> Result<(String,
             "diff",
             "--no-color",
             "--no-ext-diff",
-            "--default-prefix",
+            "--src-prefix=a/",
+            "--dst-prefix=b/",
             &context,
             &three_dot,
         ],
         MAX_PR_DIFF_BYTES,
+        None,
     )
     .ok_or_else(|| format!("git diff failed for {base}...{head}"))?;
     if truncated {
@@ -3762,6 +4192,8 @@ fn parse_github_work_items(
         url: String,
         state: String,
         #[serde(default)]
+        state_reason: String,
+        #[serde(default)]
         created_at: String,
         #[serde(default)]
         updated_at: String,
@@ -3781,6 +4213,7 @@ fn parse_github_work_items(
             title: row.title,
             url: row.url,
             state: row.state.to_lowercase(),
+            state_reason: row.state_reason.to_lowercase(),
             created_at: row.created_at,
             updated_at: row.updated_at,
             labels: row
@@ -3891,7 +4324,119 @@ fn gh_checked(root: &Path, args: &[&str]) -> Result<String, String> {
     gh_run(root, args, false)
 }
 
+struct GitHubRateLimitBackoff {
+    until: SystemTime,
+    error: String,
+}
+
+// Shared by all webviews, including background Inbox and PR checks requests.
+static GITHUB_RATE_LIMIT_BACKOFF: Mutex<Option<GitHubRateLimitBackoff>> = Mutex::new(None);
+
 fn gh_run(root: &Path, args: &[&str], allow_empty: bool) -> Result<String, String> {
+    gh_with_backoff(
+        &GITHUB_RATE_LIMIT_BACKOFF,
+        args,
+        allow_empty,
+        |args, allow_empty| gh_run_raw(root, args, allow_empty),
+    )
+}
+
+fn github_rate_limit_error(
+    backoff: &mut Option<GitHubRateLimitBackoff>,
+    now: SystemTime,
+) -> Option<String> {
+    if let Some(active) = backoff.as_ref().filter(|active| now < active.until) {
+        return Some(active.error.clone());
+    }
+    *backoff = None;
+    None
+}
+
+fn gh_with_backoff(
+    backoff: &Mutex<Option<GitHubRateLimitBackoff>>,
+    args: &[&str],
+    allow_empty: bool,
+    mut run: impl FnMut(&[&str], bool) -> Result<String, String>,
+) -> Result<String, String> {
+    if let Ok(mut slot) = backoff.lock() {
+        if let Some(error) = github_rate_limit_error(&mut slot, SystemTime::now()) {
+            return Err(error);
+        }
+    }
+    let result = run(args, allow_empty);
+    let Err(error) = &result else {
+        return result;
+    };
+    let message = error.to_lowercase();
+    let primary = message.contains("api rate limit") && message.contains("exceeded");
+    let secondary = message.contains("secondary rate limit") || message.contains("abuse detection");
+    if !primary && !secondary {
+        return result;
+    }
+    // Stop other requests immediately and resolve the reset once. If GitHub
+    // cannot return it, retry after a minute rather than hammering the API.
+    if let Ok(mut slot) = backoff.lock() {
+        if github_rate_limit_error(&mut slot, SystemTime::now()).is_some() {
+            return result;
+        }
+        *slot = Some(GitHubRateLimitBackoff {
+            until: SystemTime::now() + Duration::from_secs(60),
+            error: error.clone(),
+        });
+    } else {
+        return result;
+    }
+    if primary && message.contains("graphql") {
+        // The REST /rate_limit endpoint can disagree with the live GraphQL
+        // quota. Query the same resource that reported the exhausted budget.
+        let reset = run(
+            &[
+                "api",
+                "graphql",
+                "-f",
+                "query=query { rateLimit { remaining resetAt } }",
+            ],
+            false,
+        )
+        .and_then(|json| parse_github_rate_limit_backoff(&json));
+        if let Ok(until) = reset {
+            if let Ok(mut slot) = backoff.lock() {
+                *slot = until
+                    .filter(|until| *until > SystemTime::now())
+                    .map(|until| GitHubRateLimitBackoff {
+                        until,
+                        error: error.clone(),
+                    });
+            }
+        }
+    }
+    result
+}
+
+fn parse_github_rate_limit_backoff(json: &str) -> Result<Option<SystemTime>, String> {
+    let response: serde_json::Value =
+        serde_json::from_str(json).map_err(|error| error.to_string())?;
+    let rate = &response["data"]["rateLimit"];
+    let remaining = rate["remaining"]
+        .as_u64()
+        .ok_or("GitHub did not return its remaining quota")?;
+    if remaining > 0 {
+        return Ok(None);
+    }
+    let reset = rate["resetAt"]
+        .as_str()
+        .ok_or("GitHub did not return its rate-limit reset")?;
+    let reset = time::OffsetDateTime::parse(reset, &time::format_description::well_known::Rfc3339)
+        .map_err(|error| error.to_string())?
+        .unix_timestamp();
+    let seconds = u64::try_from(reset).map_err(|error| error.to_string())?;
+    UNIX_EPOCH
+        .checked_add(Duration::from_secs(seconds.saturating_add(1)))
+        .map(Some)
+        .ok_or_else(|| "Invalid GitHub rate-limit reset".into())
+}
+
+fn gh_run_raw(root: &Path, args: &[&str], allow_empty: bool) -> Result<String, String> {
     let program = crate::harness::resolve_gui_binary("gh")
         .ok_or_else(|| "GitHub CLI (`gh`) is not installed.".to_string())?;
     let mut cmd = Command::new(&program);
@@ -3955,8 +4500,26 @@ fn git_cmd() -> Command {
     cmd
 }
 
+fn git_cmd_for_args_with_path(args: &[&str], gui_path: impl FnOnce() -> String) -> Command {
+    let mut cmd = git_cmd();
+    let args = args.strip_prefix(&["--literal-pathspecs"]).unwrap_or(args);
+    if matches!(
+        args.first().copied(),
+        Some("commit" | "push" | "pull" | "fetch" | "clone")
+    ) {
+        // Signers, hooks, credential helpers, and git-lfs may need the login-shell PATH.
+        cmd.env("PATH", gui_path());
+    }
+    cmd
+}
+
+fn git_cmd_for_args(args: &[&str]) -> Command {
+    git_cmd_for_args_with_path(args, crate::harness::gui_search_path)
+}
+
 pub(crate) fn git_checked(root: &Path, args: &[&str]) -> Result<(), String> {
-    let output = git_cmd()
+    let mut cmd = git_cmd_for_args(args);
+    let output = cmd
         .arg("--no-pager")
         .arg("-C")
         .arg(root)
@@ -3990,7 +4553,7 @@ fn git_run(root: &Path, args: &[&str]) -> Option<String> {
 }
 
 fn git_output(root: &Path, args: &[&str]) -> Option<Vec<u8>> {
-    let output = git_cmd()
+    let output = git_cmd_for_args(args)
         .arg("--no-pager")
         .arg("-C")
         .arg(root)
@@ -4005,7 +4568,26 @@ fn git_output(root: &Path, args: &[&str]) -> Option<Vec<u8>> {
     None
 }
 
-fn git_output_capped(root: &Path, args: &[&str], max_bytes: usize) -> Option<(Vec<u8>, bool)> {
+/// Queued 8 KiB chunks allowed between the git reader and the consumer.
+///
+/// `max_bytes` caps the buffer being built, not what the reader can run ahead:
+/// with an unbounded channel a slow or descheduled consumer lets the reader
+/// queue output with no limit at all. A small bound instead lets git's own
+/// stdout pipe (16 KiB on macOS, 64 KiB on Linux) fill and stall the child, so
+/// a read now holds `max_bytes` plus this queue, one scratch chunk, and the
+/// kernel's pipe — not `max_bytes` alone.
+///
+/// Cancelling is unaffected: the receiver is dropped on return, which unblocks
+/// a reader parked in `send`. A reader parked in `read` instead is a different
+/// case, and `stop` explains why that one is left detached.
+const GIT_OUTPUT_QUEUE_CHUNKS: usize = 16;
+
+pub(crate) fn git_output_capped(
+    root: &Path,
+    args: &[&str],
+    max_bytes: usize,
+    cancel: Option<&AtomicBool>,
+) -> Option<(Vec<u8>, bool)> {
     let mut child = git_cmd()
         .arg("--no-pager")
         .arg("-C")
@@ -4018,28 +4600,85 @@ fn git_output_capped(root: &Path, args: &[&str], max_bytes: usize) -> Option<(Ve
         .stderr(Stdio::null())
         .spawn()
         .ok()?;
-    let mut stdout = child.stdout.take()?;
-    let mut buf = Vec::new();
-    let mut chunk = [0u8; 8192];
-    loop {
-        let n = match stdout.read(&mut chunk) {
-            Ok(0) => break,
-            Ok(n) => n,
-            Err(_) => {
-                let _ = child.kill();
-                let _ = child.wait();
-                return None;
+    let Some(mut stdout) = child.stdout.take() else {
+        let _ = child.kill();
+        let _ = child.wait();
+        return None;
+    };
+    let (sender, receiver) = mpsc::sync_channel(GIT_OUTPUT_QUEUE_CHUNKS);
+    let reader = thread::Builder::new()
+        .name("git-output-reader".to_string())
+        .spawn(move || {
+            let mut chunk = vec![0u8; 8192];
+            loop {
+                match stdout.read(&mut chunk) {
+                    Ok(0) => {
+                        let _ = sender.send(Ok(Vec::new()));
+                        break;
+                    }
+                    Ok(read) => {
+                        if sender.send(Ok(chunk[..read].to_vec())).is_err() {
+                            break;
+                        }
+                    }
+                    Err(error) => {
+                        let _ = sender.send(Err(error));
+                        break;
+                    }
+                }
             }
-        };
-        let remaining = max_bytes.saturating_sub(buf.len());
-        if n > remaining {
-            buf.extend_from_slice(&chunk[..remaining]);
+        });
+    let mut reader = match reader {
+        Ok(reader) => Some(reader),
+        Err(_) => {
             let _ = child.kill();
             let _ = child.wait();
-            return Some((buf, true));
+            return None;
         }
-        buf.extend_from_slice(&chunk[..n]);
+    };
+    let stop = |child: &mut std::process::Child, reader: &mut Option<thread::JoinHandle<()>>| {
+        let _ = child.kill();
+        let _ = child.wait();
+        // Dropping the handle detaches the reader. A killed git process can leave
+        // a shell descendant holding the pipe, so joining here would re-block the
+        // cancelled search until that unrelated descendant exits.
+        reader.take();
+    };
+
+    let mut buf = Vec::new();
+    loop {
+        if cancel.is_some_and(|token| token.load(Ordering::Acquire)) {
+            stop(&mut child, &mut reader);
+            return None;
+        }
+        match receiver.recv_timeout(Duration::from_millis(100)) {
+            Ok(Ok(chunk)) if chunk.is_empty() => break,
+            Ok(Ok(chunk)) => {
+                let remaining = max_bytes.saturating_sub(buf.len());
+                if chunk.len() > remaining {
+                    buf.extend_from_slice(&chunk[..remaining]);
+                    stop(&mut child, &mut reader);
+                    return Some((buf, true));
+                }
+                buf.extend_from_slice(&chunk);
+            }
+            Ok(Err(_)) => {
+                stop(&mut child, &mut reader);
+                return None;
+            }
+            Err(mpsc::RecvTimeoutError::Timeout) => {
+                if cancel.is_some_and(|token| token.load(Ordering::Acquire)) {
+                    stop(&mut child, &mut reader);
+                    return None;
+                }
+            }
+            Err(mpsc::RecvTimeoutError::Disconnected) => {
+                stop(&mut child, &mut reader);
+                return None;
+            }
+        }
     }
+    let _ = reader.take().map(thread::JoinHandle::join);
     let status = child.wait().ok()?;
     if git_status_ok(&status, args) {
         Some((buf, false))
@@ -4049,7 +4688,8 @@ fn git_output_capped(root: &Path, args: &[&str], max_bytes: usize) -> Option<(Ve
 }
 
 fn git_status_ok(status: &std::process::ExitStatus, args: &[&str]) -> bool {
-    status.success() || (status.code() == Some(1) && args.first().copied() == Some("diff"))
+    status.success()
+        || (status.code() == Some(1) && matches!(args.first().copied(), Some("diff" | "grep")))
 }
 
 fn git_branch(root: &Path) -> Option<String> {
@@ -4396,13 +5036,52 @@ fn file_name(path: &Path) -> Option<String> {
         .map(str::to_owned)
 }
 
-fn walk_project_files(root: &Path) -> Vec<ProjectFile> {
+/// When a file walk should stop early.
+///
+/// The flag variant is what a search uses. `AfterEntries` exists so the
+/// per-entry check can be tested without a thread and a sleep: setting the flag
+/// from outside only proves the walk stops *somewhere*, which the up-front
+/// check would satisfy on its own, and timing a real cancellation is flaky on
+/// loaded CI.
+#[derive(Clone, Copy)]
+enum WalkStop<'a> {
+    Never,
+    Flag(&'a AtomicBool),
+    #[cfg(test)]
+    AfterEntries(usize),
+}
+
+impl<'a> WalkStop<'a> {
+    fn stopped(&self, _entries: usize) -> bool {
+        match self {
+            WalkStop::Never => false,
+            WalkStop::Flag(flag) => flag.load(Ordering::Acquire),
+            #[cfg(test)]
+            WalkStop::AfterEntries(limit) => _entries >= *limit,
+        }
+    }
+}
+
+impl<'a> From<Option<&'a AtomicBool>> for WalkStop<'a> {
+    fn from(cancel: Option<&'a AtomicBool>) -> Self {
+        match cancel {
+            Some(flag) => WalkStop::Flag(flag),
+            None => WalkStop::Never,
+        }
+    }
+}
+
+fn walk_project_files(root: &Path, stop: WalkStop<'_>) -> Vec<ProjectFile> {
     let ignore = Ignore::load(root);
     let mut files = Vec::new();
     let mut dirs = vec![root.to_path_buf()];
     let mut visited = 0usize;
+    let mut seen = 0usize;
 
     while let Some(dir) = dirs.pop() {
+        if stop.stopped(seen) {
+            break;
+        }
         visited += 1;
         if visited > MAX_WALK_DIRS || files.len() >= MAX_PROJECT_FILES {
             break;
@@ -4411,6 +5090,10 @@ fn walk_project_files(root: &Path) -> Vec<ProjectFile> {
             continue;
         };
         for ent in reader {
+            seen += 1;
+            if stop.stopped(seen) {
+                return files;
+            }
             let Ok(ent) = ent else { continue };
             let name = ent.file_name();
             let Some(name) = name.to_str() else { continue };
@@ -4717,7 +5400,7 @@ fn clone_repo_sync(url: &str, parent: &str) -> Result<String, String> {
         return Err(format!("{} already exists", dest.display()));
     }
     let dest_str = dest.to_str().ok_or("Invalid destination path")?;
-    let output = git_cmd()
+    let output = git_cmd_for_args(&["clone"])
         .args(["clone", "--", url, dest_str])
         .output()
         .map_err(|e| {
@@ -4954,8 +5637,117 @@ fn write_attachment_sync(name: &str, data: &str) -> Result<String, String> {
         stamp,
         safe_attachment_name(name)
     ));
-    std::fs::write(&path, bytes).map_err(|e| format!("{}: {e}", path.display()))?;
+    // A pasted screenshot can be a picture of whatever was on screen, so keep
+    // it owner-only rather than at the umask default of 0644 in a shared /tmp.
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    options
+        .open(&path)
+        .and_then(|mut file| file.write_all(&bytes))
+        .map_err(|e| format!("{}: {e}", path.display()))?;
     Ok(path.to_string_lossy().into_owned())
+}
+
+#[tauri::command]
+pub async fn save_generated_image(
+    app: AppHandle,
+    data: String,
+    name: String,
+) -> Result<GeneratedImageAsset, String> {
+    tauri::async_runtime::spawn_blocking(move || save_generated_image_sync(&app, &data, &name))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+fn save_generated_image_sync(
+    app: &AppHandle,
+    data: &str,
+    name: &str,
+) -> Result<GeneratedImageAsset, String> {
+    if data.len() as u64 > MAX_GENERATED_IMAGE_DATA_BYTES {
+        return Err(format!(
+            "Generated image is too large (maximum {} MB).",
+            MAX_GENERATED_IMAGE_BYTES / 1024 / 1024
+        ));
+    }
+    let encoded: String = data
+        .chars()
+        .filter(|ch| !ch.is_ascii_whitespace())
+        .collect();
+    let bytes = base64::Engine::decode(&base64::engine::general_purpose::STANDARD, encoded)
+        .map_err(|_| "Generated image data is not valid base64.".to_string())?;
+    if bytes.is_empty() || bytes.len() as u64 > MAX_GENERATED_IMAGE_BYTES {
+        return Err(format!(
+            "Generated image is too large (maximum {} MB).",
+            MAX_GENERATED_IMAGE_BYTES / 1024 / 1024
+        ));
+    }
+    if !is_png(&bytes) {
+        return Err("Generated image data is not a PNG image.".into());
+    }
+    let dir = app
+        .path()
+        .app_data_dir()
+        .map_err(|e| e.to_string())?
+        .join(GENERATED_IMAGE_DIR);
+    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    let safe_name = safe_attachment_name(name);
+    let destination = dir.join(format!("{}-{}.png", Uuid::new_v4(), safe_name));
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&destination)
+        .map_err(|e| format!("{}: {e}", destination.display()))?;
+    if let Err(error) = file.write_all(&bytes) {
+        let _ = std::fs::remove_file(&destination);
+        return Err(format!("{}: {error}", destination.display()));
+    }
+    Ok(GeneratedImageAsset {
+        path: destination.to_string_lossy().into_owned(),
+        mime_type: "image/png".into(),
+        size: bytes.len() as u64,
+    })
+}
+
+#[tauri::command]
+pub async fn delete_generated_images(app: AppHandle, paths: Vec<String>) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || delete_generated_images_sync(&app, &paths))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+pub(crate) fn delete_generated_images_sync(
+    app: &AppHandle,
+    paths: &[String],
+) -> Result<(), String> {
+    let root = app
+        .path()
+        .app_data_dir()
+        .map_err(|e| e.to_string())?
+        .join(GENERATED_IMAGE_DIR)
+        .canonicalize()
+        .map_err(|error| format!("Generated image directory is unavailable: {error}"))?;
+    for path in paths {
+        let candidate = match PathBuf::from(path).canonicalize() {
+            Ok(candidate) => candidate,
+            Err(error) if error.kind() == ErrorKind::NotFound => continue,
+            Err(error) => return Err(error.to_string()),
+        };
+        if !candidate.starts_with(&root) || !candidate.is_file() {
+            return Err("Invalid generated image path".into());
+        }
+        std::fs::remove_file(candidate).map_err(|error| error.to_string())?;
+    }
+    Ok(())
+}
+
+fn is_png(bytes: &[u8]) -> bool {
+    bytes.len() >= 8 && bytes.starts_with(&[0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a])
 }
 
 fn safe_attachment_name(name: &str) -> String {
@@ -5297,8 +6089,16 @@ pub async fn move_path(from: String, dest_parent: String) -> Result<String, Stri
 }
 
 #[tauri::command]
-pub fn reveal_path(path: String) -> Result<(), String> {
-    let path = expand_home(&path);
+pub async fn reveal_path(path: String) -> Result<(), String> {
+    // On Linux `xdg-open` can stay alive until the file manager window closes;
+    // waiting on it from the main thread hangs the UI.
+    tauri::async_runtime::spawn_blocking(move || reveal_path_sync(&path))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+fn reveal_path_sync(path: &str) -> Result<(), String> {
+    let path = expand_home(path);
     if !path.exists() {
         return Err(format!("{}: No such file or directory", path.display()));
     }
@@ -5317,10 +6117,14 @@ pub fn reveal_path(path: String) -> Result<(), String> {
 
     #[cfg(target_os = "windows")]
     {
+        use std::os::windows::process::CommandExt;
         // explorer.exe returns 1 even when it opened the folder.
         let path_str = path.to_string_lossy().replace('/', "\\");
+        // `.arg` would wrap the whole `/select,...` switch in quotes when the
+        // path has spaces; explorer ignores a quoted switch and opens its
+        // default folder instead. Only the path itself may be quoted.
         Command::new("explorer")
-            .arg(format!("/select,{path_str}"))
+            .raw_arg(format!("/select,\"{path_str}\""))
             .spawn()
             .map_err(|e| e.to_string())?;
         Ok(())
@@ -5361,15 +6165,148 @@ pub async fn open_path_with_default_app(path: String) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+    use std::sync::Arc;
 
     static TMP_SEQ: AtomicU64 = AtomicU64::new(0);
+
+    #[test]
+    fn github_rate_limit_blocks_other_commands_until_reset() {
+        let backoff = Mutex::new(None);
+        let error = "GraphQL: API rate limit already exceeded for user ID 1.";
+        let mut calls = 0;
+        let result = gh_with_backoff(&backoff, &["pr", "list"], false, |args, _| {
+            calls += 1;
+            if args[0] == "api" {
+                Ok(
+                    r#"{"data":{"rateLimit":{"remaining":0,"resetAt":"2099-01-01T00:00:00Z"}}}"#
+                        .into(),
+                )
+            } else {
+                Err(error.into())
+            }
+        });
+        assert_eq!(result.unwrap_err(), error);
+        assert_eq!(calls, 2);
+        assert_eq!(
+            gh_with_backoff(&backoff, &["issue", "view", "42"], false, |_, _| {
+                panic!("No command may reach GitHub before the reset")
+            })
+            .unwrap_err(),
+            error
+        );
+        backoff.lock().unwrap().as_mut().unwrap().until =
+            SystemTime::now() - Duration::from_secs(1);
+        assert_eq!(
+            gh_with_backoff(&backoff, &["pr", "list"], false, |_, _| Ok("fresh".into())).unwrap(),
+            "fresh"
+        );
+        assert!(backoff.lock().unwrap().is_none());
+    }
+
+    #[test]
+    fn github_rate_limit_probe_failure_still_pauses_requests() {
+        let backoff = Mutex::new(None);
+        let mut calls = 0;
+        assert!(gh_with_backoff(&backoff, &["pr", "list"], false, |_, _| {
+            calls += 1;
+            if calls == 1 {
+                Err("GraphQL: API rate limit already exceeded".into())
+            } else {
+                Err("offline".into())
+            }
+        })
+        .is_err());
+        assert_eq!(calls, 2);
+        assert!(gh_with_backoff(&backoff, &["pr", "view"], false, |_, _| {
+            panic!("A failed reset lookup must not cause a request storm")
+        })
+        .is_err());
+    }
+
+    #[test]
+    fn github_secondary_rate_limit_pauses_without_a_quota_probe() {
+        let backoff = Mutex::new(None);
+        let mut calls = 0;
+        assert!(gh_with_backoff(&backoff, &["pr", "list"], false, |_, _| {
+            calls += 1;
+            Err("You have exceeded a secondary rate limit".into())
+        })
+        .is_err());
+        assert_eq!(calls, 1);
+        assert!(backoff.lock().unwrap().is_some());
+    }
+
+    #[test]
+    fn github_network_errors_do_not_pause_other_commands() {
+        let backoff = Mutex::new(None);
+        assert!(gh_with_backoff(&backoff, &["pr", "list"], false, |_, _| {
+            Err("error connecting to api.github.com".into())
+        })
+        .is_err());
+        assert!(backoff.lock().unwrap().is_none());
+        assert!(gh_with_backoff(&backoff, &["pr", "view"], false, |_, _| {
+            Ok("fresh".into())
+        })
+        .is_ok());
+    }
+
+    #[test]
+    fn github_rate_limit_reset_parser_requires_valid_quota_data() {
+        let reset = parse_github_rate_limit_backoff(
+            r#"{"data":{"rateLimit":{"remaining":0,"resetAt":"2026-10-06T13:48:40Z"}}}"#,
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(reset, UNIX_EPOCH + Duration::from_secs(1791294521));
+        assert!(
+            parse_github_rate_limit_backoff(r#"{"data":{"rateLimit":{"remaining":10}}}"#)
+                .unwrap()
+                .is_none()
+        );
+        assert!(parse_github_rate_limit_backoff(r#"{"errors":[{"message":"offline"}]}"#).is_err());
+        assert!(parse_github_rate_limit_backoff(
+            r#"{"data":{"rateLimit":{"remaining":0,"resetAt":"invalid"}}}"#
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn claude_shell_commands_match_only_requested_bash_tool_ids() {
+        let dir = tmp("claude-shell-commands");
+        let path = dir.0.join("session.jsonl");
+        let records = [
+            serde_json::json!({"type":"assistant","message":{"content":[
+                {"type":"tool_use","id":"toolu_one","name":"Bash","input":{"command":"npm test"}},
+                {"type":"tool_use","id":"toolu_read","name":"Read","input":{"command":"ignore"}}
+            ]}}),
+            serde_json::json!({"type":"assistant","message":{"content":[
+                {"type":"tool_use","id":"toolu_two","name":"Bash","input":{"command":"git status"}}
+            ]}}),
+        ];
+        std::fs::write(&path, records.map(|record| record.to_string()).join("\n")).unwrap();
+        let commands =
+            claude_shell_commands_from_file(&path, &["toolu_one".into(), "toolu_read".into()])
+                .unwrap();
+        assert_eq!(
+            commands,
+            HashMap::from([("toolu_one".into(), "npm test".into())])
+        );
+    }
 
     fn assistant_text(text: &str, concat: &str) -> OmpAssistantText {
         OmpAssistantText {
             text: text.into(),
             concat: concat.into(),
         }
+    }
+
+    #[test]
+    fn generated_image_validation_accepts_png_only() {
+        assert!(is_png(&[0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]));
+        assert!(!is_png(&[0xff, 0xd8, 0xff, 0x00]));
+        assert!(!is_png(b"<html>"));
+        assert!(!is_png(&[]));
     }
 
     #[test]
@@ -5770,13 +6707,55 @@ mod tests {
         std::fs::write(dir.0.join(".gitignore"), "secret.txt\n").unwrap();
         std::fs::write(dir.0.join("secret.txt"), "nope\n").unwrap();
 
-        let files = walk_project_files(&dir.0);
+        let files = walk_project_files(&dir.0, WalkStop::Never);
         let paths = relative_paths(&files);
         assert!(paths.contains(&"app.ts"));
         assert!(paths.contains(&"src/main.ts"));
         assert!(paths.contains(&".gitignore"));
         assert!(!paths.iter().any(|r| r.contains("node_modules")));
         assert!(!paths.contains(&"secret.txt"));
+    }
+
+    #[test]
+    fn walk_stops_early_when_cancelled() {
+        let dir = tmp("index-walk-cancelled");
+        for index in 0..64 {
+            std::fs::create_dir_all(dir.0.join(format!("dir{index}"))).unwrap();
+            std::fs::write(dir.0.join(format!("dir{index}")).join("app.ts"), "x\n").unwrap();
+        }
+        let uncancelled = walk_project_files(&dir.0, WalkStop::Never);
+        assert_eq!(uncancelled.len(), 64);
+
+        let cancel = AtomicBool::new(true);
+        assert!(walk_project_files(&dir.0, WalkStop::Flag(&cancel)).is_empty());
+        // The same walk when nothing is cancelled must still see every file.
+        let live = AtomicBool::new(false);
+        assert_eq!(walk_project_files(&dir.0, WalkStop::Flag(&live)).len(), 64);
+    }
+
+    #[test]
+    fn walk_stops_between_entries_not_only_before_the_first_directory() {
+        let dir = tmp("index-walk-midway");
+        // Flat, so the entries the walk accepts are files: a tree of
+        // directories would be pushed, not collected, and stopping midway would
+        // still look empty.
+        for index in 0..64 {
+            std::fs::write(dir.0.join(format!("file{index}.ts")), "x\n").unwrap();
+        }
+        let all = walk_project_files(&dir.0, WalkStop::Never);
+        assert_eq!(all.len(), 64);
+
+        // Stopping partway through the first directory's entries is the only
+        // outcome that distinguishes the per-entry check from the up-front one:
+        // no up-front check yields all 64, a check that fires on the first
+        // directory yields 0.
+        let midway = walk_project_files(&dir.0, WalkStop::AfterEntries(5));
+        assert!(
+            !midway.is_empty() && midway.len() < all.len(),
+            "expected a partial listing, got {} of {}",
+            midway.len(),
+            all.len()
+        );
     }
 
     #[test]
@@ -5787,7 +6766,7 @@ mod tests {
         std::fs::create_dir_all(&bundle).unwrap();
         std::fs::write(bundle.join("Info.plist"), "x\n").unwrap();
 
-        let files = walk_project_files(&dir.0);
+        let files = walk_project_files(&dir.0, WalkStop::Never);
         let paths = relative_paths(&files);
         assert!(paths.contains(&"app.ts"));
         assert!(!paths.iter().any(|r| r.contains("Some.app")));
@@ -5959,6 +6938,32 @@ mod tests {
         assert!(!paths.iter().any(|r| r.contains("node_modules")));
     }
 
+    #[test]
+    fn a_cancelled_git_listing_does_not_return_the_index() {
+        let dir = tmp("index-git-cancel");
+        if !init_git_commit(&dir.0, &[("tracked.ts", "x\n")]) {
+            return;
+        }
+        let cancel = AtomicBool::new(true);
+        assert!(
+            git_ls_files(&dir.0, Some(&cancel)).is_none(),
+            "cancelled ls-files must not look like a missing git index"
+        );
+        // The walk still sees the file, so falling through after a cancelled
+        // `git_ls_files` would reintroduce the listing the cancel was meant
+        // to drop.
+        assert!(walk_project_files(&dir.0, WalkStop::Never)
+            .iter()
+            .any(|file| file.relative == "tracked.ts"));
+        let files =
+            list_project_files_sync_cancellable(&dir.0.to_string_lossy(), Some(&cancel)).unwrap();
+        assert!(files.is_empty());
+        assert!(git_ls_files(&dir.0, None)
+            .unwrap()
+            .iter()
+            .any(|file| file.relative == "tracked.ts"));
+    }
+
     fn init_git(dir: &Path, branch: &str, origin: Option<&str>) -> bool {
         let init = Command::new("git").args(["init"]).current_dir(dir).output();
         let Ok(init) = init else { return false };
@@ -6050,6 +7055,225 @@ mod tests {
     }
 
     #[test]
+    fn selected_commit_preserves_other_staged_files() {
+        let repo = tmp("selected-commit");
+        assert!(init_git_commit(
+            &repo.0,
+            &[("chosen.txt", "old\n"), ("other.txt", "old\n")]
+        ));
+        std::fs::write(repo.0.join("other.txt"), "unrelated staged\n").unwrap();
+        assert!(git(&repo.0, &["add", "other.txt"]));
+        std::fs::write(repo.0.join("chosen.txt"), "partial staging\n").unwrap();
+        assert!(git(&repo.0, &["add", "chosen.txt"]));
+        std::fs::write(repo.0.join("chosen.txt"), "chosen working tree\n").unwrap();
+
+        git_commit_selected_for(&repo.0, "Selected only", &["chosen.txt".into()]).unwrap();
+        assert_eq!(
+            git_stdout(&repo.0, &["show", "HEAD:chosen.txt"]).as_deref(),
+            Some("chosen working tree")
+        );
+        assert_eq!(
+            git_stdout(&repo.0, &["show", "HEAD:other.txt"]).as_deref(),
+            Some("old")
+        );
+        assert_eq!(
+            git_stdout(&repo.0, &["show", ":other.txt"]).as_deref(),
+            Some("unrelated staged")
+        );
+        assert_eq!(
+            git_stdout(&repo.0, &["diff", "--cached", "--name-only"]).as_deref(),
+            Some("other.txt")
+        );
+        // The existing whole-index workflow remains available to other panels.
+        git_commit_for(&repo.0, "Remaining staged work").unwrap();
+        assert_eq!(
+            git_stdout(&repo.0, &["show", "HEAD:other.txt"]).as_deref(),
+            Some("unrelated staged")
+        );
+    }
+
+    #[test]
+    fn selected_context_keeps_index_and_excluded_content_private() {
+        let repo = tmp("selected-context");
+        assert!(init_git_commit(
+            &repo.0,
+            &[
+                ("chosen.txt", "old\n"),
+                ("secret.txt", "old\n"),
+                ("deleted.txt", "gone\n")
+            ]
+        ));
+        std::fs::write(repo.0.join("secret.txt"), "EXCLUDED_SECRET\n").unwrap();
+        std::fs::write(repo.0.join("chosen.txt"), "partial staging\n").unwrap();
+        assert!(git(&repo.0, &["add", "."]));
+        std::fs::write(repo.0.join("chosen.txt"), "selected work\n").unwrap();
+        std::fs::write(repo.0.join("new.txt"), "selected new\n").unwrap();
+        std::fs::remove_file(repo.0.join("deleted.txt")).unwrap();
+        assert!(git(&repo.0, &["add", "deleted.txt"]));
+        let index = std::fs::read(repo.0.join(".git/index")).unwrap();
+        let head = git_stdout(&repo.0, &["rev-parse", "HEAD"]);
+        let paths = vec!["chosen.txt".into(), "new.txt".into(), "deleted.txt".into()];
+
+        let context = git_selected_context_for(&repo.0, &paths).unwrap();
+        assert!(context.patch.contains("+selected work"));
+        assert!(context.patch.contains("+selected new"));
+        assert!(context.patch.contains("-gone"));
+        assert!(!context.patch.contains("EXCLUDED_SECRET"));
+        assert!(!context.summary.contains("secret.txt"));
+        assert_eq!(std::fs::read(repo.0.join(".git/index")).unwrap(), index);
+        assert_eq!(git_stdout(&repo.0, &["rev-parse", "HEAD"]), head);
+
+        git_commit_selected_for(&repo.0, "Add and delete selected files", &paths).unwrap();
+        assert_eq!(
+            git_stdout(&repo.0, &["show", "HEAD:new.txt"]).as_deref(),
+            Some("selected new")
+        );
+        assert!(git_stdout(&repo.0, &["show", "HEAD:deleted.txt"]).is_none());
+        assert_eq!(
+            git_stdout(&repo.0, &["show", ":secret.txt"]).as_deref(),
+            Some("EXCLUDED_SECRET")
+        );
+    }
+
+    #[test]
+    fn selected_files_work_without_a_head() {
+        let repo = tmp("selected-unborn");
+        assert!(init_git(&repo.0, "main", None));
+        std::fs::write(repo.0.join("chosen.txt"), "chosen\n").unwrap();
+        std::fs::write(repo.0.join("other.txt"), "other\n").unwrap();
+        assert!(git(&repo.0, &["add", "other.txt"]));
+        let paths = vec!["chosen.txt".into()];
+        assert!(git_selected_context_for(&repo.0, &paths)
+            .unwrap()
+            .patch
+            .contains("+chosen"));
+        git_commit_selected_for(&repo.0, "First selected commit", &paths).unwrap();
+        assert_eq!(
+            git_stdout(&repo.0, &["ls-tree", "--name-only", "HEAD"]).as_deref(),
+            Some("chosen.txt")
+        );
+        assert_eq!(
+            git_stdout(&repo.0, &["diff", "--cached", "--name-only"]).as_deref(),
+            Some("other.txt")
+        );
+    }
+
+    #[test]
+    fn selected_paths_reject_directories_and_other_repositories_before_staging() {
+        let repo = tmp("selected-invalid");
+        assert!(init_git_commit(&repo.0, &[("chosen.txt", "old\n")]));
+        let nested = repo.0.join("nested");
+        std::fs::create_dir(&nested).unwrap();
+        assert!(init_git_commit(&nested, &[("file.txt", "nested\n")]));
+        std::fs::create_dir(repo.0.join("missing-folder")).unwrap();
+        std::fs::write(repo.0.join("missing-folder/child.txt"), "child\n").unwrap();
+        assert!(git(&repo.0, &["add", "missing-folder/child.txt"]));
+        std::fs::remove_dir_all(repo.0.join("missing-folder")).unwrap();
+        std::fs::write(repo.0.join("chosen.txt"), "unstaged\n").unwrap();
+        let index = std::fs::read(repo.0.join(".git/index")).unwrap();
+        for invalid in [
+            "",
+            "../escape",
+            ".git/config",
+            "./chosen.txt",
+            "nested/file.txt",
+            "missing-folder",
+            "absent.txt",
+        ] {
+            let paths = vec!["chosen.txt".into(), invalid.into()];
+            assert!(
+                git_commit_selected_for(&repo.0, "Invalid", &paths).is_err(),
+                "{invalid}"
+            );
+            assert!(
+                git_selected_context_for(&repo.0, &paths).is_err(),
+                "{invalid}"
+            );
+            assert_eq!(std::fs::read(repo.0.join(".git/index")).unwrap(), index);
+        }
+        assert!(git_commit_selected_for(&repo.0, "Empty", &[]).is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn selected_filenames_are_literal() {
+        let repo = tmp("selected-literal");
+        assert!(init_git_commit(&repo.0, &[("other.txt", "old\n")]));
+        std::fs::write(repo.0.join("other.txt"), "excluded\n").unwrap();
+        let paths: Vec<String> = [
+            "*",
+            ":(glob)*",
+            "-flag",
+            "line\nbreak",
+            "back\\slash",
+            "hello é.txt",
+        ]
+        .into_iter()
+        .map(String::from)
+        .collect();
+        for path in &paths {
+            std::fs::write(repo.0.join(path), "literal file\n").unwrap();
+        }
+        git_commit_selected_for(&repo.0, "Literal filenames", &paths).unwrap();
+        assert_eq!(
+            git_stdout(&repo.0, &["show", "HEAD:other.txt"]).as_deref(),
+            Some("old")
+        );
+        for path in paths {
+            assert_eq!(
+                git_stdout(&repo.0, &["show", &format!("HEAD:{path}")]).as_deref(),
+                Some("literal file")
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn selected_symlinks_do_not_read_or_commit_outside_files() {
+        use std::os::unix::fs::symlink;
+        let repo = tmp("selected-symlinks");
+        let outside = tmp("selected-outside");
+        assert!(init_git_commit(&repo.0, &[("chosen.txt", "old\n")]));
+        std::fs::write(outside.0.join("secret.txt"), "OUTSIDE_SECRET\n").unwrap();
+        symlink(outside.0.join("secret.txt"), repo.0.join("file-link")).unwrap();
+        symlink(&outside.0, repo.0.join("dir-link")).unwrap();
+        let context = git_selected_context_for(&repo.0, &["file-link".into()]).unwrap();
+        assert!(!context.patch.contains("OUTSIDE_SECRET"));
+        assert!(context.patch.contains("new file mode 120000"));
+        assert!(git_selected_context_for(&repo.0, &["dir-link/secret.txt".into()]).is_err());
+        assert!(
+            git_commit_selected_for(&repo.0, "Escape", &["dir-link/secret.txt".into()]).is_err()
+        );
+    }
+
+    #[test]
+    fn locate_files_distinguishes_repos_worktrees_and_deleted_parents() {
+        let home = tmp("locate-files");
+        let a = home.0.join("a");
+        let b = home.0.join("b");
+        std::fs::create_dir(&a).unwrap();
+        std::fs::create_dir(&b).unwrap();
+        assert!(init_git_commit(&a, &[("file.txt", "a\n")]));
+        assert!(init_git_commit(&b, &[("file.txt", "b\n")]));
+        let tree = home.0.join("worktree");
+        assert!(git(
+            &a,
+            &["worktree", "add", "-b", "other", tree.to_str().unwrap()]
+        ));
+        for (root, relative) in [
+            (&a, "deleted/folder/file.txt"),
+            (&b, "file.txt"),
+            (&tree, "file.txt"),
+        ] {
+            let canonical = std::fs::canonicalize(root).unwrap();
+            let location = git_locate_file(&root.join(relative)).unwrap().unwrap();
+            assert_eq!(std::fs::canonicalize(&location.root).unwrap(), canonical);
+            assert_eq!(location.relative, relative);
+        }
+        assert_eq!(git_locate_file(&home.0.join("outside.txt")).unwrap(), None);
+    }
+
+    #[test]
     fn git_diff_stats_are_zero_outside_a_repo() {
         let dir = tmp("git-diff-none");
         std::fs::write(dir.0.join("notes.txt"), "hello\n").unwrap();
@@ -6127,6 +7351,41 @@ mod tests {
         assert_eq!(untracked.status, "untracked");
         assert_eq!(untracked.additions, 2);
         assert_eq!(untracked.deletions, 0);
+    }
+
+    #[test]
+    fn git_diff_files_keep_paths_relative_to_nested_workspace() {
+        let dir = tmp("git-diff-nested-workspace");
+        let workspace = dir.0.join("sub");
+        std::fs::create_dir_all(workspace.join("sub")).unwrap();
+        assert!(init_git_commit(
+            &dir.0,
+            &[("sub/file.txt", "original\n"), ("sub/second.txt", "old\n")],
+        ));
+        std::fs::write(workspace.join("file.txt"), "staged\n").unwrap();
+        assert!(git(&dir.0, &["add", "--", "sub/file.txt"]));
+        std::fs::write(workspace.join("second.txt"), "unstaged\n").unwrap();
+        // Without --relative this collides with the tracked sub/file.txt key.
+        std::fs::write(workspace.join("sub/file.txt"), "untracked\n").unwrap();
+
+        let changes = git_diff_files_for(&workspace);
+        assert_eq!(changes.files.len(), 3);
+        for (relative, staged, unstaged) in [
+            ("file.txt", true, false),
+            ("second.txt", false, true),
+            ("sub/file.txt", false, true),
+        ] {
+            let file = changes
+                .files
+                .iter()
+                .find(|file| file.relative == relative)
+                .unwrap();
+            assert_eq!(file.path, path_to_js(&workspace.join(relative)));
+            assert_eq!((file.staged, file.unstaged), (staged, unstaged));
+        }
+        let staged = git_file_diff_for(&workspace, "file.txt", true).unwrap();
+        assert_eq!(staged.original, "original\n");
+        assert_eq!(staged.current, "staged\n");
     }
 
     #[test]
@@ -6449,6 +7708,124 @@ mod tests {
             .unwrap();
         assert!(!unstaged.staged);
         assert!(unstaged.unstaged);
+    }
+
+    #[test]
+    fn git_stage_and_unstage_directory() {
+        let dir = tmp("git-stage-directory");
+        std::fs::create_dir_all(dir.0.join("src/nested")).unwrap();
+        std::fs::create_dir_all(dir.0.join("src-other")).unwrap();
+        if !init_git_commit(
+            &dir.0,
+            &[
+                ("src/app.ts", "before\n"),
+                ("src/nested/deleted.ts", "delete me\n"),
+                ("src-other/app.ts", "before\n"),
+                ("ready.txt", "before\n"),
+                (".gitignore", "src/ignored.txt\n"),
+            ],
+        ) {
+            return;
+        }
+        std::fs::write(dir.0.join("src/app.ts"), "after\n").unwrap();
+        std::fs::remove_dir_all(dir.0.join("src/nested")).unwrap();
+        std::fs::create_dir_all(dir.0.join("src/added")).unwrap();
+        std::fs::write(dir.0.join("src/added/new.ts"), "new\n").unwrap();
+        std::fs::write(dir.0.join("src/ignored.txt"), "ignored\n").unwrap();
+        std::fs::write(dir.0.join("src-other/app.ts"), "outside\n").unwrap();
+        std::fs::write(dir.0.join("ready.txt"), "ready\n").unwrap();
+        git_stage_file_for(&dir.0, "ready.txt").unwrap();
+
+        git_stage_file_for(&dir.0, "src").unwrap();
+        let index = git_diff_index_for(&dir.0);
+        assert_eq!(index.files.len(), 5);
+        for file in &index.files {
+            let in_folder = file.relative.starts_with("src/");
+            assert_eq!(file.staged, in_folder || file.relative == "ready.txt");
+            assert_eq!(file.unstaged, file.relative == "src-other/app.ts");
+        }
+
+        git_unstage_file_for(&dir.0, "src").unwrap();
+        let index = git_diff_index_for(&dir.0);
+        assert_eq!(index.files.len(), 5);
+        for file in &index.files {
+            assert_eq!(file.staged, file.relative == "ready.txt");
+            assert_eq!(file.unstaged, file.relative != "ready.txt");
+        }
+        assert_eq!(
+            std::fs::read_to_string(dir.0.join("src/app.ts")).unwrap(),
+            "after\n"
+        );
+        assert!(!dir.0.join("src/nested").exists());
+    }
+
+    #[test]
+    fn git_stage_and_unstage_deleted_directory() {
+        let dir = tmp("git-stage-deleted-directory");
+        std::fs::create_dir_all(dir.0.join("deleted/nested")).unwrap();
+        if !init_git_commit(&dir.0, &[("deleted/nested/file.ts", "before\n")]) {
+            return;
+        }
+        std::fs::remove_dir_all(dir.0.join("deleted")).unwrap();
+        git_stage_file_for(&dir.0, "deleted").unwrap();
+        let index = git_diff_index_for(&dir.0);
+        assert_eq!(index.files.len(), 1);
+        assert!(index.files[0].staged);
+        assert!(!index.files[0].unstaged);
+
+        git_unstage_file_for(&dir.0, "deleted").unwrap();
+        let index = git_diff_index_for(&dir.0);
+        assert_eq!(index.files.len(), 1);
+        assert!(!index.files[0].staged);
+        assert!(index.files[0].unstaged);
+        assert!(!dir.0.join("deleted").exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn git_stage_and_unstage_literal_directory_names() {
+        for folder in ["*", "folder?", "[ab]", ":(glob)*"] {
+            let dir = tmp("git-stage-literal-directory");
+            for directory in [folder, "a", "folderx"] {
+                std::fs::create_dir(dir.0.join(directory)).unwrap();
+            }
+            let inside = format!("{folder}/inside.txt");
+            let tracked = [
+                inside.as_str(),
+                "a/other.txt",
+                "folderx/other.txt",
+                "ready.txt",
+            ];
+            let initial: Vec<_> = tracked.iter().map(|path| (*path, "before\n")).collect();
+            if !init_git_commit(&dir.0, &initial) {
+                return;
+            }
+            for path in tracked {
+                std::fs::write(dir.0.join(path), "after\n").unwrap();
+            }
+            std::fs::write(dir.0.join("private.txt"), "unrelated untracked data\n").unwrap();
+            let staged_paths = || {
+                git_run(&dir.0, &["diff", "--cached", "--name-only", "-z"])
+                    .unwrap()
+                    .split('\0')
+                    .filter(|path| !path.is_empty())
+                    .map(str::to_string)
+                    .collect::<Vec<_>>()
+            };
+
+            git_stage_file_for(&dir.0, "ready.txt").unwrap();
+            git_stage_file_for(&dir.0, folder).unwrap();
+            let mut expected = vec![inside.clone(), "ready.txt".to_string()];
+            expected.sort();
+            assert_eq!(staged_paths(), expected, "stage folder {folder}");
+
+            git_unstage_file_for(&dir.0, folder).unwrap();
+            assert_eq!(staged_paths(), vec!["ready.txt"], "unstage folder {folder}");
+            assert_eq!(
+                std::fs::read_to_string(dir.0.join(&inside)).unwrap(),
+                "after\n"
+            );
+        }
     }
 
     #[test]
@@ -6885,6 +8262,7 @@ mod tests {
             "title": "Promo codes fail to apply",
             "url": "https://github.com/acme/web/issues/5138",
             "state": "OPEN",
+            "stateReason": "",
             "createdAt": "2026-08-20T09:00:00Z",
             "updatedAt": "2026-08-27T08:00:00Z",
             "labels": [{"name": "bug", "color": "d73a4a"}],
@@ -6895,6 +8273,7 @@ mod tests {
         assert_eq!(items[0].kind, "issue");
         assert_eq!(items[0].number, 5138);
         assert_eq!(items[0].state, "open");
+        assert_eq!(items[0].state_reason, "");
         assert_eq!(items[0].repo, "acme/web");
         assert_eq!(items[0].labels[0].name, "bug");
         assert_eq!(items[0].assignees[0].login, "maya");
@@ -6906,6 +8285,24 @@ mod tests {
         let payload = serde_json::to_value(&items[0]).unwrap();
         assert_eq!(payload["createdAt"], "2026-08-20T09:00:00Z");
         assert_eq!(payload["updatedAt"], "2026-08-27T08:00:00Z");
+    }
+
+    #[test]
+    fn parse_github_work_items_reads_issue_state_reason() {
+        let json = r#"[{
+            "number": 42,
+            "title": "Ship the fix",
+            "url": "https://github.com/acme/web/issues/42",
+            "state": "CLOSED",
+            "stateReason": "COMPLETED"
+        }]"#;
+        let items = parse_github_work_items(json, "issue", "acme/web").unwrap();
+        assert_eq!(items[0].state, "closed");
+        assert_eq!(items[0].state_reason, "completed");
+        assert_eq!(
+            serde_json::to_value(&items[0]).unwrap()["stateReason"],
+            "completed"
+        );
     }
 
     #[test]
@@ -7693,6 +9090,31 @@ mod tests {
     }
 
     #[test]
+    fn git_output_capped_keeps_queued_chunks_complete_and_ordered() {
+        let dir = tmp("git-output-bounded-queue");
+        // ~200 KiB, comfortably past the 128 KiB the reader queue can hold, so
+        // the reader is guaranteed to park in `send` while the consumer is
+        // behind. Every other cap test here uses a cap below a single 8 KiB
+        // chunk, which never fills one queue slot and so cannot catch a lost,
+        // duplicated, or reordered chunk.
+        let body: String = (0..12_000).map(|index| format!("line {index}\n")).collect();
+        if !init_git_commit(&dir.0, &[("many.txt", &body)]) {
+            return;
+        }
+
+        let (full, truncated) =
+            git_output_capped(&dir.0, &["show", ":many.txt"], 1 << 20, None).unwrap();
+        assert!(!truncated);
+        assert_eq!(full, body.as_bytes(), "queued chunks lost or reordered");
+
+        // Spans several chunks and lands mid-line.
+        let (capped, truncated) =
+            git_output_capped(&dir.0, &["show", ":many.txt"], 24_576, None).unwrap();
+        assert!(truncated);
+        assert_eq!(capped, body.as_bytes()[..24_576]);
+    }
+
+    #[test]
     fn git_output_capped_stops_before_buffering_the_rest() {
         let dir = tmp("git-output-capped");
         let big = "x".repeat(80_000);
@@ -7704,12 +9126,94 @@ mod tests {
             return;
         }
         let (bytes, truncated) =
-            git_output_capped(&dir.0, &["diff", "HEAD~1", "HEAD"], 1024).unwrap();
+            git_output_capped(&dir.0, &["diff", "HEAD~1", "HEAD"], 1024, None).unwrap();
         assert!(truncated);
         assert!(bytes.len() <= 1024);
-        let (head, truncated) = git_output_capped(&dir.0, &["rev-parse", "HEAD"], 1024).unwrap();
+        let (head, truncated) =
+            git_output_capped(&dir.0, &["rev-parse", "HEAD"], 1024, None).unwrap();
         assert!(!truncated);
         assert!(!head.is_empty());
+    }
+
+    #[test]
+    fn read_only_git_cmd_uses_inherited_path() {
+        assert!(!git_cmd()
+            .get_envs()
+            .any(|(key, _)| key == std::ffi::OsStr::new("PATH")));
+    }
+
+    #[test]
+    fn read_only_git_never_resolves_login_shell_path() {
+        for action in ["status", "diff", "rev-parse", "ls-files", "cat-file"] {
+            let cmd = git_cmd_for_args_with_path(&[action], || {
+                panic!("read-only git must not resolve the login-shell PATH")
+            });
+            assert!(!cmd
+                .get_envs()
+                .any(|(key, _)| key == std::ffi::OsStr::new("PATH")));
+        }
+    }
+
+    #[test]
+    fn git_actions_that_need_helpers_use_login_shell_path() {
+        for action in ["commit", "push", "pull", "fetch", "clone"] {
+            let cmd = git_cmd_for_args_with_path(&[action], || "gui-git-path".into());
+            assert!(cmd.get_envs().any(|(key, value)| {
+                key == std::ffi::OsStr::new("PATH")
+                    && value == Some(std::ffi::OsStr::new("gui-git-path"))
+            }));
+        }
+    }
+
+    #[test]
+    fn signing_hint_ignores_other_errors() {
+        let error = "nothing to commit, working tree clean".to_string();
+        assert_eq!(with_signing_hint(error.clone()), error);
+    }
+
+    #[test]
+    fn git_commit_reports_signing_failure_with_hint() {
+        let dir = tmp("git-commit-signing");
+        if !init_git_commit(&dir.0, &[("a.txt", "a\n")]) {
+            return;
+        }
+        std::fs::write(dir.0.join("a.txt"), "b\n").unwrap();
+        for args in [
+            ["config", "commit.gpgsign", "true"],
+            ["config", "gpg.format", "openpgp"],
+            ["config", "gpg.program", "/nonexistent/monocode-gpg"],
+        ] {
+            assert!(git(&dir.0, &args));
+        }
+        assert!(git(&dir.0, &["add", "."]));
+        let error = git_commit_for(&dir.0, "signed").unwrap_err();
+        assert!(error.contains("Git couldn't sign this commit"), "{error}");
+    }
+
+    #[test]
+    fn git_output_capped_cancels_a_silent_child() {
+        let dir = tmp("git-output-cancel-silent");
+        if !init_git_commit(&dir.0, &[("a.txt", "a\n")]) {
+            return;
+        }
+        let cancel = Arc::new(AtomicBool::new(false));
+        let setter = cancel.clone();
+        let setter_thread = thread::spawn(move || {
+            thread::sleep(Duration::from_millis(150));
+            setter.store(true, Ordering::Release);
+        });
+        let started = Instant::now();
+
+        let result = git_output_capped(
+            &dir.0,
+            &["-c", "alias.slow=!sleep 5", "slow"],
+            1024,
+            Some(&cancel),
+        );
+        setter_thread.join().unwrap();
+
+        assert!(result.is_none());
+        assert!(started.elapsed() < Duration::from_secs(3));
     }
 
     #[test]

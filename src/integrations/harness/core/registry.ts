@@ -1,4 +1,9 @@
-import type { HarnessId } from "../../../features/sessions/model/session";
+import type {
+  Block,
+  HarnessId,
+  TaskListMeta,
+  TurnIntent,
+} from "../../../features/sessions/model/session";
 import { invoke, isTauri } from "@tauri-apps/api/core";
 import type { GeneratedSessionTitle } from "../../../features/sessions/model/sessionTitle";
 import type { PrContent } from "../../../features/source-control/model/gitText";
@@ -8,6 +13,7 @@ import type { NativeCommandProvider } from "./nativeCommands";
 import type {
   ApprovalDecision,
   CompactContextInput,
+  HarnessEvent,
   RewindLastTurnInput,
   RewindLastTurnResult,
   SendTurnInput,
@@ -19,6 +25,24 @@ export type TitleInput = {
   cwd: string;
   message: string;
   providerAccountId?: string;
+};
+
+/** One-shot, isolated text generation shared by titles and side questions. */
+export type TextPromptInput = {
+  cwd: string;
+  providerAccountId?: string;
+  model?: string;
+  modelSettings?: Record<string, string>;
+  /** Codex defaults to unsaved threads; false allows resumable side questions. */
+  ephemeral?: boolean;
+  codexStore?: "mono";
+  threadId?: string;
+  onThreadId?: (threadId: string) => void;
+  intent?: TurnIntent;
+  prompt: string;
+  timeoutMs?: number;
+  signal?: AbortSignal;
+  onEvent?: (event: HarnessEvent) => void;
 };
 
 /**
@@ -62,12 +86,18 @@ export type HarnessAdapter = {
     cwd: string,
     providerAccountId?: string,
   ): void;
+  /** Seed provider task state from a restored session's persisted panels. */
+  restoreTaskLists?(threadId: string, lists: TaskListMeta[]): void;
   /** Refresh the model catalog overlay when supported. */
   refreshCatalog?(): Promise<void>;
   /** Optional LLM tab title for the first turn. */
   generateTitle?(input: TitleInput): Promise<GeneratedSessionTitle | null>;
   /** Optional LLM commit message from staged changes. */
-  generateCommitMessage?(cwd: string): Promise<string>;
+  generateCommitMessage?(
+    cwd: string,
+    signal?: AbortSignal,
+    paths?: readonly string[],
+  ): Promise<string>;
   /** Optional LLM pull request title/body from branch diff context. */
   generatePrContent?(
     cwd: string,
@@ -76,6 +106,10 @@ export type HarnessAdapter = {
   generateBranchName?(cwd: string, message: string): Promise<string | null>;
   /** Optional warmup for text-generation backends. */
   warmupText?(cwd: string): Promise<void>;
+  /** Run an isolated, read-only prompt without mutating the main session. */
+  runTextPrompt?(input: TextPromptInput): Promise<string>;
+  /** Stop an isolated text-generation backend. */
+  stopTextPrompt?(): Promise<void>;
 };
 
 const adapters = new Map<HarnessId, HarnessAdapter>();
@@ -84,8 +118,30 @@ const adapters = new Map<HarnessId, HarnessAdapter>();
  * After a turn settles, keep the child warm for follow-ups, then park it.
  * Resume state stays, so the next prompt respawns instead of starting over.
  */
-export const HARNESS_IDLE_PARK_MS = 5 * 60_000;
-const idleParkTimers = new Map<string, ReturnType<typeof setTimeout>>();
+export const HARNESS_IDLE_PARK_MS = 3 * 60_000;
+
+/**
+ * Each warm child is a CLI process of a few hundred MB, plus its MCP servers.
+ * Past `limit` idle ones, the least recently settled is parked early, never
+ * one `keep` claims (the conversation on screen) unless the limit is zero.
+ * Running turns are not idle, so they never count.
+ */
+export type HarnessIdleParkPolicy = {
+  limit: () => number;
+  keep: (sessionId: string) => boolean;
+};
+
+let idleParkPolicy: HarnessIdleParkPolicy = {
+  limit: () => Number.POSITIVE_INFINITY,
+  keep: () => false,
+};
+let idleLimitCheck: ReturnType<typeof setTimeout> | undefined;
+
+/** Map order is settle order: the first entry has been idle longest. */
+const idleParkTimers = new Map<
+  string,
+  { harness: HarnessId; timer: ReturnType<typeof setTimeout> }
+>();
 const sessionOperationTails = new Map<string, Promise<void>>();
 const sessionSteerTails = new Map<string, Promise<void>>();
 const activeTurnSessions = new Set<string>();
@@ -137,26 +193,56 @@ function queueSteerOperation<T>(
 }
 
 function cancelIdlePark(sessionId: string): void {
-  const timer = idleParkTimers.get(sessionId);
-  if (timer) clearTimeout(timer);
+  const idle = idleParkTimers.get(sessionId);
+  if (idle) clearTimeout(idle.timer);
   idleParkTimers.delete(sessionId);
 }
 
 function scheduleIdlePark(harness: HarnessId, sessionId: string): void {
   cancelIdlePark(sessionId);
-  idleParkTimers.set(
-    sessionId,
-    setTimeout(() => {
+  idleParkTimers.set(sessionId, {
+    harness,
+    timer: setTimeout(() => {
       idleParkTimers.delete(sessionId);
       void stopHarnessSession(harness, sessionId);
     }, HARNESS_IDLE_PARK_MS),
-  );
+  });
+  // Checked once the settling operation has left the queue, so a session
+  // with a follow-up already queued is told apart from the one finishing.
+  if (idleLimitCheck === undefined) {
+    idleLimitCheck = setTimeout(enforceHarnessIdleLimit, 0);
+  }
+}
+
+export function configureHarnessIdlePark(policy: HarnessIdleParkPolicy) {
+  idleParkPolicy = policy;
+}
+
+/** Park the longest-idle children past the limit; also run when it drops. */
+export function enforceHarnessIdleLimit(): void {
+  clearTimeout(idleLimitCheck);
+  idleLimitCheck = undefined;
+  const limit = Math.max(0, idleParkPolicy.limit());
+  let excess = idleParkTimers.size - limit;
+  for (const [sessionId, { harness }] of [...idleParkTimers]) {
+    if (excess <= 0) return;
+    if (sessionOperationTails.has(sessionId)) continue;
+    if (limit > 0 && idleParkPolicy.keep(sessionId)) continue;
+    excess -= 1;
+    void stopHarnessSession(harness, sessionId);
+  }
 }
 
 /** Test seam. */
 export function resetHarnessIdlePark(): void {
-  for (const timer of idleParkTimers.values()) clearTimeout(timer);
+  for (const { timer } of idleParkTimers.values()) clearTimeout(timer);
   idleParkTimers.clear();
+  clearTimeout(idleLimitCheck);
+  idleLimitCheck = undefined;
+  idleParkPolicy = {
+    limit: () => Number.POSITIVE_INFINITY,
+    keep: () => false,
+  };
 }
 
 export function registerHarness(adapter: HarnessAdapter): void {
@@ -195,10 +281,17 @@ export function sendHarnessTurn(input: SendTurnInput & { harness: HarnessId }) {
       await invoke("control_authorize_turn", {
         sessionId: input.sessionId,
         cwd: input.cwd,
+        appAccess: input.appAccess === true,
       });
     activeTurnSessions.add(input.sessionId);
     try {
-      await adapter.sendTurn(input);
+      await adapter.sendTurn({
+        ...input,
+        onAccepted: () => {
+          input.onEvent({ type: "turn.ready" });
+          input.onAccepted?.();
+        },
+      });
     } finally {
       activeTurnSessions.delete(input.sessionId);
       if (controlled)
@@ -339,13 +432,16 @@ export function bindHarnessSession(
   providerSessionId: string,
   cwd: string,
   providerAccountId?: string,
+  /** Restored transcript, so the adapter can reseed its task state. */
+  blocks?: Block[],
 ): void {
-  getHarness(harness)?.bindSession(
-    threadId,
-    providerSessionId,
-    cwd,
-    providerAccountId,
+  const adapter = getHarness(harness);
+  adapter?.bindSession(threadId, providerSessionId, cwd, providerAccountId);
+  if (!blocks || !adapter?.restoreTaskLists) return;
+  const lists = blocks.flatMap((block) =>
+    block.role === "tasks" && block.taskList ? [block.taskList] : [],
   );
+  if (lists.length > 0) adapter.restoreTaskLists(threadId, lists);
 }
 
 /**
@@ -353,8 +449,10 @@ export function bindHarnessSession(
  * Boot used to refresh every adapter; that spawned unused CLIs (Pi with
  * extensions can sit at ~1GB) even when the workspace never touched them.
  */
+/** `force` re-reads a catalog that already loaded, e.g. after a CLI update. */
 export async function refreshHarnessCatalogs(
   ids: Iterable<HarnessId>,
+  options?: { force?: boolean },
 ): Promise<void> {
   const wanted = new Set(ids);
   if (wanted.size === 0) return;
@@ -362,7 +460,10 @@ export async function refreshHarnessCatalogs(
     [...adapters.values()]
       .filter((adapter) => wanted.has(adapter.id))
       .map(async (adapter) => {
-        if (!adapter.refreshCatalog || hasLiveCatalog(adapter.id)) return;
+        if (!adapter.refreshCatalog) return;
+        // `force` marks an explicit user action (opening the model dropdown);
+        // routine refreshes keep skipping adapters with a live catalog.
+        if (!options?.force && hasLiveCatalog(adapter.id)) return;
         await adapter.refreshCatalog().catch((error: unknown) => {
           console.debug(`[monocode] ${adapter.id} catalog`, error);
         });
@@ -382,12 +483,17 @@ export async function generateHarnessTitle(
 export async function generateHarnessCommitMessage(
   harness: HarnessId,
   cwd: string,
+  signal?: AbortSignal,
+  paths?: readonly string[],
 ): Promise<string> {
   const adapter = requireHarness(harness);
   if (!adapter.generateCommitMessage) {
     throw new Error(`${harness} does not support commit message generation`);
   }
-  return adapter.generateCommitMessage(cwd);
+  signal?.throwIfAborted();
+  return paths === undefined
+    ? adapter.generateCommitMessage(cwd, signal)
+    : adapter.generateCommitMessage(cwd, signal, paths);
 }
 
 export async function generateHarnessPrContent(
@@ -414,4 +520,94 @@ export async function warmupHarnessText(
   cwd: string,
 ): Promise<void> {
   await getHarness(harness)?.warmupText?.(cwd);
+}
+
+export function canRunHarnessTextPrompt(harness: HarnessId): boolean {
+  const adapter = getHarness(harness);
+  return adapter?.live === true && adapter.runTextPrompt != null;
+}
+
+function stopTextPrompt(adapter: HarnessAdapter): Promise<void> {
+  return adapter.stopTextPrompt
+    ? adapter.stopTextPrompt().catch(() => undefined)
+    : Promise.resolve();
+}
+
+const activeTextPromptOwners = new Map<HarnessAdapter, Set<symbol>>();
+
+function beginTextPrompt(adapter: HarnessAdapter): symbol {
+  const owner = Symbol("text-prompt");
+  const owners = activeTextPromptOwners.get(adapter) ?? new Set<symbol>();
+  owners.add(owner);
+  activeTextPromptOwners.set(adapter, owners);
+  return owner;
+}
+
+function finishTextPrompt(
+  adapter: HarnessAdapter,
+  owner: symbol,
+  stopIfLast: boolean,
+): void {
+  const owners = activeTextPromptOwners.get(adapter);
+  if (!owners?.delete(owner)) return;
+  if (owners.size > 0) return;
+  activeTextPromptOwners.delete(adapter);
+  if (stopIfLast) void stopTextPrompt(adapter);
+}
+
+function cancelledTextPrompt(): Error {
+  return new Error("By-the-way request cancelled");
+}
+
+export async function runHarnessTextPrompt(
+  input: TextPromptInput & { harness: HarnessId },
+): Promise<string> {
+  const adapter = requireHarness(input.harness);
+  if (!adapter.live) {
+    throw new Error(`${input.harness} is not connected yet`);
+  }
+  if (!adapter.runTextPrompt) {
+    throw new Error(`${input.harness} does not support isolated text prompts`);
+  }
+
+  const signal = input.signal;
+  if (signal?.aborted) {
+    throw cancelledTextPrompt();
+  }
+
+  const owner = beginTextPrompt(adapter);
+  let run: Promise<string>;
+  try {
+    run = adapter.runTextPrompt(input);
+  } catch (error) {
+    finishTextPrompt(adapter, owner, false);
+    throw error;
+  }
+  if (!signal) {
+    try {
+      return await run;
+    } finally {
+      finishTextPrompt(adapter, owner, false);
+    }
+  }
+
+  let abortHandler: (() => void) | undefined;
+  const abortPromise = new Promise<never>((_, reject) => {
+    abortHandler = () => {
+      finishTextPrompt(adapter, owner, false);
+      reject(cancelledTextPrompt());
+    };
+    signal.addEventListener("abort", abortHandler, { once: true });
+    if (signal.aborted) abortHandler();
+  });
+  try {
+    return await Promise.race([run, abortPromise]);
+  } finally {
+    if (abortHandler) signal.removeEventListener("abort", abortHandler);
+    finishTextPrompt(adapter, owner, false);
+  }
+}
+
+export async function stopHarnessTextPrompts(): Promise<void> {
+  await Promise.all([...adapters.values()].map(stopTextPrompt));
 }

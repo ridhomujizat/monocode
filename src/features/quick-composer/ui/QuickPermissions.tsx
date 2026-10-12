@@ -2,8 +2,8 @@ import { useEffect, useId, useRef, useState } from "react";
 import {
   Check,
   Lock,
-  LockOpen,
   Pencil,
+  Shield,
   Sparkles,
 } from "../../../shared/ui/icons";
 import {
@@ -17,7 +17,7 @@ const ICONS = {
   supervised: Lock,
   "auto-accept-edits": Pencil,
   auto: Sparkles,
-  "full-access": LockOpen,
+  "full-access": Shield,
 };
 
 export function QuickPermissionIcon({
@@ -28,29 +28,32 @@ export function QuickPermissionIcon({
   className?: string;
 }) {
   const Icon = ICONS[mode];
-  return <Icon className={className} strokeWidth={1.75} />;
+  return (
+    <Icon
+      className={`${className ?? ""} ${mode === "full-access" ? "text-amber-400/90" : ""}`}
+      strokeWidth={1.75}
+    />
+  );
 }
 
 export function QuickPermissions({
   value,
   onChange,
   onClose,
-  embedded = false,
 }: {
   value: RuntimeMode;
   onChange: (mode: RuntimeMode) => void;
   onClose: () => void;
-  embedded?: boolean;
 }) {
   const root = useRef<HTMLDivElement>(null);
   const id = useId();
   const [active, setActive] = useState(RUNTIME_MODES.indexOf(value));
   useEffect(() => {
-    if (!embedded) root.current?.focus({ preventScroll: true });
-  }, [embedded]);
+    root.current?.focus({ preventScroll: true });
+  }, []);
   const pick = (mode: RuntimeMode) => {
     onChange(mode);
-    if (!embedded) onClose();
+    onClose();
   };
 
   return (
@@ -59,8 +62,8 @@ export function QuickPermissions({
       role="listbox"
       aria-label="Permissions"
       aria-activedescendant={`${id}-${active}`}
-      tabIndex={embedded ? 0 : -1}
-      className={`min-h-0 overflow-y-auto overscroll-none p-2 outline-none ${embedded ? "" : "border-t border-stroke"}`}
+      tabIndex={-1}
+      className="min-h-0 overflow-y-auto overscroll-none border-t border-stroke p-2 outline-none"
       onKeyDown={(event) => {
         if (event.key === "Escape") {
           event.preventDefault();
@@ -93,7 +96,7 @@ export function QuickPermissions({
           }}
           onMouseEnter={() => setActive(index)}
           onClick={() => pick(mode)}
-          className={`flex w-full items-center gap-3 rounded-lg px-3 py-2 text-left ${(embedded ? value === mode : active === index) ? "bg-selection-emphasis text-content" : "text-content/75 hover:bg-selection-hover"}`}
+          className={`flex w-full items-center gap-3 rounded-lg px-3 py-2 text-left ${active === index ? "bg-selection-emphasis text-content" : "text-content/75 hover:bg-selection-hover"}`}
         >
           <QuickPermissionIcon mode={mode} className="size-4 shrink-0" />
           <span className="min-w-0 flex-1">

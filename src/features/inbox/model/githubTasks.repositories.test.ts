@@ -75,6 +75,7 @@ describe("GitHub fork repositories", () => {
       if (
         command === "linear_status" ||
         command === "jira_status" ||
+        command === "kerjan_status" ||
         command === "gitlab_status" ||
         command === "azure_devops_status"
       ) {
@@ -114,6 +115,7 @@ describe("GitHub fork repositories", () => {
       if (
         command === "linear_status" ||
         command === "jira_status" ||
+        command === "kerjan_status" ||
         command === "gitlab_status" ||
         command === "azure_devops_status"
       ) {
@@ -132,6 +134,30 @@ describe("GitHub fork repositories", () => {
       items: [],
       errors: { github: "not a GitHub repository" },
     });
+  });
+
+  it("preserves the last list while GitHub is rate limited and refreshes it on recovery", async () => {
+    let limited = false;
+    const projects = [{ path: "/tmp/web" }];
+    const query = { assignedToMe: false, state: "open", search: "" } as const;
+    vi.mocked(invoke).mockImplementation(async (command, args) => {
+      if (command === "git_github_repositories") return ["acme/web"];
+      if (command === "git_github_work_items") {
+        if (limited)
+          throw new Error("GraphQL: API rate limit already exceeded");
+        return [workItem("acme/web", (args as { kind: "issue" | "pr" }).kind)];
+      }
+      return { connected: false };
+    });
+    const initial = await listInboxItems(projects, query);
+    limited = true;
+    const stale = await listInboxItems(projects, query, { force: true });
+    expect(stale.items).toEqual(initial.items);
+    expect(stale.errors.github).toContain("rate limit");
+    limited = false;
+    const recovered = await listInboxItems(projects, query, { force: true });
+    expect(recovered.items).toEqual(initial.items);
+    expect(recovered.errors).toEqual({});
   });
 });
 

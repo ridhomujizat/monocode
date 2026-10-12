@@ -4,12 +4,14 @@ import {
   Bot,
   Inbox,
   FolderTree,
+  Ghost,
+  Globe,
+  Internet,
   Keyboard,
   MessageSquare,
   Palette,
   SlidersHorizontal,
   Sparkles,
-  Wrench,
   type IconComponent,
 } from "../../shared/ui/icons";
 import { useLockOverscroll } from "../../shared/hooks/useLockOverscroll";
@@ -20,12 +22,14 @@ import {
 
 const SECTION_ICONS: Record<SettingsSectionId, IconComponent> = {
   general: SlidersHorizontal,
+  connections: Internet,
   appearance: Palette,
   keybindings: Keyboard,
   chat: MessageSquare,
   providers: Bot,
+  mcp: Globe,
   skills: Sparkles,
-  plugins: Wrench,
+  monos: Ghost,
   inbox: Inbox,
   worktrees: FolderTree,
   archive: Archive,

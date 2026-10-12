@@ -17,6 +17,7 @@ import {
   loadHiddenJiraProjectIds,
   type JiraIssue,
 } from "./jira";
+import { clearKerjanCache, kerjanConnected, listKerjanIssues } from "./kerjan";
 import {
   clearGitlabCache,
   gitlabConnected,
@@ -44,7 +45,7 @@ import { recordInboxSelfActivity } from "./inboxSelfActivity";
 export type GithubTaskKind = "issue" | "pr";
 export type GithubPrAction =
   "merge" | "squash" | "rebase" | "draft" | "ready" | "close" | "reopen";
-export type InboxKind = GithubTaskKind | "linear" | "jira";
+export type InboxKind = GithubTaskKind | "linear" | "jira" | "kerjan";
 
 export type GithubLabel = {
   name: string;
@@ -62,6 +63,8 @@ export type GithubWorkItem = {
   title: string;
   url: string;
   state: string;
+  /** GitHub issue closure reason, such as `completed` or `not_planned`. */
+  stateReason?: string;
   createdAt?: string;
   updatedAt: string;
   labels: GithubLabel[];
@@ -71,7 +74,14 @@ export type GithubWorkItem = {
 };
 
 export type InboxProvider =
-  "github" | "linear" | "jira" | "gitlab" | "azuredevops";
+  "github" | "linear" | "jira" | "kerjan" | "gitlab" | "azuredevops";
+
+/** Providers whose items are tracker tickets rather than repository issues. */
+export function isTrackerProvider(
+  provider: InboxProvider | undefined,
+): boolean {
+  return provider === "linear" || provider === "jira" || provider === "kerjan";
+}
 
 export type InboxItem = Omit<GithubWorkItem, "kind"> & {
   kind: InboxKind;
@@ -155,6 +165,8 @@ export type GithubWorkItemQuery = {
 export type InboxQuery = Omit<GithubWorkItemQuery, "kind"> & {
   linearHiddenTeamIds?: string[];
   jiraHiddenProjectIds?: string[];
+  /** Kerjan keeps its own default: the member's Tasks. */
+  kerjanAssignedToMe?: boolean;
 };
 
 export type InboxProviderErrors = Partial<Record<InboxProvider, string>>;
@@ -172,7 +184,7 @@ export type InboxListResult = {
   errors: InboxProviderErrors;
 };
 
-const INBOX_CACHE_FRESH_MS = 30_000;
+const INBOX_CACHE_FRESH_MS = 2 * 60_000;
 
 /** Closed history competes for the same slots, so an unfiltered fetch needs the wider page. */
 const INBOX_ALL_LIMIT = 100;
@@ -190,14 +202,27 @@ const repositoriesByPath = new Map<string, string[]>();
 const workItemByKey = new Map<string, GithubWorkItem>();
 const workItemInflight = new Map<string, Promise<GithubWorkItem>>();
 const detailsByKey = new Map<string, GithubWorkItemDetails>();
+const detailsInflight = new Map<string, Promise<GithubWorkItemDetails>>();
 const threadByKey = new Map<string, GithubWorkItemThread>();
 const threadInflight = new Map<string, Promise<GithubWorkItemThread>>();
 const prDiffByKey = new Map<string, GithubPrDiff>();
 const prDiffInflight = new Map<string, Promise<GithubPrDiff>>();
+/** When each details, thread and diff entry last arrived, by cache map key. */
+const fetchedAt = new Map<string, number>();
+
+/** Work item views can reuse anything fetched this recently instead of refetching. */
+export const GITHUB_WORK_ITEM_FRESH_MS = 30_000;
+
+function freshEnough(key: string, maxAgeMs: number | undefined): boolean {
+  if (maxAgeMs == null) return false;
+  const at = fetchedAt.get(key);
+  return at != null && Date.now() - at < maxAgeMs;
+}
 
 export function clearInboxCache() {
   inboxCacheGeneration += 1;
   clearJiraCache();
+  clearKerjanCache();
   clearKnownInboxItems();
   inboxListCache = null;
   inboxListInflight.clear();
@@ -206,6 +231,8 @@ export function clearInboxCache() {
   workItemByKey.clear();
   workItemInflight.clear();
   detailsByKey.clear();
+  detailsInflight.clear();
+  fetchedAt.clear();
   threadByKey.clear();
   threadInflight.clear();
   prDiffByKey.clear();
@@ -224,7 +251,8 @@ export function inboxListCacheKey(
     .join("|");
   const teams = [...(query.linearHiddenTeamIds ?? [])].sort().join(",");
   const jiraProjects = [...(query.jiraHiddenProjectIds ?? [])].sort().join(",");
-  return `${query.assignedToMe ? 1 : 0}:${query.state}:${paths}:${teams}:${jiraProjects}`;
+  const kerjan = (query.kerjanAssignedToMe ?? query.assignedToMe) ? 1 : 0;
+  return `${query.assignedToMe ? 1 : 0}:${query.state}:${paths}:${teams}:${jiraProjects}:${kerjan}`;
 }
 
 export function peekInboxList(
@@ -442,13 +470,29 @@ export async function githubWorkItemDetails(
   repo: string,
   kind: GithubTaskKind,
   number: number,
+  options?: { maxAgeMs?: number },
 ): Promise<GithubWorkItemDetails> {
-  const details = await invoke<GithubWorkItemDetails>(
+  const key = detailsCacheKey(repo, kind, number);
+  const cached = detailsByKey.get(key);
+  if (cached && freshEnough(`details:${key}`, options?.maxAgeMs)) {
+    return cached;
+  }
+  const pending = detailsInflight.get(key);
+  if (pending) return pending;
+  const promise = invoke<GithubWorkItemDetails>(
     "git_github_work_item_details",
     { cwd, repo, kind, number },
-  );
-  detailsByKey.set(detailsCacheKey(repo, kind, number), details);
-  return details;
+  )
+    .then((details) => {
+      detailsByKey.set(key, details);
+      fetchedAt.set(`details:${key}`, Date.now());
+      return details;
+    })
+    .finally(() => {
+      if (detailsInflight.get(key) === promise) detailsInflight.delete(key);
+    });
+  detailsInflight.set(key, promise);
+  return promise;
 }
 
 export function peekGithubWorkItemThread(
@@ -464,12 +508,16 @@ export async function githubWorkItemThread(
   repo: string,
   kind: GithubTaskKind,
   number: number,
-  options?: { force?: boolean },
+  options?: { force?: boolean; maxAgeMs?: number },
 ): Promise<GithubWorkItemThread> {
   const key = detailsCacheKey(repo, kind, number);
   if (options?.force) {
     threadByKey.delete(key);
     threadInflight.delete(key);
+  }
+  const cached = threadByKey.get(key);
+  if (cached && freshEnough(`thread:${key}`, options?.maxAgeMs)) {
+    return cached;
   }
   const pending = threadInflight.get(key);
   if (pending) return pending;
@@ -481,6 +529,7 @@ export async function githubWorkItemThread(
   })
     .then((thread) => {
       threadByKey.set(key, thread);
+      fetchedAt.set(`thread:${key}`, Date.now());
       return thread;
     })
     .finally(() => {
@@ -628,10 +677,12 @@ export async function githubPrDiff(
   cwd: string,
   repo: string,
   number: number,
-  options?: { fullContext?: boolean },
+  options?: { fullContext?: boolean; maxAgeMs?: number },
 ): Promise<GithubPrDiff> {
   const fullContext = options?.fullContext === true;
   const key = prDiffCacheKey(repo, number, fullContext);
+  const cached = prDiffByKey.get(key);
+  if (cached && freshEnough(`diff:${key}`, options?.maxAgeMs)) return cached;
   const pending = prDiffInflight.get(key);
   if (pending) return pending;
   const promise = invoke<GithubPrDiff>("git_github_pr_diff", {
@@ -642,6 +693,7 @@ export async function githubPrDiff(
   })
     .then((diff) => {
       prDiffByKey.set(key, diff);
+      fetchedAt.set(`diff:${key}`, Date.now());
       return diff;
     })
     .finally(() => {
@@ -665,6 +717,22 @@ export async function listInboxItems(
   const generation = inboxCacheGeneration;
   const promise = fetchInboxItems(projects, query)
     .then((result) => {
+      // Keep the last GitHub snapshot usable while the backend waits for a
+      // rate-limit reset. Other providers can continue refreshing normally.
+      if (result.errors.github && inboxListCache?.key === key) {
+        result = {
+          ...result,
+          items: dedupeInboxItems(
+            [
+              ...result.items,
+              ...inboxListCache.items.filter(
+                (item) => item.provider === "github",
+              ),
+            ],
+            projects.map((project) => project.path),
+          ),
+        };
+      }
       if (generation === inboxCacheGeneration) {
         inboxListCache = { key, ...result, fetchedAt: Date.now() };
       }
@@ -734,6 +802,19 @@ async function fetchInboxItems(
     errors.jira = inboxErrorMessage(error);
   }
 
+  let kerjanItems: InboxItem[] = [];
+  try {
+    const kerjan = await kerjanConnected();
+    if (kerjan.connected) {
+      kerjanItems = await listKerjanIssues({
+        assignedToMe: query.kerjanAssignedToMe ?? query.assignedToMe,
+        memberId: kerjan.memberId,
+      });
+    }
+  } catch (error) {
+    errors.kerjan = inboxErrorMessage(error);
+  }
+
   let gitlabItems: InboxItem[] = [];
   if ((await gitlabConnected()).connected) {
     const gitlab = await fetchRepositoryInboxItems(
@@ -764,6 +845,7 @@ async function fetchInboxItems(
         ...github.items,
         ...linearItems,
         ...jiraItems,
+        ...kerjanItems,
         ...gitlabItems,
         ...azureDevOpsItems,
       ],
@@ -837,9 +919,7 @@ async function fetchRepositoryInboxItems(
         state: query.state,
         limit: query.state === "all" ? INBOX_ALL_LIMIT : undefined,
       });
-      return items.map((item) =>
-        toInboxItem(item, project.path, project.repo),
-      );
+      return items.map((item) => toInboxItem(item, project.path, project.repo));
     }),
   );
   return collectInboxResults(await Promise.allSettled(jobs), preferredPaths);
@@ -1033,6 +1113,11 @@ export function inboxIdentityKey(item: {
     if (identity) return identity.toLowerCase();
     return `linear:${item.number}`;
   }
+  if (item.provider === "kerjan") {
+    const identity = item.identifier?.trim() || item.id?.trim();
+    if (identity) return identity.toLowerCase();
+    return `kerjan:${item.number}`;
+  }
   if (item.provider === "jira") {
     // The numeric id survives an issue moving projects; its key does not.
     const identity = item.id?.trim() || item.identifier?.trim();
@@ -1114,6 +1199,10 @@ export function inboxItemStatus(item: {
   if (item.kind === "jira") {
     return item.stateType?.trim().toLowerCase() === "done" ? "Closed" : "Open";
   }
+  if (item.kind === "kerjan") {
+    const type = item.stateType?.trim().toLowerCase();
+    return type === "done" || type === "canceled" ? "Closed" : "Open";
+  }
   if (item.draft) return "Draft";
   if (item.state === "merged") return "Merged";
   if (item.state === "closed") return "Closed";
@@ -1132,7 +1221,9 @@ export function matchesInboxQuery(item: InboxItem, query: string): boolean {
         ? "linear issue"
         : item.kind === "jira"
           ? "jira issue"
-          : "issue";
+          : item.kind === "kerjan"
+            ? "kerjan ticket task story"
+            : "issue";
   const haystack = [
     item.title,
     item.repo,
@@ -1164,18 +1255,24 @@ export function inboxItemRef(item: {
   number: number;
   identifier?: string;
 }): string {
-  if (item.provider === "linear" || item.provider === "jira") {
+  if (isTrackerProvider(item.provider)) {
     return item.identifier?.trim() || `#${item.number}`;
   }
   return `#${item.number}`;
 }
 
 export function inboxStartDraft(item: InboxItem, body?: string): string {
-  if (item.provider === "linear" || item.provider === "jira") {
-    const provider = item.provider === "jira" ? "Jira" : "Linear";
+  if (isTrackerProvider(item.provider)) {
+    const provider =
+      item.provider === "jira"
+        ? "Jira"
+        : item.provider === "kerjan"
+          ? "Kerjan"
+          : "Linear";
+    const noun = item.provider === "kerjan" ? "ticket" : "issue";
     const id = item.identifier?.trim() || `${provider} #${item.number}`;
     const title = item.title.trim() || id;
-    const lines = [`Work on this ${provider} issue:`, "", `${id} ${title}`];
+    const lines = [`Work on this ${provider} ${noun}:`, "", `${id} ${title}`];
     const url = item.url.trim();
     if (url) lines.push(url);
     const description = body?.trim();
@@ -1221,7 +1318,7 @@ export function inboxComposerCard(
   item: InboxItem,
   body?: string,
 ): InboxComposerCard {
-  const tracker = item.provider === "linear" || item.provider === "jira";
+  const tracker = isTrackerProvider(item.provider);
   return {
     provider: item.provider,
     kind: item.kind,

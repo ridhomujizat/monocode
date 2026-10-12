@@ -5,78 +5,67 @@
 <h1 align="center">MonoCode</h1>
 
 <p align="center">
-  <strong>A desktop UI for your coding agents.</strong>
+  <strong>A GUI for your coding agents.</strong>
 </p>
 
 <p align="center">
-  <img width="1680" height="1050" alt="Screenshot 2026-09-04 at 06 34 00" src="https://github.com/user-attachments/assets/2cd4a6ec-eb1e-4b45-8627-a76442ea3874" />
+  <img width="1680" height="1050" alt="MonoCode with agent sessions open side by side" src="https://github.com/user-attachments/assets/2cd4a6ec-eb1e-4b45-8627-a76442ea3874" />
 </p>
 
-Works with your subscriptions on Claude Code, Codex, Cursor, Grok Build, OpenCode, Antigravity, Pi, omp, fx, and Hermes Agent. If they’re installed and logged in, MonoCode can run them. Tabs are sessions. The composer is the input. MonoCode does not sell tokens.
+Works with your subscriptions on Claude Code, Codex, Cursor, Grok Build, OpenCode, Antigravity, Pi, omp, fx, Hermes Agent, and Devin. If they’re installed and logged in, MonoCode can run them. Tabs are sessions. The composer is the input. MonoCode does not sell tokens.
 
 ## Install
 
-> Install and log in to at least one provider first:
->
-> - [Claude Code](https://claude.com/product/claude-code) - `claude auth login`
-> - [Codex](https://developers.openai.com/codex/cli) - `codex login`
-> - [Cursor CLI](https://cursor.com/cli) - `agent login`
-> - [Grok Build](https://docs.x.ai/build/overview) - `curl -fsSL https://x.ai/cli/install.sh | bash` then `grok login`
-> - [OpenCode](https://opencode.ai) - `opencode auth login`
-> - [Antigravity](https://antigravity.google/docs/cli-install) (macOS/Linux) - `curl -fsSL https://antigravity.google/cli/install.sh | bash`, then run `agy` once to sign in
-> - [Pi](https://pi.dev/) - `npm install -g @earendil-works/pi-coding-agent`
-> - [omp](https://omp.sh) - `curl -fsSL https://omp.sh/install | sh`
-> - [fx](https://fx.sh) - `curl -fsSL https://fx.sh/setup.sh | bash` then `fx login`
-> - [Hermes Agent](https://github.com/NousResearch/hermes-agent) - macOS/Linux: `curl -fsSL https://hermes-agent.nousresearch.com/install.sh | bash`; Windows PowerShell: `iex (irm https://hermes-agent.nousresearch.com/install.ps1)`; then run `hermes model`
+Install and sign in to at least one supported agent first. See [provider setup](docs/providers.md) for instructions.
 
-macOS (Apple Silicon): download [MonoCode.dmg](https://dl.usemono.dev/MonoCode.dmg), open it, drag MonoCode to Applications.
+| Platform | Download |
+| --- | --- |
+| macOS, Apple Silicon | [MonoCode.dmg](https://dl.usemono.dev/MonoCode.dmg) |
+| macOS, Intel | [MonoCode_x64.dmg](https://dl.usemono.dev/MonoCode_x64.dmg) |
+| Linux, x86_64 | [.deb, .rpm, or AppImage](https://github.com/hardbeat920/monocode/releases/latest) |
+| Windows, x86_64 | [Installer](https://github.com/hardbeat920/monocode/releases/latest) |
 
-macOS (Intel): download [MonoCode_x64.dmg](https://dl.usemono.dev/MonoCode_x64.dmg), open it, drag MonoCode to Applications.
+On macOS, open the DMG and drag MonoCode to Applications. On Windows, run the installer. See [Linux setup](docs/install.md) for dependencies and package instructions.
 
-Linux (x86_64): download the `.deb` or AppImage from [GitHub Releases](https://github.com/hardbeat920/monocode/releases/latest). Install the `.deb` with `sudo apt install ./MonoCode_*.deb`, or make the AppImage executable with `chmod +x MonoCode_*.AppImage` and run it directly.
+## Get started
 
-Windows (x86_64): download the NSIS installer from [GitHub Releases](https://github.com/hardbeat920/monocode/releases/latest) and run it.
+Open a project folder, choose an agent, and send a message. Each tab is a session. Split panes to work with sessions side by side.
 
-## Some notes
+- Keep conversations organized by project.
+- Use separate Git worktrees for parallel tasks.
+- Edit files and review changes in the app.
+- Start a message with `/operator` to let an agent open sessions and manage worktrees and notes.
 
-This is very early and you should expect bugs.
+Monos are experimental agents that work across your projects. They keep a memory and can run scheduled tasks you set up with them.
 
-Small, focused pull requests are welcome. Anything large is worth an issue first - see [CONTRIBUTING.md](CONTRIBUTING.md).
+MonoCode is still early. If something breaks, [report a bug](https://github.com/hardbeat920/monocode/issues).
+
+## Guides
+
+- [Provider setup](docs/providers.md)
+- [Linux installation](docs/install.md)
+- [Agent access with /operator](docs/agent-access.md)
+- [Remote sessions, experimental](docs/remote-access.md)
 
 ## Build from source
 
-Supports macOS, Linux, and Windows.
-
-Need Node.js 20+ and a current stable Rust toolchain. On Linux, ensure standard Tauri prerequisites are installed (e.g. `libwebkit2gtk-4.1-dev`, `libgtk-3-dev`, `libsoup-3.0-dev`, `libjavascriptcoregtk-4.1-dev`). On Windows, the installer bootstraps the [WebView2](https://developer.microsoft.com/microsoft-edge/webview2/) runtime when it is missing.
+You’ll need Node.js 20+ and a stable Rust toolchain. See [build setup](docs/building.md) for platform dependencies and packaging.
 
 ```bash
 npm install
 npm run tauri dev
 ```
 
-### Ubuntu / Debian packages
+Small, focused contributions are welcome. Read [CONTRIBUTING.md](CONTRIBUTING.md) before opening a pull request.
 
-On an Ubuntu/Debian workstation, the repository can install the native Tauri prerequisites and build distributable Linux packages directly:
+## Contributors
 
-```bash
-npm run setup:linux:deb
-npm ci
-npm run build:linux
-```
+Thanks to everyone who contributes to MonoCode!
 
-The Linux build emits `.deb` and AppImage bundles under `target/release/bundle/`.
-Tauri loads `src-tauri/tauri.linux.conf.json` automatically for Linux development and builds.
+[![MonoCode contributors](https://contrib.rocks/image?repo=hardbeat920/monocode)](https://github.com/hardbeat920/monocode/graphs/contributors)
 
-### Windows packages
-
-```bash
-npm ci
-npm run build:windows
-```
-
-The Windows build emits an NSIS installer under `target/release/bundle/nsis/`.
-Tauri loads `src-tauri/tauri.windows.conf.json` automatically for Windows development and builds.
+Contributor image by [contrib.rocks](https://contrib.rocks).
 
 ## License
 
-[MIT](LICENSE). Provider names and logos are trademarks of their owners - see [NOTICE](NOTICE).
+[MIT](LICENSE). Provider names and logos are trademarks of their owners. See [NOTICE](NOTICE).

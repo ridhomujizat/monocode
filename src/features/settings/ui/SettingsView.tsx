@@ -1,9 +1,13 @@
+import { invoke } from "@tauri-apps/api/core";
 import { openUrl } from "@tauri-apps/plugin-opener";
+import { ConnectionsSettings } from "../../connections/ui/ConnectionsSettings";
 import { ask } from "@tauri-apps/plugin-dialog";
 import {
   ArrowDownCircle,
   Check,
   ChevronDown,
+  ExternalLink,
+  FolderOpen,
   Globe,
   ImagePlus,
   Loader,
@@ -16,7 +20,6 @@ import {
   X,
 } from "../../../shared/ui/icons";
 import {
-  Fragment,
   createContext,
   useCallback,
   useContext,
@@ -38,29 +41,20 @@ import {
 import { Popover } from "../../../shared/ui/Popover";
 import { SecondaryButton } from "../../../shared/ui/SecondaryButton";
 import { JiraSettings } from "./JiraSettings";
+import { KerjanSettings } from "./KerjanSettings";
 import { GradientBlurBackground } from "./GradientBlurBackground";
+import { McpSettings } from "./McpSettings";
 import { InboxProviderMark } from "../../inbox/ui/InboxProviderMark";
 import { RemoveProjectDialog } from "../../projects/ui/RemoveProjectDialog";
 import { WindowControls } from "../../../app/shell/WindowControls";
 import { useLockOverscroll } from "../../../shared/hooks/useLockOverscroll";
 import { useColorScheme } from "../../../shared/hooks/useColorScheme";
 import {
-  installPlugin,
-  loadPluginConfig,
-  pluginsDir,
-  savePluginConfig,
-  refreshPlugins,
-  setPluginEnabled,
-  uninstallPlugin,
-  useInstalledPlugins,
-  type InstalledPlugin,
-} from "../../../plugins/registry";
-import { usePluginLog } from "../../../plugins/process";
-import {
   applyChatBackground,
   applyChatBackgroundEmptyOpacity,
   applyChatBackgroundSessionOpacity,
   applyChatBackgroundScope,
+  applyDiffPalette,
   applyAccentColor,
   applyBodyGlass,
   applySidebarBlur,
@@ -83,6 +77,7 @@ import {
   loadChatBackgroundPath,
   loadChatBackgroundSessionOpacity,
   loadChatBackgroundScope,
+  loadDiffPalette,
   loadNewThreadBackgroundEffect,
   loadThemeDarkLightness,
   loadThemePreference,
@@ -98,6 +93,7 @@ import {
   saveChatBackgroundPath,
   saveChatBackgroundSessionOpacity,
   saveChatBackgroundScope,
+  saveDiffPalette,
   setNewThreadBackgroundEffect,
   saveThemeDarkLightness,
   saveThemePreference,
@@ -105,8 +101,10 @@ import {
   saveSidebarOpacity,
   saveThemeHue,
   saveThemeSaturation,
+  isLightScheme,
   saveTranscriptLayout,
   saveTranscriptAnchor,
+  syncNativeGlass,
   TRANSCRIPT_ANCHOR_CHANGE_EVENT,
   loadShowExcludedFiles,
   saveShowExcludedFiles,
@@ -128,6 +126,8 @@ import {
   THEME_SATURATION_MIN,
   type ThemePreference,
   type ChatBackgroundScope,
+  DIFF_PALETTE_DEFAULT,
+  type DiffPalette,
   NEW_THREAD_BACKGROUND_EFFECTS,
   NEW_THREAD_BACKGROUND_EFFECT_LABELS,
   NEW_THREAD_BACKGROUND_EFFECT_DESCRIPTIONS,
@@ -145,8 +145,7 @@ import {
   saveUiScale,
   subscribeUiScale,
   UI_SCALE_DEFAULT,
-  UI_SCALE_MAX,
-  UI_SCALE_MIN,
+  UI_SCALE_PERCENTS,
 } from "../model/uiScale";
 import {
   getHarnessAvailabilitySnapshot,
@@ -155,12 +154,31 @@ import {
   probeHarnessAvailability,
   subscribeHarnessAvailability,
 } from "../../../integrations/harness/core/availability";
-import { refreshHarnessCatalogs } from "../../../integrations/harness/core/registry";
+import {
+  inspectHarnessBinary,
+  type HarnessBinaryInspection,
+} from "../../../integrations/harness/core/child";
+import {
+  loadProviderBinaryPath,
+  providerBinaryPathChangePending,
+  saveProviderBinaryPath,
+  type ConfigurableBinaryProvider,
+} from "../../providers/model/providerBinaryPaths";
+import {
+  compareSemver,
+  MINIMUM_OPENCODE_VERSION,
+  parseOpenCodeVersion,
+} from "../../../integrations/harness/providers/opencode/opencodeProtocol";
+import {
+  enforceHarnessIdleLimit,
+  refreshHarnessCatalogs,
+} from "../../../integrations/harness/core/registry";
 import { loginHarness } from "../../../integrations/harness/core/auth";
 import {
   defaultModelId,
   firstEnabledHarness,
   getModelSnapshot,
+  hasLiveCatalog,
   loadDefaultModels,
   loadHiddenPickerProviders,
   loadLastModelChoice,
@@ -177,7 +195,13 @@ import {
   projectKey,
   projectName,
 } from "../../../shared/lib/paths";
-import { HAS_BLUR_RADIUS, IS_MAC, IS_WIN } from "../../../platform/tauri/platform";
+import { revealPath } from "../../../platform/tauri/fs";
+import {
+  HAS_BLUR_RADIUS,
+  IS_LINUX,
+  IS_MAC,
+  IS_WIN,
+} from "../../../platform/tauri/platform";
 import {
   loadArchivedProjects,
   looksLikeProject,
@@ -207,10 +231,38 @@ import {
   renameProviderAccount,
   saveProviderAccount,
   subscribeProviderAccounts,
+  supportsAccountProfiles,
   type ProviderAccount,
   type ProviderAccountProvider,
 } from "../../providers/model/providerAccounts";
 import { removeProviderAccountCredentials } from "../../providers/model/providerAccountCredentials";
+import {
+  identityKey,
+  identityOrganizationTag,
+  useProviderAccountIdentities,
+} from "../../providers/model/providerAccountIdentity";
+import { ProviderAccountSubtitle } from "../../providers/ui/ProviderAccountSubtitle";
+import {
+  saveComposerAutocorrect,
+  saveMaskEmails,
+  saveRailMonosPinned,
+  saveShowRemainingUsage,
+  useComposerAutocorrect,
+  useMaskEmails,
+  useRailMonosPinned,
+  useShowRemainingUsage,
+} from "../model/displayPrefs";
+import {
+  accountStatus,
+  accountUsageKey,
+  useProviderAccountUsage,
+} from "../../providers/model/accountUsage";
+import { clearCachedRateLimits } from "../../providers/model/rateLimitsCache";
+import {
+  AccountStatusLabel,
+  AccountUsageMeters,
+  AccountUsageRefresh,
+} from "../../providers/ui/ProviderAccountUsage";
 import {
   loadSessionSidebarFilters,
   saveSessionSidebarFilters,
@@ -255,10 +307,24 @@ import {
 import { useTabGroupLogos } from "../../projects/hooks/useTabGroupLogos";
 import { ProjectLogoIcon } from "../../projects/ui/ProjectLogoIcon";
 import { ProjectMascot } from "../../projects/ui/ProjectMascot";
+import { PixelMascot } from "../../projects/ui/PixelMascot";
+import {
+  defaultMonoName,
+  listMonos,
+  monoLook,
+  monoProjectsPhrase,
+  monosSnapshot,
+  subscribeMonos,
+  updateMono,
+  type Mono,
+} from "../../monos/model/mono";
+import { resetMonoDefaults } from "../../monos/model/monoFiles";
+import { ConfirmReset } from "../../monos/ui/ConfirmReset";
 import {
   filterKeybindings,
-  KEYBINDINGS,
+  currentKeybindings,
   loadClaudeHooks,
+  loadIdleAgentLimit,
   loadCloseToTray,
   loadCollapsedProjectRailMode,
   loadComposerRunner,
@@ -270,9 +336,18 @@ import {
   loadLiveAgentsEnabled,
   loadModelControls,
   loadNotesEnabled,
+  loadMonosEnabled,
+  loadMonoMenuBarIcon,
+  loadKeybindingOverrides,
+  saveMonoMenuBarIcon,
+  subscribeMonoMenuBarIcon,
   loadQuickComposerEnabled,
+  loadQuickComposerShortcut,
   loadTabAnimationsEnabled,
   saveClaudeHooks,
+  saveIdleAgentLimit,
+  IDLE_AGENT_LIMITS,
+  type IdleAgentLimit,
   saveCloseToTray,
   saveCollapsedProjectRailMode,
   saveComposerRunner,
@@ -284,7 +359,14 @@ import {
   saveLiveAgentsEnabled,
   saveModelControls,
   saveNotesEnabled,
+  saveMonosEnabled,
+  subscribeMonosEnabled,
+  saveKeybindingOverride,
+  validateKeybindingShortcut,
   saveQuickComposerEnabled,
+  saveQuickComposerShortcut,
+  subscribeKeybindings,
+  type KeybindingOverride,
   saveTabAnimationsEnabled,
   searchSettings,
   settingsSectionDescription,
@@ -301,6 +383,13 @@ import {
 import { loadSoundsEnabled, playCue, saveSoundsEnabled } from "../model/sounds";
 import { setQuickComposerShortcut } from "../../quick-composer/model/quickComposer";
 import {
+  isGlobalShortcut,
+  QUICK_COMPOSER_DEFAULT_SHORTCUT,
+  quickComposerShortcutLabel,
+  quickComposerShortcutPreview,
+  shortcutFromKeyEvent,
+} from "../../quick-composer/model/quickComposerShortcut";
+import {
   cachedNotificationPermission,
   loadNotificationsEnabled,
   openNotificationSettings,
@@ -311,6 +400,8 @@ import {
 } from "../../notifications/model/notifications";
 import {
   installPendingUpdate,
+  packageManagedInstall,
+  packageManagerHint,
   readAppVersion,
   runUpdateFlow,
   type UpdaterSnapshot,
@@ -501,15 +592,19 @@ export function SettingsView({
               {section === "general" ? (
                 <GeneralPage onOpenWhatsNew={onOpenWhatsNew} />
               ) : null}
+              {section === "connections" ? <ConnectionsSettings /> : null}
               {section === "appearance" ? (
                 <AppearancePage appearance={appearance} />
               ) : null}
               {section === "chat" ? <ChatPage /> : null}
               {section === "keybindings" ? <KeybindingsPage /> : null}
+              {section === "monos" ? <MonosPage /> : null}
+              {section === "mcp" ? (
+                <McpSettings cwd={cwd} recents={recents} />
+              ) : null}
               {section === "providers" ? (
                 <ProvidersPage cwd={cwd} recents={recents} />
               ) : null}
-              {section === "plugins" ? <PluginsPage /> : null}
               {section === "worktrees" ? (
                 <WorktreesPage
                   cwd={cwd}
@@ -835,7 +930,7 @@ function GeneralPage({
           <Row
             id="quick-composer"
             label="Quick composer"
-            description="Press ⌘⇧Space in any app to float a prompt over it and start a session without switching to MonoCode. Return starts it in the background; ⌘Return starts it and brings the session forward."
+            description={`Press ${quickComposerShortcutLabel(loadQuickComposerShortcut())} in any app to float a prompt over it and start a session without switching to MonoCode. Change the shortcut in Keybindings. Return starts it in the background; ⌘Return starts it and brings the session forward.`}
           >
             {quickComposerError ? (
               <span className="text-[12px] text-content/45">
@@ -894,6 +989,7 @@ function ChatPage() {
   const [diffViewer, setDiffViewer] = useState<DiffViewer>(loadDiffViewer);
   const [formatOnSave, setFormatOnSave] = useState(loadFormatOnSave);
   const [composerRunner, setComposerRunner] = useState(loadComposerRunner);
+  const composerAutocorrect = useComposerAutocorrect();
   const [gridArcadeEnabled, setGridArcadeEnabled] = useState(
     loadGridArcadeEnabled,
   );
@@ -1014,6 +1110,17 @@ function ChatPage() {
               { value: "beside", label: "Beside" },
             ]}
             onChange={onModelControls}
+          />
+        </Row>
+        <Row
+          id="composer-autocorrect"
+          label="Autocorrect"
+          description="Spell check and autocorrect prompts in session and mono composers. Turn this off to keep the text exactly as typed."
+        >
+          <Toggle
+            label="Autocorrect"
+            on={composerAutocorrect}
+            onChange={saveComposerAutocorrect}
           />
         </Row>
       </Group>
@@ -1166,6 +1273,19 @@ function InboxPage({
         description="Jira Cloud issues from the projects you pick."
       >
         <JiraSettings />
+      </Group>
+
+      <Group
+        id="kerjan"
+        title={
+          <span className="flex items-center gap-2">
+            <InboxProviderMark provider="kerjan" className="size-4 shrink-0" />
+            Kerjan
+          </span>
+        }
+        description="Your Kerjan tasks and the Stories of active Sprints."
+      >
+        <KerjanSettings />
       </Group>
 
       <Group
@@ -1672,10 +1792,16 @@ function UpdateRow({
 
   useEffect(() => {
     let cancelled = false;
-    void readAppVersion().then((currentVersion) => {
-      if (cancelled) return;
-      setSnapshot((current) => ({ ...current, currentVersion }));
-    });
+    void Promise.all([readAppVersion(), packageManagedInstall()]).then(
+      ([currentVersion, packageManaged]) => {
+        if (cancelled) return;
+        setSnapshot((current) => ({
+          ...current,
+          currentVersion,
+          packageManaged: packageManaged ?? undefined,
+        }));
+      },
+    );
     return () => {
       cancelled = true;
     };
@@ -1705,7 +1831,9 @@ function UpdateRow({
             ? "You're on the latest version."
             : snapshot.phase === "error"
               ? (snapshot.error ?? "Update check failed.")
-              : "MonoCode updates itself from the release feed.";
+              : snapshot.packageManaged
+                ? packageManagerHint(snapshot.packageManaged)
+                : "MonoCode updates itself from the release feed.";
 
   return (
     <Row
@@ -1774,6 +1902,7 @@ function useAppearanceSettings(
     useState(loadChatBackgroundSessionOpacity);
   const [chatBackgroundScope, setChatBackgroundScope] =
     useState<ChatBackgroundScope>(loadChatBackgroundScope);
+  const [diffPalette, setDiffPalette] = useState<DiffPalette>(loadDiffPalette);
   const [newThreadBackgroundEffect, setBackgroundEffect] =
     useState<NewThreadBackgroundEffect>(loadNewThreadBackgroundEffect);
   const [chatBackgroundBusy, setChatBackgroundBusy] = useState(false);
@@ -1830,6 +1959,7 @@ function useAppearanceSettings(
     applyBodyGlass(next);
     saveBodyGlass(next);
     setBodyGlass(next);
+    if (IS_LINUX) syncNativeGlass(isLightScheme() ? "light" : "dark");
   }, []);
 
   const onShowExcludedFiles = useCallback((next: boolean) => {
@@ -1890,6 +2020,12 @@ function useAppearanceSettings(
     setChatBackgroundScope(next);
   }, []);
 
+  const onDiffPalette = useCallback((next: DiffPalette) => {
+    applyDiffPalette(next);
+    saveDiffPalette(next);
+    setDiffPalette(next);
+  }, []);
+
   const onNewThreadBackgroundEffect = useCallback(
     (next: NewThreadBackgroundEffect) => {
       setNewThreadBackgroundEffect(next);
@@ -1929,6 +2065,7 @@ function useAppearanceSettings(
       Math.round(CHAT_BACKGROUND_SESSION_OPACITY_DEFAULT * 100),
     );
     onChatBackgroundScope(CHAT_BACKGROUND_SCOPE_DEFAULT);
+    onDiffPalette(DIFF_PALETTE_DEFAULT);
     onNewThreadBackgroundEffect(NEW_THREAD_BACKGROUND_EFFECT_DEFAULT);
     if (chatBackgroundPath) void onClearChatBackground();
     onUiScale(Math.round(UI_SCALE_DEFAULT * 100));
@@ -1940,6 +2077,7 @@ function useAppearanceSettings(
     onChatBackgroundEmptyOpacity,
     onChatBackgroundSessionOpacity,
     onChatBackgroundScope,
+    onDiffPalette,
     onNewThreadBackgroundEffect,
     onClearChatBackground,
     onAccentColor,
@@ -1966,6 +2104,7 @@ function useAppearanceSettings(
     chatBackgroundEmptyOpacity,
     chatBackgroundSessionOpacity,
     chatBackgroundScope,
+    diffPalette,
     newThreadBackgroundEffect,
     chatBackgroundBusy,
     chatBackgroundError,
@@ -1984,6 +2123,7 @@ function useAppearanceSettings(
     onChatBackgroundEmptyOpacity,
     onChatBackgroundSessionOpacity,
     onChatBackgroundScope,
+    onDiffPalette,
     onNewThreadBackgroundEffect,
     onUiScale,
     onCollapsedProjectRailMode,
@@ -2025,6 +2165,22 @@ function AppearancePage({ appearance }: { appearance: AppearanceSettings }) {
           <AccentColorPicker
             value={appearance.accentColor}
             onChange={appearance.onAccentColor}
+          />
+        </Row>
+        <Row
+          id="diff-colors"
+          label="Diff colors"
+          description="Colors for added and removed lines. Colorblind and High contrast use blue and orange instead of green and red; High contrast adds stronger tints and text."
+        >
+          <Segmented
+            label="Diff colors"
+            value={appearance.diffPalette}
+            options={[
+              { value: "default", label: "Default" },
+              { value: "colorblind", label: "Colorblind" },
+              { value: "high-contrast", label: "High contrast" },
+            ]}
+            onChange={appearance.onDiffPalette}
           />
         </Row>
       </Group>
@@ -2159,14 +2315,14 @@ function AppearancePage({ appearance }: { appearance: AppearanceSettings }) {
           label="Interface scale"
           description="Zoom the whole interface. You can also use Ctrl+=, Ctrl+-, and Ctrl+0 (Cmd on macOS)."
         >
-          <Slider
+          <Select
             label="Interface scale"
-            value={Math.round(appearance.uiScale * 100)}
-            display={`${Math.round(appearance.uiScale * 100)}%`}
-            min={Math.round(UI_SCALE_MIN * 100)}
-            max={Math.round(UI_SCALE_MAX * 100)}
-            step={10}
-            onChange={appearance.onUiScale}
+            value={String(Math.round(appearance.uiScale * 100))}
+            options={UI_SCALE_PERCENTS.map((percent) => ({
+              value: String(percent),
+              label: `${percent}%`,
+            }))}
+            onChange={(value) => appearance.onUiScale(Number(value))}
           />
         </Row>
         <Row
@@ -2340,14 +2496,279 @@ function ChatBackgroundCard({
   );
 }
 
+type ShortcutModifier = "metaKey" | "ctrlKey" | "altKey" | "shiftKey";
+
+function shortcutModifier(event: KeyboardEvent): ShortcutModifier | null {
+  if (event.key === "Meta" || event.code.startsWith("Meta")) return "metaKey";
+  if (event.key === "Control" || event.code.startsWith("Control"))
+    return "ctrlKey";
+  if (event.key === "Alt" || event.code.startsWith("Alt")) return "altKey";
+  if (event.key === "Shift" || event.code.startsWith("Shift"))
+    return "shiftKey";
+  return null;
+}
+
+function ShortcutEditor({
+  name,
+  display,
+  resetVisible,
+  onApply,
+  onDisable,
+  onReset,
+}: {
+  name: string;
+  display: string | null;
+  resetVisible: boolean;
+  onApply: (shortcut: string) => void | Promise<void>;
+  onDisable: () => void | Promise<void>;
+  onReset: () => void | Promise<void>;
+}) {
+  const [recording, setRecording] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [preview, setPreview] = useState("");
+  const held = useRef({
+    metaKey: false,
+    ctrlKey: false,
+    altKey: false,
+    shiftKey: false,
+  });
+
+  const run = async (action: () => void | Promise<void>) => {
+    setRecording(false);
+    setBusy(true);
+    setError(null);
+    try {
+      await action();
+    } catch (reason) {
+      setError(String(reason));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const beginRecording = () => {
+    held.current = {
+      metaKey: false,
+      ctrlKey: false,
+      altKey: false,
+      shiftKey: false,
+    };
+    setPreview("");
+    setError(null);
+    setRecording(true);
+  };
+
+  useEffect(() => {
+    if (!recording) return;
+    const onKeyDown = (event: KeyboardEvent) => {
+      const bare =
+        !event.metaKey && !event.ctrlKey && !event.altKey && !event.shiftKey;
+      // An unmodified Tab leaves the recorder instead of trapping focus.
+      if (bare && event.code === "Tab") {
+        setRecording(false);
+        return;
+      }
+      event.preventDefault();
+      event.stopImmediatePropagation();
+      if (event.code === "Escape") {
+        setRecording(false);
+        setError(null);
+        return;
+      }
+      // Delete disables, but only on its own so Cmd+Delete still records.
+      if (bare && (event.code === "Backspace" || event.code === "Delete")) {
+        void run(onDisable);
+        return;
+      }
+      const modifier = shortcutModifier(event);
+      if (modifier) held.current[modifier] = true;
+      const modifiers = {
+        metaKey: event.metaKey || held.current.metaKey,
+        ctrlKey: event.ctrlKey || held.current.ctrlKey,
+        altKey: event.altKey || held.current.altKey,
+        shiftKey: event.shiftKey || held.current.shiftKey,
+      };
+      setPreview(
+        quickComposerShortcutPreview(
+          modifiers,
+          modifier ? undefined : event.code,
+          event.key,
+        ),
+      );
+      if (modifier) return;
+      const next = shortcutFromKeyEvent({ ...modifiers, code: event.code });
+      if (next) void run(() => onApply(next));
+    };
+    const onKeyUp = (event: KeyboardEvent) => {
+      const modifier = shortcutModifier(event);
+      if (!modifier) return;
+      event.preventDefault();
+      event.stopImmediatePropagation();
+      held.current[modifier] = false;
+      const modifiers = {
+        metaKey: event.metaKey || held.current.metaKey,
+        ctrlKey: event.ctrlKey || held.current.ctrlKey,
+        altKey: event.altKey || held.current.altKey,
+        shiftKey: event.shiftKey || held.current.shiftKey,
+      };
+      modifiers[modifier] = false;
+      setPreview(quickComposerShortcutPreview(modifiers));
+    };
+    window.addEventListener("keydown", onKeyDown, true);
+    window.addEventListener("keyup", onKeyUp, true);
+    return () => {
+      window.removeEventListener("keydown", onKeyDown, true);
+      window.removeEventListener("keyup", onKeyUp, true);
+    };
+  }, [onApply, onDisable, recording]);
+
+  return (
+    <div className="relative w-40 shrink-0">
+      <div className="flex items-center gap-0.5">
+        <input
+          type="text"
+          readOnly
+          aria-label={`Change ${name} shortcut`}
+          data-shortcut-recorder-active={recording ? "true" : undefined}
+          aria-busy={busy || undefined}
+          value={
+            recording || busy ? preview || "Record…" : (display ?? "Disabled")
+          }
+          onFocus={beginRecording}
+          onClick={beginRecording}
+          onBlur={() => setRecording(false)}
+          className={`h-6 w-28 shrink-0 truncate rounded-md border bg-transparent px-1.5 py-0 font-mono text-[11px] leading-none outline-none focus:border-accent ${
+            busy ? "opacity-50" : ""
+          } ${
+            display === null
+              ? "border-dashed border-content/15 text-content/35"
+              : "border-content/15 text-content/80 hover:bg-content/10"
+          }`}
+        />
+        {resetVisible ? (
+          <button
+            type="button"
+            aria-label={`Reset ${name} shortcut`}
+            disabled={busy}
+            onClick={() => void run(onReset)}
+            className="rounded-md px-1 py-1 text-content/35 hover:bg-content/10 hover:text-content disabled:opacity-50"
+          >
+            <RotateCcw className="size-3.5" />
+          </button>
+        ) : null}
+      </div>
+      {recording ? (
+        <p
+          className="pointer-events-none absolute top-1/2 right-full z-40 mr-3 -translate-y-1/2 text-[10px] whitespace-nowrap text-content/50"
+          aria-live="polite"
+        >
+          Del disables · Esc cancels
+        </p>
+      ) : null}
+      {error ? (
+        <p
+          role="alert"
+          className="absolute top-full left-0 z-40 mt-1.5 w-max max-w-64 rounded-md border border-content/10 bg-background-base/95 px-2 py-1 text-[11px] whitespace-nowrap text-red-400 shadow-lg"
+        >
+          {error}
+        </p>
+      ) : null}
+    </div>
+  );
+}
+
+function QuickComposerShortcutEditor() {
+  const [shortcut, setShortcut] = useState(loadQuickComposerShortcut);
+  const [enabled, setEnabled] = useState(loadQuickComposerEnabled);
+  const apply = async (next: string) => {
+    if (!isGlobalShortcut(next))
+      throw new Error("Quick Composer needs ⌘ or Ctrl as a global hotkey");
+    // Validate before the native call: a rejected chord must not leave the OS
+    // holding a registered global hotkey that settings does not know about.
+    validateKeybindingShortcut("App: Quick Composer", next);
+    // Recording while the feature is off must not silently switch it back on.
+    if (enabled) await setQuickComposerShortcut(true, next);
+    saveQuickComposerShortcut(next);
+    setShortcut(next);
+  };
+  const reset = async () => {
+    // Reset restores the whole default state, including the enabled flag.
+    validateKeybindingShortcut(
+      "App: Quick Composer",
+      QUICK_COMPOSER_DEFAULT_SHORTCUT,
+    );
+    await setQuickComposerShortcut(true, QUICK_COMPOSER_DEFAULT_SHORTCUT);
+    saveQuickComposerEnabled(true);
+    saveQuickComposerShortcut(QUICK_COMPOSER_DEFAULT_SHORTCUT);
+    setShortcut(QUICK_COMPOSER_DEFAULT_SHORTCUT);
+    setEnabled(true);
+  };
+  return (
+    <ShortcutEditor
+      name="quick composer"
+      display={enabled ? quickComposerShortcutLabel(shortcut) : null}
+      resetVisible={
+        enabled !== true || shortcut !== QUICK_COMPOSER_DEFAULT_SHORTCUT
+      }
+      onApply={apply}
+      onDisable={async () => {
+        await setQuickComposerShortcut(false);
+        saveQuickComposerEnabled(false);
+        setEnabled(false);
+      }}
+      onReset={reset}
+    />
+  );
+}
+
+function KeybindingShortcutEditor({
+  command,
+  display,
+  modified,
+  onSave,
+}: {
+  command: string;
+  display: string | null;
+  modified: boolean;
+  onSave: (
+    command: string,
+    override: KeybindingOverride,
+  ) => void | Promise<void>;
+}) {
+  return (
+    <ShortcutEditor
+      name={command}
+      display={display}
+      resetVisible={modified}
+      onApply={(shortcut) => onSave(command, { shortcut })}
+      onDisable={() => onSave(command, { disabled: true })}
+      onReset={() => onSave(command, {})}
+    />
+  );
+}
+
 function KeybindingsPage() {
   const [query, setQuery] = useState("");
-  const rows = useMemo(() => filterKeybindings(KEYBINDINGS, query), [query]);
+  const [overrides, setOverrides] = useState(loadKeybindingOverrides);
+  useEffect(
+    () => subscribeKeybindings(() => setOverrides(loadKeybindingOverrides())),
+    [],
+  );
+  const rows = useMemo(
+    () => filterKeybindings(currentKeybindings(), query),
+    [query, overrides],
+  );
+
+  const save = async (command: string, override: KeybindingOverride) => {
+    const next = saveKeybindingOverride(command, override);
+    if (IS_MAC) await invoke("keybindings_set_overrides", { overrides: next });
+  };
 
   return (
     <Group
       title="Shortcuts"
-      description="Bindings come from the app menu and the workspace key handler; they aren’t customizable yet."
+      description="Click a shortcut to record new keys. Press Delete while recording to disable it."
       action={
         <div className="flex items-center gap-3">
           <span className="shrink-0 text-[12px] text-content/40 tabular-nums">
@@ -2378,26 +2799,378 @@ function KeybindingsPage() {
           No matching bindings
         </p>
       ) : (
-        rows.map((row) => (
-          <div
-            key={`${row.command}-${row.keys}`}
-            className="flex items-center border-b border-content/5 px-4 py-2 text-[12px] last:border-b-0"
-          >
-            <span className="min-w-0 flex-1 truncate">{row.command}</span>
-            <span className="w-40 shrink-0 font-mono text-[12px] text-content/80">
-              {row.keys}
-            </span>
-            <span className="w-28 shrink-0 font-mono text-[11px] text-content/40">
-              {row.when}
-            </span>
-          </div>
-        ))
+        rows.map((row) => {
+          const override = overrides[row.command];
+          const disabled = override?.disabled === true;
+          return (
+            <div
+              key={row.command}
+              className="flex h-11 items-center border-b border-content/5 px-4 text-[12px] last:border-b-0"
+            >
+              <span
+                className={`min-w-0 flex-1 truncate ${disabled ? "text-content/45" : ""}`}
+              >
+                {row.command}
+              </span>
+              {row.command === "App: Quick Composer" ? (
+                <QuickComposerShortcutEditor />
+              ) : (
+                <KeybindingShortcutEditor
+                  command={row.command}
+                  display={disabled ? null : row.keys}
+                  modified={Boolean(override)}
+                  onSave={save}
+                />
+              )}
+              <span className="w-28 shrink-0 font-mono text-[11px] text-content/40">
+                {row.when}
+              </span>
+            </div>
+          );
+        })
       )}
     </Group>
   );
 }
 
 const GLOBAL_PROVIDER_SCOPE = "global";
+
+function binaryInspectionError(
+  provider: ConfigurableBinaryProvider,
+  inspection: HarnessBinaryInspection,
+): string | null {
+  if (inspection.error) return inspection.error;
+  if (
+    provider === "codex" &&
+    !/^codex-cli\s+\d+\.\d+\.\d+/.test(inspection.version ?? "")
+  ) {
+    return "Codex CLI returned an invalid version.";
+  }
+  if (provider === "opencode") {
+    const version = parseOpenCodeVersion(inspection.version ?? "");
+    if (!version) return "OpenCode CLI returned an invalid version.";
+    if (compareSemver(version, MINIMUM_OPENCODE_VERSION) < 0) {
+      return `OpenCode v${version} is too old. Upgrade to v${MINIMUM_OPENCODE_VERSION} or newer.`;
+    }
+  }
+  return null;
+}
+
+function ProviderBinaryControl({
+  provider,
+}: {
+  provider: ConfigurableBinaryProvider;
+}) {
+  const root = useRef<HTMLSpanElement>(null);
+  const trigger = useRef<HTMLButtonElement>(null);
+  const editInput = useRef<HTMLInputElement>(null);
+  const [open, setOpen] = useState(false);
+  const [editing, setEditing] = useState(false);
+  const [draft, setDraft] = useState(
+    () => loadProviderBinaryPath(provider) ?? "",
+  );
+  const [overridden, setOverridden] = useState(() =>
+    Boolean(loadProviderBinaryPath(provider)),
+  );
+  const [inspection, setInspection] = useState<
+    HarnessBinaryInspection & { overridden: boolean }
+  >();
+  const [working, setWorking] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [revealError, setRevealError] = useState<string | null>(null);
+
+  const inspect = useCallback(
+    async (binaryPath?: string | null) => {
+      setWorking(true);
+      setInspection(undefined);
+      setError(null);
+      setRevealError(null);
+      try {
+        const next = await inspectHarnessBinary(provider, binaryPath);
+        setInspection({
+          ...next,
+          overridden: Boolean(binaryPath?.trim()),
+        });
+        setError(binaryInspectionError(provider, next));
+        return next;
+      } catch (cause) {
+        const message = cause instanceof Error ? cause.message : String(cause);
+        setError(message);
+        return null;
+      } finally {
+        setWorking(false);
+      }
+    },
+    [provider],
+  );
+
+  useEffect(() => {
+    if (editing) editInput.current?.focus();
+  }, [editing]);
+
+  const dismiss = (restoreFocus = false) => {
+    setOpen(false);
+    setEditing(false);
+    if (restoreFocus) queueMicrotask(() => trigger.current?.focus());
+  };
+
+  const submit = async (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    if (working) return;
+    const value = draft.trim();
+    if (!value) {
+      await useAuto();
+      return;
+    }
+    const next = await inspect(value);
+    if (!next) return;
+    const validationError = binaryInspectionError(provider, next);
+    if (validationError) {
+      setError(validationError);
+      return;
+    }
+    if (!saveProviderBinaryPath(provider, value)) {
+      setInspection(undefined);
+      setError("Could not save the binary path.");
+      return;
+    }
+    setOverridden(true);
+    dismiss(true);
+  };
+
+  const useAuto = async () => {
+    if (working) return;
+    const next = await inspect(null);
+    if (!next || binaryInspectionError(provider, next)) return;
+    if (!saveProviderBinaryPath(provider, null)) {
+      setInspection(undefined);
+      setError("Could not save the binary path.");
+      return;
+    }
+    setDraft("");
+    setOverridden(false);
+    dismiss(true);
+  };
+
+  const title = HARNESS_TITLE[provider];
+  const restartRequired = providerBinaryPathChangePending(provider);
+
+  return (
+    <span ref={root} className="inline-flex align-middle">
+      <button
+        ref={trigger}
+        type="button"
+        aria-label={
+          restartRequired
+            ? `Show ${title} CLI details, restart required`
+            : `Show ${title} CLI details`
+        }
+        aria-expanded={open}
+        aria-controls={`${provider}-binary-popover`}
+        aria-haspopup="dialog"
+        title={`${title} CLI path${restartRequired ? " — restart required" : ""}`}
+        onClick={() => {
+          if (!open && !inspection && !working && !error) {
+            void inspect(loadProviderBinaryPath(provider));
+          }
+          setOpen((value) => !value);
+          setEditing(false);
+        }}
+        className={`grid size-6 place-items-center rounded hover:bg-content/10 focus-visible:outline-2 focus-visible:outline-accent ${
+          restartRequired
+            ? "text-amber-300"
+            : "text-content/35 hover:text-content"
+        }`}
+      >
+        <FolderOpen className="size-3.5" strokeWidth={1.75} />
+      </button>
+      {open ? (
+        <Popover
+          id={`${provider}-binary-popover`}
+          role="dialog"
+          aria-label={`${title} CLI details`}
+          aria-busy={working}
+          tabIndex={-1}
+          anchor={root}
+          side="bottom"
+          align="start"
+          width={440}
+          className="p-3"
+          autoFocus
+          onKeyDown={(event) => {
+            if (event.key !== "Tab") return;
+            const focusable = Array.from(
+              event.currentTarget.querySelectorAll<HTMLElement>(
+                'button:not([disabled]), input:not([disabled]), [href], [tabindex]:not([tabindex="-1"])',
+              ),
+            );
+            const first = focusable[0];
+            const last = focusable[focusable.length - 1];
+            if (!first || !last) return;
+            if (event.shiftKey && document.activeElement === first) {
+              event.preventDefault();
+              last.focus();
+            } else if (!event.shiftKey && document.activeElement === last) {
+              event.preventDefault();
+              first.focus();
+            }
+          }}
+          onDismiss={(reason) => dismiss(reason === "escape")}
+        >
+          <div className="flex items-center justify-between gap-3">
+            <span className="text-[12px] font-medium text-content">
+              {title} CLI
+            </span>
+            <div className="flex items-center gap-1.5">
+              <span className="rounded-full bg-content/10 px-1.5 py-0.5 text-[10px] text-content/50">
+                Global path
+              </span>
+              <span className="rounded-full bg-content/10 px-1.5 py-0.5 text-[10px] text-content/50">
+                {error
+                  ? "Needs attention"
+                  : restartRequired
+                    ? "Restart required"
+                    : overridden
+                      ? "Configured"
+                      : "Auto-detected"}
+              </span>
+            </div>
+          </div>
+          {editing ? (
+            <form className="mt-2" onSubmit={submit}>
+              <label
+                htmlFor={`${provider}-binary-path`}
+                className="text-[11px] text-content/50"
+              >
+                CLI path
+              </label>
+              <input
+                id={`${provider}-binary-path`}
+                ref={editInput}
+                type="text"
+                value={draft}
+                placeholder={inspection?.path ?? "Auto-detected path"}
+                disabled={working}
+                autoFocus
+                onChange={(event) => setDraft(event.target.value)}
+                className="mt-1.5 h-8 w-full rounded-md border border-content/10 bg-content/[0.04] px-2 font-mono text-[11px] text-content outline-none placeholder:font-sans placeholder:text-content/35 focus:border-accent/45 disabled:opacity-50"
+              />
+              <p className="mt-1.5 text-[10px] text-content/40">
+                Enter the absolute path to the CLI executable. Changes apply
+                after restarting MonoCode.
+              </p>
+              {error ? (
+                <span
+                  role="alert"
+                  className="mt-1.5 block text-[11px] text-red-400"
+                >
+                  {error}
+                </span>
+              ) : null}
+              <div className="mt-3 flex justify-end gap-2">
+                <SecondaryButton
+                  disabled={working}
+                  onClick={() => {
+                    setDraft(loadProviderBinaryPath(provider) ?? "");
+                    setEditing(false);
+                    queueMicrotask(() => trigger.current?.focus());
+                  }}
+                >
+                  Cancel
+                </SecondaryButton>
+                {overridden ? (
+                  <SecondaryButton
+                    disabled={working}
+                    onClick={() => void useAuto()}
+                  >
+                    Use auto-detected path
+                  </SecondaryButton>
+                ) : null}
+                <SecondaryButton type="submit" disabled={working}>
+                  Save path
+                </SecondaryButton>
+              </div>
+            </form>
+          ) : (
+            <>
+              <div className="mt-2 rounded-md border border-content/10 bg-content/[0.03] px-2.5 py-2">
+                <span className="block max-h-12 overflow-y-auto whitespace-pre-wrap break-all font-mono text-[10px] text-content/65">
+                  {inspection?.path ??
+                    (error
+                      ? "CLI could not be resolved"
+                      : "Checking the selected CLI…")}
+                </span>
+                <span className="mt-1 block max-h-10 overflow-y-auto whitespace-pre-wrap break-words text-[10px] text-content/40">
+                  {inspection?.version ??
+                    (error ? "Retry to check this CLI" : "Checking version…")}
+                </span>
+              </div>
+              {error ? (
+                <span
+                  role="alert"
+                  title={error}
+                  className="mt-1.5 block max-h-20 overflow-y-auto whitespace-pre-wrap break-words text-[10px] leading-4 text-red-400"
+                >
+                  {error}
+                </span>
+              ) : null}
+              {revealError ? (
+                <span
+                  role="alert"
+                  className="mt-1.5 block max-h-20 overflow-y-auto whitespace-pre-wrap break-words text-[10px] leading-4 text-red-400"
+                >
+                  Could not open the CLI location: {revealError}
+                </span>
+              ) : null}
+              <div className="mt-3 flex justify-end gap-2">
+                {error ? (
+                  <SecondaryButton
+                    disabled={working}
+                    aria-label={`Retry ${title} ${
+                      overridden ? "configured path" : "auto-detect"
+                    }`}
+                    onClick={() =>
+                      void inspect(overridden ? draft.trim() || null : null)
+                    }
+                  >
+                    <RefreshCw className="size-3.5" strokeWidth={1.75} />
+                    {overridden ? "Retry configured path" : "Retry auto-detect"}
+                  </SecondaryButton>
+                ) : null}
+                <SecondaryButton
+                  aria-label={`Open ${title} CLI location`}
+                  disabled={!inspection}
+                  onClick={() => {
+                    if (inspection) {
+                      void revealPath(inspection.path).catch((cause) => {
+                        setRevealError(
+                          cause instanceof Error
+                            ? cause.message
+                            : String(cause),
+                        );
+                      });
+                    }
+                  }}
+                >
+                  <ExternalLink className="size-3.5" strokeWidth={1.75} />
+                  Open location
+                </SecondaryButton>
+                <SecondaryButton
+                  aria-label={`Edit ${title} CLI path`}
+                  disabled={working}
+                  onClick={() => setEditing(true)}
+                >
+                  <Pencil className="size-3.5" strokeWidth={1.75} />
+                  Edit path
+                </SecondaryButton>
+              </div>
+            </>
+          )}
+        </Popover>
+      ) : null}
+    </span>
+  );
+}
 
 function ProvidersPage({
   cwd,
@@ -2421,8 +3194,12 @@ function ProvidersPage({
   const [choice, setChoice] = useState(loadLastModelChoice);
   const [defaultModels, setDefaultModels] = useState(loadDefaultModels);
   const [claudeHooks, setClaudeHooks] = useState(loadClaudeHooks);
+  const [idleAgentLimit, setIdleAgentLimit] =
+    useState<IdleAgentLimit>(loadIdleAgentLimit);
   const [scope, setScope] = useState<string>(GLOBAL_PROVIDER_SCOPE);
-  const [hiddenGlobally, setHiddenGlobally] = useState(loadHiddenPickerProviders);
+  const [hiddenGlobally, setHiddenGlobally] = useState(
+    loadHiddenPickerProviders,
+  );
 
   const scopeOptions = useMemo(() => {
     const options: { value: string; label: string; icon?: ReactNode }[] = [
@@ -2478,6 +3255,14 @@ function ProvidersPage({
     setClaudeHooks(next);
   };
 
+  const onIdleAgentLimit = (next: string) => {
+    const limit = Number(next) as IdleAgentLimit;
+    saveIdleAgentLimit(limit);
+    setIdleAgentLimit(limit);
+    // A lower limit takes effect now, not at the next finished turn.
+    enforceHarnessIdleLimit();
+  };
+
   const onModelChange = (harness: HarnessId, model: string) => {
     if (project) {
       setProjectDefaultModel(project, harness, model);
@@ -2518,7 +3303,10 @@ function ProvidersPage({
     <>
       <ProviderAccountsSettings />
 
+      <UsageDisplaySettings />
+
       <Group
+        id="agent-clis"
         title="Agent CLIs"
         action={
           <Select
@@ -2530,8 +3318,8 @@ function ProvidersPage({
         }
         description={
           project
-            ? `These defaults apply to ${projectName(project)} only. A provider with Show in picker off is also kept out of new conversations started in this project.`
-            : "A provider is listed as installed once its CLI is found on your PATH. Uninstalled CLIs stay listed but are left out of the model picker, as are installed ones with Show in picker off. The model beside a provider is what its new conversations start with; Use by default picks the provider itself."
+            ? `These defaults apply to ${projectName(project)} only. A provider with Show in picker off is also kept out of new conversations started in this project. CLI paths remain global for MonoCode.`
+            : "A provider is listed as installed once its CLI is found on your PATH. Uninstalled CLIs stay listed but are left out of the model picker, as are installed ones with Show in picker off. The model beside a provider is what its new conversations start with; Use by default picks the provider itself. CLI paths are global for MonoCode and apply to every project."
         }
       >
         {HARNESSES.map((harness) => {
@@ -2577,6 +3365,21 @@ function ProvidersPage({
 
       <Group title="Advanced">
         <Row
+          id="idle-agents"
+          label="Keep idle agents ready"
+          description="A finished conversation keeps its agent CLI running for a few minutes, so a follow-up starts instantly. Each one can hold a few hundred MB of memory. Past this many, the one idle longest stops early; it resumes on your next message after a short restart. Choose None on a machine short on memory."
+        >
+          <Segmented
+            label="Keep idle agents ready"
+            value={String(idleAgentLimit)}
+            options={IDLE_AGENT_LIMITS.map((limit) => ({
+              value: String(limit),
+              label: limit === 0 ? "None" : String(limit),
+            }))}
+            onChange={onIdleAgentLimit}
+          />
+        </Row>
+        <Row
           id="claude-hooks"
           label="Claude Code hooks"
           description="Run the hooks configured in your settings.json files — PreToolUse command rewrites, blocks, notifications, and the rest — just as the Claude Code CLI would. Turn this off if a hook is misbehaving and you need the session back. Takes effect on the next turn."
@@ -2592,6 +3395,37 @@ function ProvidersPage({
   );
 }
 
+function UsageDisplaySettings() {
+  const showRemainingUsage = useShowRemainingUsage();
+  const maskEmails = useMaskEmails();
+  return (
+    <Group title="Usage and privacy">
+      <Row
+        id="show-remaining-usage"
+        label="Show remaining usage"
+        description="Fill usage meters with what is left in each limit instead of what has been used."
+      >
+        <Toggle
+          label="Show remaining usage"
+          on={showRemainingUsage}
+          onChange={saveShowRemainingUsage}
+        />
+      </Row>
+      <Row
+        id="mask-emails"
+        label="Mask account emails"
+        description="Blur account emails in Settings and the usage popover until you click one, so they stay out of screenshots."
+      >
+        <Toggle
+          label="Mask account emails"
+          on={maskEmails}
+          onChange={saveMaskEmails}
+        />
+      </Row>
+    </Group>
+  );
+}
+
 type AccountEditor = {
   provider: ProviderAccountProvider;
   accountId?: string;
@@ -2599,7 +3433,7 @@ type AccountEditor = {
 };
 
 function ProviderAccountsSettings() {
-  const [, setVersion] = useState(0);
+  const [version, setVersion] = useState(0);
   const [editor, setEditor] = useState<AccountEditor | null>(null);
   const [working, setWorking] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -2669,6 +3503,7 @@ function ProviderAccountsSettings() {
     try {
       await removeProviderAccountCredentials(account.provider, account.id);
       removeProviderAccount(account.provider, account.id);
+      clearCachedRateLimits(account.provider, account.id);
       if (
         editor?.provider === account.provider &&
         editor.accountId === account.id
@@ -2686,11 +3521,18 @@ function ProviderAccountsSettings() {
     }
   };
 
+  const identities = useProviderAccountIdentities(
+    PROVIDER_ACCOUNT_PROVIDERS.flatMap(providerAccounts),
+    version,
+  );
+  const usage = useProviderAccountUsage(version);
+
   return (
     <Group
       id="provider-accounts"
       title="Accounts"
       description="Create isolated sign-ins for providers that support account profiles. Account switching stays available from the usage control in the footer."
+      action={<AccountUsageRefresh usage={usage} />}
     >
       {PROVIDER_ACCOUNT_PROVIDERS.map((provider) => {
         const accounts = providerAccounts(provider);
@@ -2715,15 +3557,17 @@ function ProviderAccountsSettings() {
                   </div>
                 </div>
               </div>
-              <button
-                type="button"
-                disabled={Boolean(working)}
-                onClick={() => startAdd(provider)}
-                className="flex shrink-0 items-center gap-1.5 rounded-md border border-content/10 px-2.5 py-1 text-[12px] text-content/70 transition-transform duration-150 hover:bg-content/10 hover:text-content active:scale-[0.97] disabled:cursor-default disabled:opacity-40"
-              >
-                <Plus className="size-3.5" strokeWidth={1.75} aria-hidden />
-                Add account
-              </button>
+              {supportsAccountProfiles(provider) ? (
+                <button
+                  type="button"
+                  disabled={Boolean(working)}
+                  onClick={() => startAdd(provider)}
+                  className="flex shrink-0 items-center gap-1.5 rounded-md border border-content/10 px-2.5 py-1 text-[12px] text-content/70 transition-transform duration-150 hover:bg-content/10 hover:text-content active:scale-[0.97] disabled:cursor-default disabled:opacity-40"
+                >
+                  <Plus className="size-3.5" strokeWidth={1.75} aria-hidden />
+                  Add account
+                </button>
+              ) : null}
             </div>
             <div className="border-t border-content/5 bg-content/[0.015] pl-10">
               {accounts.map((account) => {
@@ -2731,6 +3575,9 @@ function ProviderAccountsSettings() {
                   editor?.provider === provider &&
                   editor.accountId === account.id;
                 const removing = working === `remove:${provider}:${account.id}`;
+                const identity = identities[identityKey(account)];
+                const orgTag = identityOrganizationTag(identity);
+                const limits = usage.usage[accountUsageKey(account)];
                 return editing ? (
                   <ProviderAccountEditor
                     key={account.id}
@@ -2750,16 +3597,34 @@ function ProviderAccountsSettings() {
                     className="flex h-12 items-center gap-3 border-b border-content/5 px-4 py-2 last:border-b-0"
                   >
                     <div className="min-w-0 flex-1">
-                      <div className="truncate text-[12px] text-content/85">
-                        {account.label}
+                      <div className="flex min-w-0 items-center gap-1.5">
+                        <span className="truncate text-[12px] text-content/85">
+                          {account.label}
+                        </span>
+                        {orgTag ? (
+                          <span className="max-w-[8rem] shrink-0 truncate rounded bg-content/[0.07] px-1 text-[9px] leading-4 text-content/50">
+                            {orgTag}
+                          </span>
+                        ) : null}
                       </div>
-                      <div className="mt-0.5 text-[10px] text-content/35">
-                        {account.isDefault
-                          ? "Provider CLI profile"
-                          : "Isolated profile"}
+                      <div className="mt-0.5 flex min-w-0 items-center gap-2.5 text-[10px]">
+                        <AccountStatusLabel
+                          status={accountStatus(limits, usage.now)}
+                          className="shrink-0"
+                        />
+                        <ProviderAccountSubtitle
+                          identity={identity}
+                          fallback={
+                            account.isDefault
+                              ? "Provider CLI profile"
+                              : "Isolated profile"
+                          }
+                          className="truncate text-content/30"
+                        />
                       </div>
                     </div>
-                    <div className="flex shrink-0 items-center gap-1">
+                    <AccountUsageMeters limits={limits} now={usage.now} />
+                    <div className="flex w-24 shrink-0 items-center justify-end gap-1">
                       {account.isDefault ? (
                         <span className="mr-1 text-[10px] font-medium uppercase tracking-wide text-content/30">
                           Default
@@ -2940,9 +3805,9 @@ function ProviderRow({
     models.length > 0 ? resolveModel(harness, selectedModel) : null;
 
   useEffect(() => {
-    if (!available || models.length > 0) return;
+    if (!available || hasLiveCatalog(harness)) return;
     void refreshHarnessCatalogs([harness]);
-  }, [available, harness, models.length]);
+  }, [available, harness]);
 
   return (
     <Row
@@ -2950,6 +3815,7 @@ function ProviderRow({
         <span className="flex items-center gap-2">
           <HarnessIcon harness={harness} className="size-4 shrink-0" />
           {HARNESS_TITLE[harness]}
+          <ProviderBinaryControl provider={harness} />
           {isDefault ? (
             <span className="rounded-full bg-content/10 px-1.5 py-0.5 text-[10px] font-medium uppercase tracking-wide text-content/60">
               Default
@@ -2968,6 +3834,14 @@ function ProviderRow({
           label={`${HARNESS_TITLE[harness]} model`}
           value={current.id}
           onChange={(next) => onModelChange(harness, next)}
+          onOpen={() => {
+            // Opening the dropdown is an explicit refresh: fallbacks keep
+            // `models` non-empty, and routine refreshes skip once a live
+            // catalog exists, so force this one past that skip.
+            if (available) {
+              void refreshHarnessCatalogs([harness], { force: true });
+            }
+          }}
           options={models.map((item) => ({
             value: item.id,
             label: item.name,
@@ -3011,216 +3885,6 @@ function archivedProjectLabel(path: string): string {
     projectKey(path),
     loadTabGroupLabels(),
     projectName(path),
-  );
-}
-
-function PluginsPage() {
-  const installed = useInstalledPlugins();
-  const [dir, setDir] = useState("");
-  const [draft, setDraft] = useState("");
-  const [error, setError] = useState<string | null>(null);
-  const [confirmId, setConfirmId] = useState<string | null>(null);
-  const [openId, setOpenId] = useState<string | null>(null);
-
-  useEffect(() => {
-    void pluginsDir()
-      .then(setDir)
-      .catch(() => {});
-  }, []);
-
-  const install = async () => {
-    setError(null);
-    let parsed: unknown;
-    try {
-      parsed = JSON.parse(draft);
-    } catch {
-      setError("That is not valid JSON.");
-      return;
-    }
-    try {
-      await installPlugin(parsed);
-      setDraft("");
-    } catch (cause) {
-      setError(cause instanceof Error ? cause.message : String(cause));
-    }
-  };
-
-  return (
-    <>
-      <Group title="Installed">
-        {installed.map((entry) => (
-          <Fragment key={entry.id}>
-            <Row
-              key={entry.id}
-              label={
-                <span className="flex items-center gap-2">
-                  {entry.label}
-                  <span className="text-[11px] font-normal text-content/35">
-                    {entry.id}
-                  </span>
-                </span>
-              }
-              description={
-                entry.error
-                  ? `Manifest problem: ${entry.error}`
-                  : (entry.description ?? undefined)
-              }
-            >
-              {entry.error ? null : (
-                <Toggle
-                  label={entry.label}
-                  on={entry.enabled}
-                  onChange={(on) => setPluginEnabled(entry.id, on)}
-                />
-              )}
-              {entry.manifest?.fields?.length ? (
-                <SecondaryButton
-                  onClick={() =>
-                    setOpenId((current) =>
-                      current === entry.id ? null : entry.id,
-                    )
-                  }
-                >
-                  {openId === entry.id ? "Hide" : "Details"}
-                </SecondaryButton>
-              ) : null}
-              {confirmId === entry.id ? (
-                <SecondaryButton
-                  danger
-                  onClick={() => {
-                    setConfirmId(null);
-                    void uninstallPlugin(entry.id);
-                  }}
-                >
-                  Delete manifest and token?
-                </SecondaryButton>
-              ) : (
-                <SecondaryButton onClick={() => setConfirmId(entry.id)}>
-                  Uninstall
-                </SecondaryButton>
-              )}
-            </Row>
-            {openId === entry.id ? <PluginDetails entry={entry} /> : null}
-          </Fragment>
-        ))}
-      </Group>
-
-      <Group title="Install">
-        <p className="pb-3 text-[12px] leading-relaxed text-content/45">
-          Paste a <code>plugin.json</code> below, or write the file yourself at{" "}
-          <code className="text-content/60">{dir}/&lt;id&gt;/plugin.json</code>{" "}
-          and hit Refresh. Format: <code>docs/plugins-for-ai.md</code>.
-        </p>
-        <textarea
-          value={draft}
-          onChange={(event) => setDraft(event.target.value)}
-          spellCheck={false}
-          placeholder={
-            '{ "id": "jira", "label": "Jira", "request": { "url": "…" } }'
-          }
-          className="h-40 w-full resize-y rounded-md border border-content/10 bg-content/5 p-2 font-mono text-[12px] outline-none"
-        />
-        {error ? (
-          <p className="pt-2 text-[12px] text-red-400">{error}</p>
-        ) : null}
-        <div className="flex items-center gap-2 pt-3">
-          <SecondaryButton
-            onClick={() => void install()}
-            disabled={!draft.trim()}
-          >
-            Install
-          </SecondaryButton>
-          <SecondaryButton onClick={() => void refreshPlugins()}>
-            <RefreshCw className="size-3.5" strokeWidth={1.75} />
-            Refresh
-          </SecondaryButton>
-        </div>
-      </Group>
-    </>
-  );
-}
-
-/** Per-plugin settings and the last lines it wrote. */
-function PluginDetails({ entry }: { entry: InstalledPlugin }) {
-  const fields = entry.manifest?.fields ?? [];
-  const [values, setValues] = useState<Record<string, string>>({});
-  const [saved, setSaved] = useState(false);
-  const log = usePluginLog(entry.id);
-
-  useEffect(() => {
-    void loadPluginConfig(entry.id)
-      .then((config) => {
-        if (!config || typeof config !== "object") return;
-        setValues(
-          Object.fromEntries(
-            Object.entries(config as Record<string, unknown>).map(
-              ([key, value]) => [key, value == null ? "" : String(value)],
-            ),
-          ),
-        );
-      })
-      .catch(() => {});
-  }, [entry.id]);
-
-  return (
-    <div className="mb-4 flex flex-col gap-3 rounded-md border border-content/10 bg-content/3 p-3">
-      {fields.length > 0 ? (
-        <div className="flex flex-col gap-2">
-          {fields.map((field) => (
-            <label key={field.key} className="flex items-center gap-3">
-              <span className="w-40 shrink-0 text-[12px] text-content/50">
-                {field.label ?? field.key}
-              </span>
-              <input
-                value={values[field.key] ?? ""}
-                onChange={(event) => {
-                  setSaved(false);
-                  setValues((prev) => ({
-                    ...prev,
-                    [field.key]: event.target.value,
-                  }));
-                }}
-                type={field.secret ? "password" : "text"}
-                placeholder={field.placeholder}
-                spellCheck={false}
-                className="h-7 min-w-0 flex-1 rounded-md border border-content/10 bg-content/5 px-2 text-[12px] outline-none"
-              />
-            </label>
-          ))}
-          <div className="flex items-center gap-2">
-            <SecondaryButton
-              onClick={() => {
-                void savePluginConfig(entry.id, values).then(() =>
-                  setSaved(true),
-                );
-              }}
-            >
-              Save settings
-            </SecondaryButton>
-            {saved ? (
-              <span className="text-[12px] text-content/45">
-                Saved. Commands pick it up on the next run.
-              </span>
-            ) : null}
-          </div>
-        </div>
-      ) : null}
-      <div>
-        <div className="pb-1 text-[11px] uppercase tracking-wide text-content/35">
-          Log
-        </div>
-        {log.length === 0 ? (
-          <p className="text-[12px] text-content/40">
-            Nothing written yet. Plugin stdout that is not a push lands here,
-            along with stderr and non-zero exits.
-          </p>
-        ) : (
-          <pre className="max-h-40 overflow-auto whitespace-pre-wrap break-all font-mono text-[11px] leading-snug text-content/60">
-            {log.slice(-12).join("\n")}
-          </pre>
-        )}
-      </div>
-    </div>
   );
 }
 
@@ -3384,6 +4048,134 @@ function formatDate(value: number): string {
   } catch {
     return "";
   }
+}
+
+/** Monos on or off, and each Mono the user has. */
+function MonosPage() {
+  const enabled = useSyncExternalStore(
+    subscribeMonosEnabled,
+    loadMonosEnabled,
+    () => true,
+  );
+  const menuBarIcon = useSyncExternalStore(
+    subscribeMonoMenuBarIcon,
+    loadMonoMenuBarIcon,
+    () => true,
+  );
+  const railPinned = useRailMonosPinned();
+  const snapshot = useSyncExternalStore(subscribeMonos, monosSnapshot);
+  const monos = useMemo(() => listMonos(), [snapshot]);
+
+  return (
+    <>
+      <Group title="Monos">
+        <Row
+          id="monos-enabled"
+          label="Show monos"
+          description="Agents of your own on the project rail. Each works on the projects you give it, remembers what matters and picks up habits it runs on its own. Turn this off to hide them."
+        >
+          <Toggle label="Show monos" on={enabled} onChange={saveMonosEnabled} />
+        </Row>
+        <Row
+          id="rail-monos-pinned"
+          label="Pin monos to the icon rail"
+          description="When the project rail is collapsed to icons, show each Mono at the top of the rail, above a divider, instead of inside the project picker."
+        >
+          <Toggle
+            label="Pin monos to the icon rail"
+            on={railPinned}
+            onChange={saveRailMonosPinned}
+            disabled={!enabled}
+          />
+        </Row>
+        {IS_MAC && (
+          <Row
+            id="mono-menu-bar-icon"
+            label="Menu bar icon"
+            description="Chat with a Mono or open the quick composer from the macOS menu bar. Turn this off to hide the icon."
+          >
+            <Toggle
+              label="Menu bar icon"
+              on={menuBarIcon}
+              onChange={saveMonoMenuBarIcon}
+            />
+          </Row>
+        )}
+      </Group>
+      <Group
+        id="mono-list"
+        title="Your monos"
+        description="Choose whether new sessions started by each Mono appear in the sidebar. Hidden sessions remain saved and can be opened from the Mono's chat. Add a Mono with the plus on the rail and choose its projects from its details."
+      >
+        {monos.length ? (
+          monos.map((mono) => <MonoRow key={mono.id} mono={mono} />)
+        ) : (
+          <p className="px-4 py-3.5 text-[12px] text-content/45">
+            No monos yet.
+          </p>
+        )}
+      </Group>
+    </>
+  );
+}
+
+function MonoRow({ mono }: { mono: Mono }) {
+  const look = monoLook(mono);
+  return (
+    <Row
+      label={
+        <span className="flex min-w-0 items-center gap-2">
+          <PixelMascot
+            name={look.mascot}
+            color={look.color}
+            still
+            className="size-4 shrink-0"
+          />
+          <span className="truncate">{look.name}</span>
+        </span>
+      }
+      description={
+        look.projects.length
+          ? `Works on ${monoProjectsPhrase(look.projects)}`
+          : "No projects yet"
+      }
+    >
+      <span className="text-[12px] leading-5 text-content/50">
+        Show Mono spawned session on the sidebar
+      </span>
+      <Toggle
+        label={`Show sessions started by ${look.name} in sidebar`}
+        on={mono.showStartedSessionsInSidebar !== false}
+        onChange={(on) =>
+          updateMono(mono.id, (entry) => ({
+            ...entry,
+            showStartedSessionsInSidebar: on,
+          }))
+        }
+      />
+      <ConfirmReset
+        label="Reset Mono"
+        title={`Reset ${look.name} to its defaults?`}
+        body={`Its soul goes back to the default and its name to ${defaultMonoName(look.mascot)}. Changes to its soul can't be recovered.`}
+        kept="Its conversation, projects, memory and habits will be kept."
+        failure="Could not reset the Mono."
+        onConfirm={() => resetMonoDefaults(mono.id)}
+      >
+        {(open, ref) => (
+          <button
+            ref={ref}
+            type="button"
+            title="Reset to defaults"
+            aria-label={`Reset ${look.name} to defaults`}
+            onClick={open}
+            className="grid size-7 place-items-center rounded-md text-content/40 transition-transform duration-150 hover:bg-content/10 hover:text-content active:scale-[0.96]"
+          >
+            <RotateCcw className="size-3.5" strokeWidth={1.75} />
+          </button>
+        )}
+      </ConfirmReset>
+    </Row>
+  );
 }
 
 function PageHeader({
@@ -3708,11 +4500,13 @@ function Select({
   value,
   options,
   onChange,
+  onOpen,
 }: {
   label: string;
   value: string;
   options: { value: string; label: string; icon?: ReactNode }[];
   onChange: (value: string) => void;
+  onOpen?: () => void;
 }) {
   const [open, setOpen] = useState(false);
   const [active, setActive] = useState(() =>
@@ -3738,6 +4532,11 @@ function Select({
       ),
     );
   }, [open, value, options]);
+
+  useEffect(() => {
+    if (open) onOpen?.();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open]);
 
   useEffect(() => {
     if (!open) return;
