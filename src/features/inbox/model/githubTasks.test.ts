@@ -610,7 +610,7 @@ describe("composeInboxMessage", () => {
         ),
         "Start with the parser.",
       ),
-    ).toContain("\n\nStart with the parser.");
+    ).toMatch(/^Start with the parser\.\n\nWork on this GitHub issue:/);
   });
 
   it("returns the typed text when there is no card", () => {

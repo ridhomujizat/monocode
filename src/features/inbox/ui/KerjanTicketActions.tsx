@@ -15,6 +15,7 @@ import {
   kerjanConnected,
   kerjanNextStatuses,
   kerjanTicketDetails,
+  kerjanTicketStatus,
   listKerjanMembers,
   moveKerjanTask,
   setKerjanAssignee,
@@ -84,14 +85,15 @@ export function KerjanTicketActions({
   }
 
   const task = ticket.kind === "task";
-  const nextStatuses = task ? kerjanNextStatuses(ticket.status) : [];
+  const status = kerjanTicketStatus(ticket);
+  const nextStatuses = task ? kerjanNextStatuses(status) : [];
   const assignee = members.find((member) => member.id === ticket.assignee_id);
 
   return (
     <>
       {task ? (
         <Menu
-          label={KERJAN_STATUS_LABELS[ticket.status] ?? ticket.status}
+          label={KERJAN_STATUS_LABELS[status] ?? status}
           disabled={busy || nextStatuses.length === 0}
           title={
             nextStatuses.length === 0
@@ -119,12 +121,10 @@ export function KerjanTicketActions({
       {task ? (
         <AssigneeMenu
           label={assignee?.name ?? "Unassigned"}
-          disabled={
-            busy || ticket.status === "done" || ticket.status === "canceled"
-          }
+          disabled={busy || status === "done" || status === "canceled"}
           members={members}
           memberId={memberId}
-          canUnassign={ticket.assignee_id != null && ticket.status === "todo"}
+          canUnassign={ticket.assignee_id != null && status === "todo"}
           onPick={(id) => void run(() => setKerjanAssignee(item, id))}
         />
       ) : null}
@@ -220,12 +220,16 @@ export function KerjanStoryContext({
               {story.key} {story.title}
             </span>
             <span className="shrink-0">
-              · {KERJAN_STATUS_LABELS[story.status] ?? story.status}
+              ·{" "}
+              {KERJAN_STATUS_LABELS[kerjanTicketStatus(story)] ??
+                kerjanTicketStatus(story)}
             </span>
             {onAddToChat ? (
               <button
                 type="button"
-                onClick={() => onAddToChat(kerjanStoryChatBody(story))}
+                onClick={() =>
+                  onAddToChat(kerjanStoryChatBody(story, members, ticket.key))
+                }
                 className="ml-auto shrink-0 hover:text-content"
               >
                 Add to chat
@@ -289,8 +293,9 @@ function KerjanTaskRow({
   assignee: string;
   onOpen?: () => void;
 }) {
-  const mark = kerjanStatusMark(task.status);
-  const label = KERJAN_STATUS_LABELS[task.status] ?? task.status;
+  const status = kerjanTicketStatus(task);
+  const mark = kerjanStatusMark(status);
+  const label = KERJAN_STATUS_LABELS[status] ?? status;
   return (
     <button
       type="button"
@@ -310,7 +315,7 @@ function KerjanTaskRow({
       <span className="shrink-0 tabular-nums text-content/45">{task.key}</span>
       <span
         className={`min-w-0 flex-1 truncate ${
-          task.status === "canceled" ? "line-through text-content/45" : ""
+          status === "canceled" ? "line-through text-content/45" : ""
         }`}
       >
         {task.title}
@@ -324,12 +329,50 @@ function KerjanTaskRow({
   );
 }
 
-export function kerjanStoryChatBody(story: KerjanTicket): string {
+/**
+ * The parent Story with its Tasks, skipping canceled ones, so the agent sees
+ * the whole scope and which Task is the one being worked on.
+ */
+export function kerjanStoryChatBody(
+  story: KerjanTicket,
+  members: readonly KerjanMember[] = [],
+  currentKey?: string,
+): string {
+  const storyStatus = kerjanTicketStatus(story);
   const description = story.description?.trim();
+  const tasks = (story.tasks ?? []).filter(
+    (task) => kerjanTicketStatus(task) !== "canceled",
+  );
+  const done = tasks.filter((task) => kerjanTicketStatus(task) === "done");
+  const taskLines = tasks.map((task) => {
+    const status = kerjanTicketStatus(task);
+    const assignee = members.find((member) => member.id === task.assignee_id);
+    const meta = [
+      task.task_type,
+      KERJAN_STATUS_LABELS[status] ?? status,
+      assignee?.name,
+    ].filter(Boolean);
+    const body = task.description?.trim();
+    return [
+      `- [${status === "done" ? "x" : " "}] ${task.key} ${task.title} (${meta.join(" · ")})${
+        task.key === currentKey ? " ← this ticket" : ""
+      }`,
+      body ? body.replace(/^/gm, "  ") : "",
+    ]
+      .filter(Boolean)
+      .join("\n");
+  });
   return [
-    `Story ${story.key} ${story.title}`.trim(),
+    `Parent story: ${story.key} ${story.title} (${
+      KERJAN_STATUS_LABELS[storyStatus] ?? storyStatus
+    })`,
     description ? `\n${description}` : "",
-  ].join("\n");
+    taskLines.length > 0
+      ? `\nTasks (${done.length}/${tasks.length} done):\n${taskLines.join("\n")}`
+      : "",
+  ]
+    .filter(Boolean)
+    .join("\n");
 }
 
 function AssigneeMenu({

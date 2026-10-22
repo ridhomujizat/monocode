@@ -1,5 +1,8 @@
 import { expect, test, type Page } from "@playwright/test";
 
+// Leave room for all five tabs beside Linux's title and window controls.
+test.use({ viewport: { width: 1440, height: 800 } });
+
 type Fixture = Window & {
   order: string[];
   placed: string[];
@@ -34,6 +37,10 @@ async function drag(
 }
 
 test.beforeEach(async ({ page }) => {
+  // Exercise the Linux CI window-controls path even when running on macOS.
+  await page.addInitScript(() => {
+    Object.defineProperty(navigator, "platform", { value: "Linux x86_64" });
+  });
   await page.goto("/tests/browser/title-tab-reorder.html");
   await expect(page.locator("[data-title-tab-id]")).toHaveCount(5);
 });

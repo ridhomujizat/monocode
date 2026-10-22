@@ -1339,5 +1339,6 @@ export function composeInboxMessage(
   const note = text.trim();
   if (!prompt) return note;
   if (!note) return prompt;
-  return `${prompt}\n\n${note}`;
+  // The user's own words lead; the item context follows as reference.
+  return `${note}\n\n${prompt}`;
 }
