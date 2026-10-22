@@ -224,6 +224,16 @@ async function activeSprintTickets(
   return lists.flat();
 }
 
+/**
+ * Kerjan keeps a canceled ticket's last status and marks the cancel with
+ * `canceled_at`, so "canceled" is derived here rather than read from `status`.
+ */
+export function kerjanTicketStatus(
+  ticket: Pick<KerjanTicket, "status" | "canceled_at">,
+): string {
+  return ticket.canceled_at ? "canceled" : ticket.status;
+}
+
 export function kerjanTicketToIssue(
   ticket: KerjanTicket,
   names: ReadonlyMap<number, string>,
@@ -240,6 +250,7 @@ export function kerjanTicketToIssue(
   const parent = ticket.story_key
     ? `${ticket.story_key} ${ticket.story_title ?? ""}`.trim()
     : "";
+  const status = kerjanTicketStatus(ticket);
   return {
     provider: "kerjan",
     kind: "kerjan",
@@ -248,8 +259,8 @@ export function kerjanTicketToIssue(
     number: kerjanKeyNumber(ticket.key),
     title: ticket.title,
     url: "",
-    state: KERJAN_STATUS_LABELS[ticket.status] ?? ticket.status,
-    stateType: ticket.status,
+    state: KERJAN_STATUS_LABELS[status] ?? status,
+    stateType: status,
     updatedAt: ticket.done_at || ticket.canceled_at || ticket.created_at,
     labels,
     assignees: assignee ? [{ login: assignee }] : [],

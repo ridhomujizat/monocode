@@ -231,6 +231,20 @@ describe("kerjan filters", () => {
     expect(await shown({})).toEqual(["PRD-1", "PRD-2"]);
   });
 
+  it("treats a ticket with canceled_at as canceled whatever its status", async () => {
+    const issue = kerjanTicketToIssue(
+      ticket({
+        key: "PRD-4",
+        status: "todo",
+        canceled_at: "2026-09-25T06:40:15Z",
+      }),
+      new Map(),
+      sprints,
+    );
+    expect(issue.stateType).toBe("canceled");
+    expect(issue.state).toBe("Canceled");
+  });
+
   it("shows exactly the selected statuses", async () => {
     expect(await shown({ kerjanStatuses: ["canceled"] })).toEqual(["PRD-3"]);
     expect(await shown({ kerjanStatuses: ["todo", "done"] })).toEqual([
