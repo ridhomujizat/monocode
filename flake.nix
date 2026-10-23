@@ -64,6 +64,24 @@
             echo "monocode: node $(node -v), $(rustc --version)"
           '';
         };
+
+        # Phone app (mobile/). build-native-link.mjs calls rustup to add the
+        # iOS/Android targets, which nixpkgs' rustc cannot provide. NoCC keeps
+        # nixpkgs' Apple SDK out of the environment so xcodebuild and cargo
+        # use the full Xcode toolchain for the iphoneos SDKs.
+        mobile = pkgs.mkShellNoCC {
+          packages = with pkgs; [ nodejs_22 rustup ]
+            ++ lib.optionals stdenv.hostPlatform.isDarwin [ cocoapods ];
+
+          shellHook = ''
+            ${pkgs.lib.optionalString pkgs.stdenv.hostPlatform.isDarwin ''
+              [ -d /Applications/Xcode.app ] && \
+                export DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer
+            ''}
+            rustup default >/dev/null 2>&1 || rustup default stable
+            echo "monocode mobile: node $(node -v), $(rustc --version)"
+          '';
+        };
       });
     };
 }
