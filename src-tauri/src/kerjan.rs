@@ -22,6 +22,9 @@ const ALLOWED_TOOLS: [&str; 9] = [
     "set_assignee",
     "update_ticket",
 ];
+// Workspace-wide tools need an explicit `workspace` argument once the token
+// belongs to more than one Workspace; the X-Workspace-ID header is not enough.
+const WORKSPACE_TOOLS: [&str; 2] = ["list_sprints", "list_tickets"];
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -144,6 +147,7 @@ fn normalize_base_url(raw: &str) -> Result<String, String> {
 }
 
 fn call_tool(config: &KerjanConfig, tool: &str, arguments: Value) -> Result<Value, String> {
+    let arguments = with_workspace(tool, arguments, &config.workspace_id);
     let agent = ureq::AgentBuilder::new().timeout(HTTP_TIMEOUT).build();
     let payload = json!({
         "jsonrpc": "2.0",
@@ -173,6 +177,16 @@ fn call_tool(config: &KerjanConfig, tool: &str, arguments: Value) -> Result<Valu
         .into_string()
         .map_err(|_| "Kerjan returned an unreadable response".to_string())?;
     parse_tool_result(&body)
+}
+
+fn with_workspace(tool: &str, mut arguments: Value, workspace_id: &str) -> Value {
+    if WORKSPACE_TOOLS.contains(&tool) {
+        if let Some(map) = arguments.as_object_mut() {
+            map.entry("workspace")
+                .or_insert_with(|| Value::String(workspace_id.to_string()));
+        }
+    }
+    arguments
 }
 
 fn parse_tool_result(body: &str) -> Result<Value, String> {
@@ -285,6 +299,15 @@ fn write_secret_file(path: &Path, value: &str) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn adds_workspace_to_workspace_tools_only() {
+        let args = with_workspace("list_tickets", json!({ "status": "todo" }), "7");
+        assert_eq!(args, json!({ "status": "todo", "workspace": "7" }));
+        let kept = with_workspace("list_sprints", json!({ "workspace": "PRD" }), "7");
+        assert_eq!(kept, json!({ "workspace": "PRD" }));
+        assert_eq!(with_workspace("whoami", json!({}), "7"), json!({}));
+    }
 
     #[test]
     fn normalizes_base_url() {
