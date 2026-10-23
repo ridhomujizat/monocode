@@ -12,6 +12,7 @@ import { Linking, Platform, ScrollView, StyleSheet, Text, View } from "react-nat
 import { FileTypeIcon } from "@/features/files/FileTypeIcon";
 import { withAlpha, themedStyles, useColors } from "@/ui/theme";
 
+import { CopyButton } from "./CopyButton";
 import {
   numberWords,
   parseMarkdown,
@@ -134,16 +135,22 @@ const BlockView = memo(function BlockView({ block, fade }: { block: MarkdownBloc
       );
     case "code":
       return (
-        <ScrollView
-          horizontal
-          showsHorizontalScrollIndicator={false}
-          style={styles.codeBlock}
-          contentContainerStyle={styles.codeContent}
-        >
-          <Text style={styles.codeText} selectable>
-            {block.text}
-          </Text>
-        </ScrollView>
+        <View style={styles.codeBlock}>
+          <ScrollView
+            horizontal
+            showsHorizontalScrollIndicator={false}
+            contentContainerStyle={styles.codeContent}
+          >
+            <Text style={styles.codeText} selectable>
+              {block.text}
+            </Text>
+          </ScrollView>
+          {block.text.trim() ? (
+            <View style={styles.codeCopy}>
+              <CopyButton text={block.text} label="Copy code" />
+            </View>
+          ) : null}
+        </View>
       );
     case "list":
       return (
@@ -391,6 +398,12 @@ const useStyles = themedStyles((colors) => ({
   },
   codeContent: {
     padding: 12,
+  },
+  codeCopy: {
+    alignItems: "flex-end",
+    paddingRight: 8,
+    paddingBottom: 6,
+    marginTop: -6,
   },
   codeText: {
     color: withAlpha(colors.content, 0.85),

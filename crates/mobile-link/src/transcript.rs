@@ -302,6 +302,21 @@ fn parse_blocks(id: &str, text: &str, offset: usize) -> Vec<Block> {
             let last = group.is_empty()
                 || index + 1 == count
                 || string(&block.rows[index + 1].presentation, "group") != group;
+            // The last line of a fence carries the whole fence for its copy button.
+            let copy_text = (last && block.rows[index].kind == "code").then(|| {
+                let lines = block.rows[..=index]
+                    .iter()
+                    .rev()
+                    .take_while(|row| string(&row.presentation, "group") == group)
+                    .map(|row| {
+                        row.runs
+                            .iter()
+                            .map(|run| run.text.as_str())
+                            .collect::<String>()
+                    })
+                    .collect::<Vec<_>>();
+                lines.into_iter().rev().collect::<Vec<_>>().join("\n")
+            });
             let nested_list = index > 0
                 && block.rows[index].presentation["listDepth"]
                     .as_u64()
@@ -312,6 +327,9 @@ fn parse_blocks(id: &str, text: &str, offset: usize) -> Vec<Block> {
             let row = Arc::make_mut(&mut block.rows[index]);
             row.presentation["first"] = json!(first);
             row.presentation["last"] = json!(last);
+            if let Some(text) = copy_text.filter(|text| !text.trim().is_empty()) {
+                row.action = json!({"type":"copy","copyText":text});
+            }
             row.presentation["gap"] = json!(if index == 0 {
                 if block_index == 0 && offset == 0 {
                     0
@@ -957,6 +975,11 @@ mod tests {
         assert_eq!(code[0].presentation["gap"], 12);
         assert_eq!(code[1].presentation["gap"], 0);
         assert_eq!(code[1].presentation["last"], true);
+        assert_eq!(code[0].action, Value::Null);
+        assert_eq!(
+            code[1].action,
+            json!({"type":"copy","copyText":"const a = 1;\nconst b = 2;"})
+        );
         let table: Vec<_> = rows.iter().filter(|r| r.kind == "table").collect();
         assert_eq!(table[0].presentation["header"], true);
         assert_eq!(table[0].presentation["columns"], 2);

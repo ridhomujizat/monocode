@@ -537,12 +537,20 @@ final class TranscriptRowModel {
           runs, style: style, size: 13, line: 19, color: contentColor.withAlphaComponent(0.85),
           mono: true)
         let measured = TranscriptTypography.measure(value, width: 1_000_000, line: style.line(19))
+        let copy = !(action["copyText"] as? String ?? "").isEmpty
         let codeTop: CGFloat = first ? 12 : 0
-        let codeBottom: CGFloat = last ? 12 : 0
+        // The fence's copy button sits in its own strip so scrolled code never covers it.
+        let codeBottom: CGFloat = last ? (copy ? 36 : 12) : 0
         let h = codeTop + style.line(19) + codeBottom
         horizontalRect = CGRect(x: x, y: y, width: width, height: h)
         horizontalWidth = max(width, measured.width + 24)
         add(value, x: x + 12, y: y + codeTop, width: max(1, measured.width + 1), height: style.line(19))
+        if copy {
+          let icon = CGRect(x: horizontalRect.maxX - 28, y: y + h - 26, width: 16, height: 16)
+          mark("icon:copy", x: icon.minX, y: icon.minY, size: 16, alpha: 0.4)
+          hits.append(
+            TranscriptHit(rect: icon.insetBy(dx: -8, dy: -8), action: action, label: "Copy code"))
+        }
         height = y + h + bottom
       } else if kind == "table" {
         let cells = row["cells"] as? [[[String: Any]]] ?? []

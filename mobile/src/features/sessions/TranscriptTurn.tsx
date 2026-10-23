@@ -1,6 +1,5 @@
-import * as Clipboard from "expo-clipboard";
 import * as Haptics from "expo-haptics";
-import { createContext, memo, use, useEffect, useRef, useState } from "react";
+import { createContext, memo, use, useEffect, useState } from "react";
 import { Pressable, StyleSheet, Text, View } from "react-native";
 import Svg, { Path } from "react-native-svg";
 
@@ -17,6 +16,7 @@ import { Icon, type IconName } from "@/ui/Icon";
 import { Shimmer } from "@/ui/Shimmer";
 import { withAlpha, themedStyles, useColors } from "@/ui/theme";
 
+import { CopyButton } from "./CopyButton";
 import { Markdown } from "./Markdown";
 import { ProviderLogo } from "./ProviderLogo";
 import { sessionErrorContent, type SessionErrorNotice } from "./sessionError";
@@ -193,35 +193,6 @@ function TurnFooter({ turn }: { turn: Turn }) {
         </>
       ) : null}
     </View>
-  );
-}
-
-function CopyButton({ text }: { text: string }) {
-  const colors = useColors();
-  const styles = useStyles();
-  const [copied, setCopied] = useState(false);
-  const timer = useRef<ReturnType<typeof setTimeout>>(undefined);
-  useEffect(() => () => clearTimeout(timer.current), []);
-  return (
-    <Pressable
-      onPress={async () => {
-        try {
-          await Clipboard.setStringAsync(text);
-        } catch {
-          return;
-        }
-        void Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
-        setCopied(true);
-        clearTimeout(timer.current);
-        timer.current = setTimeout(() => setCopied(false), 2000);
-      }}
-      accessibilityRole="button"
-      accessibilityLabel={copied ? "Copied" : "Copy response"}
-      hitSlop={6}
-      style={({ pressed }) => [styles.footerButton, pressed && styles.footerButtonActive]}
-    >
-      <Icon name={copied ? "check" : "copy"} size={16} color={withAlpha(colors.content, 0.4)} />
-    </Pressable>
   );
 }
 

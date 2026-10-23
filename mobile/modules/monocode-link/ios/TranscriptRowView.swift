@@ -228,7 +228,7 @@ private final class TranscriptDecorationCanvas: UIView {
     }
     for mark in model.marks {
       let isCopy =
-        model.kind == "footer" && mark.rect.minX == 20
+        (model.kind == "code" || model.kind == "footer" && mark.rect.minX == 20)
         && model.hits.first?.action["type"] as? String == "copy"
       if copied && isCopy {
         model.contentColor.withAlphaComponent(0.08).setFill()
