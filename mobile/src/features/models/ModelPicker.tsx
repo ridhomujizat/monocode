@@ -3,7 +3,7 @@ import { Host, Slider } from "@expo/ui/swift-ui";
 import { accessibilityLabel, tint } from "@expo/ui/swift-ui/modifiers";
 import * as Haptics from "expo-haptics";
 import { router } from "expo-router";
-import { Fragment, useState } from "react";
+import { Fragment, useDeferredValue, useMemo, useState } from "react";
 import {
   ActivityIndicator,
   Platform,
@@ -37,6 +37,21 @@ import { AccountPicker } from "./AccountPicker";
 import { useAccountUsage } from "./useAccountUsage";
 
 /** Efforts past "high" in amber, as the desktop's effort tiles warm up. */
+// Rows a section lists before "Show all": a catalog can hold hundreds of
+// models, and the list is a plain ScrollView.
+const SECTION_LIMIT = 40;
+
+/** Whether every word of the search appears in the model's name, id or provider, or the section's label. */
+export function matchesModel(
+  words: readonly string[],
+  entry: CatalogModel,
+  sectionLabel: string,
+) {
+  const text =
+    `${entry.name} ${entry.id} ${entry.provider ?? ""} ${sectionLabel}`.toLowerCase();
+  return words.every((word) => text.includes(word));
+}
+
 const HOT_EFFORT = /^(xhigh|max|ultra|ultracode|ultrathink)$/;
 
 /** An option with its choices, each with an icon and a line under it if it has them. */
@@ -257,24 +272,31 @@ export function ModelList({
   );
   // Sections opened or folded by hand; the rest follow the chosen provider.
   const [folded, setFolded] = useState<Record<string, boolean>>({});
+  // Sections listing every model rather than the first SECTION_LIMIT.
+  const [expanded, setExpanded] = useState<Record<string, boolean>>({});
 
-  const needle = query.trim().toLowerCase();
-  const searching = needle.length > 0;
+  // Typing stays responsive while a large catalog filters behind it.
+  const deferredQuery = useDeferredValue(query);
+  const words = useMemo(
+    () => deferredQuery.trim().toLowerCase().split(/\s+/).filter(Boolean),
+    [deferredQuery],
+  );
+  const searching = words.length > 0;
   // Each provider with its models, or with its matches when searching.
-  const sections =
-    catalog?.harnesses
-      .map((harness) => ({
-        ...harness,
-        models: catalog.models.filter(
-          (entry) =>
-            entry.harness === harness.id &&
-            (!searching ||
-              [entry.name, entry.id, entry.provider ?? ""].some((field) =>
-                field.toLowerCase().includes(needle),
-              )),
-        ),
-      }))
-      .filter((section) => !searching || section.models.length > 0) ?? [];
+  const sections = useMemo(
+    () =>
+      catalog?.harnesses
+        .map((harness) => ({
+          ...harness,
+          models: catalog.models.filter(
+            (entry) =>
+              entry.harness === harness.id &&
+              (!searching || matchesModel(words, entry, harness.label)),
+          ),
+        }))
+        .filter((section) => !searching || section.models.length > 0) ?? [],
+    [catalog, words, searching],
+  );
   const isOpen = (harness: string) =>
     searching || !(folded[harness] ?? harness !== choice?.harness);
   const toggle = (harness: string) => {
@@ -406,7 +428,10 @@ export function ModelList({
                           No models from this provider yet.
                         </Text>
                       ) : (
-                        section.models.map((entry, index) => {
+                        (expanded[section.id]
+                          ? section.models
+                          : section.models.slice(0, SECTION_LIMIT)
+                        ).map((entry, index) => {
                           const selected = entry.id === choice.model;
                           return (
                             <Fragment key={entry.id}>
@@ -462,6 +487,29 @@ export function ModelList({
                           );
                         })
                       )}
+                      {!expanded[section.id] &&
+                      section.models.length > SECTION_LIMIT ? (
+                        <>
+                          <View style={styles.divider} />
+                          <Pressable
+                            accessibilityRole="button"
+                            onPress={() =>
+                              setExpanded((current) => ({
+                                ...current,
+                                [section.id]: true,
+                              }))
+                            }
+                            style={({ pressed }) => [
+                              styles.row,
+                              pressed && styles.pressed,
+                            ]}
+                          >
+                            <Text style={styles.showAll}>
+                              Show all {section.models.length}
+                            </Text>
+                          </Pressable>
+                        </>
+                      ) : null}
                     </View>
                   ) : null}
                 </View>
@@ -734,6 +782,10 @@ const useStyles = themedStyles((colors) => ({
     paddingTop: 24,
   },
   // Lined up with the headings above, as the rows are.
+  showAll: {
+    color: colors.accent,
+    fontSize: 15,
+  },
   groupEmpty: {
     paddingHorizontal: 4,
     paddingVertical: 12,

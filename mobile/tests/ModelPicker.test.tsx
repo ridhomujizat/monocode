@@ -2,12 +2,16 @@ import { act, type ReactNode } from "react";
 import { createRoot } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import { EffortControl, ModelList } from "@/features/models/ModelPicker";
+import {
+  EffortControl,
+  matchesModel,
+  ModelList,
+} from "@/features/models/ModelPicker";
 import {
   useForgetChoiceOnLeave,
   useSessionChoice,
 } from "@/features/models/sessionChoice";
-import type { ModelCatalog } from "@/features/models/types";
+import type { CatalogModel, ModelCatalog } from "@/features/models/types";
 import type { Project } from "@/features/workspace/types";
 
 const platform = vi.hoisted(() => ({ OS: "ios" }));
@@ -310,5 +314,22 @@ describe("effort slider", () => {
     act(() => crossSlider.props?.onValueChange?.(4));
     expect(onChange).toHaveBeenCalledWith("max");
     act(() => root.unmount());
+  });
+});
+
+describe("model search", () => {
+  const opus: CatalogModel = {
+    id: "omp:anthropic/claude-opus-4-6",
+    harness: "omp",
+    name: "Claude Opus 4.6",
+    provider: "Anthropic",
+    settings: [],
+  };
+
+  it("matches every word across name, id, provider and section", () => {
+    expect(matchesModel(["opus", "claude"], opus, "omp")).toBe(true);
+    expect(matchesModel(["omp", "opus"], opus, "omp")).toBe(true);
+    expect(matchesModel(["anthropic", "4.6"], opus, "omp")).toBe(true);
+    expect(matchesModel(["opus", "gpt"], opus, "omp")).toBe(false);
   });
 });
